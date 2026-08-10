@@ -1,3 +1,5 @@
+Ver CLAUDE.md para las instrucciones completas del proyecto.
+
 <!-- BEGIN:nextjs-agent-rules -->
 
 # This is NOT the Next.js you know

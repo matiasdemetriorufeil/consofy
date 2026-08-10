@@ -1,26 +1,199 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+@custom-variant dark (&:is(.dark *));
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+
+  --font-sans: var(--font-body);
+  --font-display: var(--font-display);
+  --font-body: var(--font-body);
+  --font-mono: var(--font-mono);
+  --font-heading: var(--font-display);
+
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+
+  /* Superficies y texto propios del sistema, sin equivalente directo en los
+     slots de shadcn (que solo tiene background/foreground/card/muted). */
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-surface: var(--surface);
+  --color-canvas: var(--canvas);
+
+  /* Alias del nombre pedido para el texto sobre --primary. Convive con
+     --color-primary-foreground (arriba), que es el nombre que ya usan los
+     componentes de shadcn instalados: no lo reemplazo para no romperlos. */
+  --color-primary-fg: var(--primary-foreground);
+
+  /* Semánticos de estado y prioridad: no decorativos, comunican información. */
+  --color-urgente: var(--urgente);
+  --color-alta: var(--alta);
+  --color-media: var(--media);
+  --color-baja: var(--baja);
+  --color-resuelto: var(--resuelto);
+
+  /* Radios chicos y consistentes. Nada de píldoras salvo en badges
+     (que ya usan rounded-4xl, suficiente para ser pill con este --radius). */
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+
+  /* Espaciado: se mantiene la base de Tailwind (0.25rem). Se declara acá
+     para que sea una decisión explícita y no un default implícito. */
+  --spacing: 0.25rem;
+
+  /* Escala tipográfica: pensada para densidad en el panel (tablas, listas de
+     reclamos) y lectura cómoda en el formulario público desde el celular. */
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1rem;
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base: 0.9375rem;
+  --text-base--line-height: 1.5rem;
+  --text-lg: 1.0625rem;
+  --text-lg--line-height: 1.5rem;
+  --text-xl: 1.25rem;
+  --text-xl--line-height: 1.75rem;
+  --text-2xl: 1.5rem;
+  --text-2xl--line-height: 2rem;
+  --text-3xl: 1.875rem;
+  --text-3xl--line-height: 2.25rem;
+  --text-4xl: 2.25rem;
+  --text-4xl--line-height: 2.5rem;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+:root {
+  /* Paleta base: superficies y texto (modo claro únicamente por ahora). */
+  --ink: #16181d;
+  --ink-muted: #5b6169;
+  --surface: #ffffff;
+  --canvas: #f3f5f4;
+
+  /* Marca. */
+  --primary: #14484f;
+  --primary-foreground: #ffffff;
+
+  /* Semánticos de estado y prioridad. */
+  --urgente: #b42318;
+  --alta: #b54708;
+  --media: #175cd3;
+  --baja: #5b6169;
+  --resuelto: #067647;
+
+  /* Slots semánticos de shadcn, retargeteados a la paleta de arriba para que
+     todos los primitives instalados (button, card, dialog, etc.) hereden el
+     look del sistema sin tocar cada componente uno por uno. */
+  --background: var(--canvas);
+  --foreground: var(--ink);
+  --card: var(--surface);
+  --card-foreground: var(--ink);
+  --popover: var(--surface);
+  --popover-foreground: var(--ink);
+  /* secondary/muted/accent usan --border (no --canvas): al ser el fondo de
+     toda la página, --canvas dejaba invisibles los botones secondary, los
+     estados hover/foco de menús y tabs, y los Skeleton. */
+  --secondary: var(--border);
+  --secondary-foreground: var(--ink);
+  --muted: var(--border);
+  --muted-foreground: var(--ink-muted);
+  --accent: var(--border);
+  --accent-foreground: var(--ink);
+  --destructive: var(--urgente);
+  --border: #dde1e0;
+  --input: var(--border);
+  --ring: var(--primary);
+  --radius: 0.375rem;
+
+  /* chart-* y sidebar-* quedan con los valores por defecto de shadcn: este
+     paso no incluye gráficos ni navegación lateral. */
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
+  }
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
+    @apply font-display;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+@layer utilities {
+  /* Cifras tabulares en la monoespaciada: unidades, códigos y cantidades
+     deben alinearse en columna incluso cuando cambian de valor. */
+  .font-mono {
+    font-feature-settings:
+      "tnum" 1,
+      "zero" 1;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
