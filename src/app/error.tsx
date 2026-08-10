@@ -5,7 +5,7 @@ import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
 
-export default function GlobalError({
+export default function ErrorPage({
   error,
   reset,
 }: {
@@ -20,10 +20,10 @@ export default function GlobalError({
     <main className="flex flex-1 flex-col items-center justify-center gap-3 px-4 text-center">
       <p className="text-ink-muted font-mono text-sm">Error</p>
       <h1 className="text-ink text-2xl font-bold sm:text-3xl">
-        Hubo un error al cargar esta página
+        Esta página no cargó
       </h1>
       <p className="text-ink-muted max-w-sm text-base">
-        Podés reintentar la carga o volver al inicio.
+        Encontró un error inesperado.
       </p>
       <div className="mt-2 flex flex-wrap justify-center gap-2">
         <Button onClick={() => reset()}>Reintentar</Button>

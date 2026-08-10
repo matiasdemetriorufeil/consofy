@@ -81,6 +81,42 @@ Regla clave: la lógica de dominio vive en `src/features/<dominio>/`;
 🔖 Código: {codigo}
 ```
 
+## Voz y escritura
+
+- Las palabras de la interfaz son material de diseño, no decoración. Están
+  para que algo sea más fácil de entender y de usar.
+- Nombrar las cosas como las reconoce el usuario, nunca como está construido
+  el sistema. Un administrador gestiona "avisos a los vecinos", no
+  "broadcasts". Un vecino carga un "reclamo", no un "ticket" (aunque en el
+  código la tabla se llame tickets).
+- Voz activa y sentence case. Los botones dicen exactamente qué pasa al
+  usarlos: "Enviar por WhatsApp", no "Confirmar".
+- Una acción conserva el mismo nombre en todo el flujo: si el botón dice
+  "Publicar aviso", el toast dice "Aviso publicado".
+- Los errores explican qué pasó y cómo seguir. No se disculpan, no son vagos
+  y no culpan al usuario.
+- Las pantallas vacías son una invitación a actuar, no un cartel de tristeza.
+  Dicen qué va a aparecer ahí y ofrecen la acción para empezar.
+- Cada elemento hace un solo trabajo: una etiqueta etiqueta, un ejemplo
+  ejemplifica. Nada hace doble función.
+- Español rioplatense: voseo ("ingresá", "cargá", "revisá"), sin "usted".
+- Sin signos de admiración salvo que haya algo genuino que celebrar.
+
+## Glosario
+
+Vocabulario del dominio en las dos direcciones, para que la UI y el código no
+se contaminen entre sí:
+
+| Concepto     | En la UI          | En el código |
+| ------------ | ----------------- | ------------ |
+| reclamo      | reclamo           | ticket       |
+| edificio     | edificio          | building     |
+| unidad       | departamento      | unit         |
+| vecino       | vecino            | person       |
+| aviso masivo | aviso             | announcement |
+| recordatorio | recordatorio      | reminder     |
+| agrupación   | problema en común | incident     |
+
 ## Comandos
 
 - `npm run dev` — levanta el servidor de desarrollo.
