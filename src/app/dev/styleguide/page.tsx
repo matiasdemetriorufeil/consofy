@@ -353,9 +353,9 @@ export default function StyleguidePage() {
                   </FieldDescription>
                 </Field>
                 <Field data-invalid="true">
-                  <FieldLabel htmlFor="sg-unidad">Unidad funcional</FieldLabel>
+                  <FieldLabel htmlFor="sg-unidad">Departamento</FieldLabel>
                   <Input id="sg-unidad" aria-invalid defaultValue="" />
-                  <FieldError>Ingresá tu unidad (ej: 5°B).</FieldError>
+                  <FieldError>Ingresá tu departamento (ej: 5°B).</FieldError>
                 </Field>
               </FieldGroup>
             </FieldSet>

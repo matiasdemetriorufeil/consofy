@@ -48,6 +48,24 @@ Regla clave: la lógica de dominio vive en `src/features/<dominio>/`;
   negocio.
 - Zona horaria de presentación: `America/Argentina/Cordoba`.
 
+## Acceso a datos
+
+- Todo el acceso a datos desde el servidor pasa por Drizzle (`src/db/index.ts`).
+  Nada de queries directas a Postgres por fuera de Drizzle.
+- La autorización vive en la capa de aplicación: cada query y cada Server
+  Action filtra explícitamente por organización y valida la sesión ANTES de
+  tocar datos. Esta es la defensa principal.
+- RLS se activa igualmente en todas las tablas, como defensa en profundidad:
+  protege a los roles `anon` y `authenticated`, que son alcanzables
+  directamente desde el navegador vía PostgREST y el cliente de Supabase, sin
+  pasar por el servidor de Next.
+- El cliente de Supabase en el navegador se usa SOLO para Auth y Storage,
+  nunca para leer ni escribir tablas de negocio.
+- Dos conexiones a Postgres, porque Supabase las trata distinto (ver
+  `.env.example`): `DATABASE_URL` (pooler de transacciones, puerto 6543) para
+  la app en runtime, sin prepared statements; `MIGRATION_DATABASE_URL`
+  (pooler de sesión, puerto 5432) para `drizzle-kit`.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
@@ -125,6 +143,15 @@ se contaminen entre sí:
 - `npm run lint` — corre ESLint.
 - `npm run format` — formatea todo el proyecto con Prettier.
 - `npm run format:check` — verifica formato sin escribir cambios.
+- `npm run db:generate` — genera un archivo de migración SQL a partir de los
+  cambios en `src/db/schema/`. Usar siempre que cambia el esquema.
+- `npm run db:migrate` — aplica las migraciones pendientes contra la base.
+  Usar siempre después de `db:generate`, tanto en local como en deploy.
+- `npm run db:push` — sincroniza el esquema directo contra la base, sin
+  generar migración. **Nunca en este proyecto**: se pierde el historial de
+  cambios que da `generate` + `migrate`. Existe solo por si hace falta
+  prototipar algo descartable en una base personal, nunca contra Supabase.
+- `npm run db:studio` — abre Drizzle Studio para inspeccionar la base.
 
 ## Qué NO hacer
 
