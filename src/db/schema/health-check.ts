@@ -4,4 +4,4 @@ import { pgTable, serial } from "drizzle-orm/pg-core";
 // convención de id uuid + created_at/updated_at del resto de las tablas.
 export const healthCheck = pgTable("health_check", {
   id: serial("id").primaryKey(),
-});
+}).enableRLS();
