@@ -78,9 +78,29 @@ Regla clave: la lógica de dominio vive en `src/features/<dominio>/`;
   una unidad dados de baja no bloqueen reutilizar ese valor. `public_token`
   de `buildings` es la excepción: único de forma TOTAL, porque un token de
   URL pública no se reutiliza aunque el edificio esté dado de baja.
-- `updated_at` lo pone un trigger de base (`set_updated_at()`, aplicado a
-  `organizations`, `buildings` y `units`), no la aplicación. Las Server
+- `updated_at` lo pone un trigger de base (`set_updated_at()`, con
+  `search_path` fijo por seguridad, aplicado a `organizations`, `buildings`,
+  `units`, `people` y `unit_occupancies`), no la aplicación. Las Server
   Actions nunca lo setean a mano.
+- El teléfono es la identidad del vecino (sin registro ni login, se busca o
+  se crea por teléfono al cargar un reclamo), pero `people.phone_e164` es
+  NULLABLE: el administrador tiene que poder cargar a mano a alguien de
+  quien todavía no tiene el teléfono. Único dentro de la organización,
+  parcial (`WHERE deleted_at IS NULL`); NULL no necesita `coalesce` acá
+  porque dos teléfonos desconocidos no son la misma persona.
+- Estados derivados, nunca columnas propias: no hay `buildings.active` como
+  columna aparte (ya existe, se deriva de `deleted_at`) ni
+  `unit_occupancies.active` (se deriva de `ended_on IS NULL`). Guardar el
+  estado en dos lugares garantiza que en algún UPDATE se desincronicen.
+- Ocupaciones vigentes solapadas (misma unidad + persona + rol, las dos con
+  `ended_on IS NULL`): se resuelve con un índice único parcial, no con una
+  exclusion constraint + `btree_gist`. Un índice único parcial alcanza para
+  lo pedido (dos filas vigentes para la misma clave siempre se solapan,
+  porque las dos se extienden indefinidamente) y es más barato: btree
+  normal, sin depender de una extensión nueva. Una exclusion constraint
+  cubriría además el caso más amplio de dos rangos ya CERRADOS que se
+  solapan en el pasado, pero eso no está pedido hoy — si hace falta más
+  adelante (ej. auditoría de historial de ocupantes), ahí se justifica.
 
 ## Reglas de seguridad (no negociables)
 
