@@ -1,45 +1,43 @@
+import "server-only";
+
 import { z } from "zod";
 
-// Server-only: importar este módulo desde un Client Component rompe en
-// tiempo de carga, porque las variables de servidor no llegan al bundle del
-// navegador (Next.js solo inlinea las NEXT_PUBLIC_).
+// REGLA: una variable se agrega a este esquema en el mismo paso en que algún
+// código empieza a leerla, nunca antes. Hoy lo único que lee una variable de
+// entorno es src/db/index.ts (DATABASE_URL). No agregues acá
+// SUPABASE_SERVICE_ROLE_KEY, MESSAGING_PROVIDER ni las NEXT_PUBLIC_* hasta
+// que algo las importe de verdad — ver PASO 2.1b en el historial: validar
+// variables que nada consume obliga a rellenarlas con dummies para poder
+// probar cualquier otra cosa, y eso invalida la validación.
+//
+// Cuando aparezca la primera NEXT_PUBLIC_*, va en un schema aparte: Next.js
+// solo reemplaza process.env.NEXT_PUBLIC_* en el bundle del cliente cuando la
+// referencia es literal, así que cada variable pública se lee explícita, no
+// armada dinámicamente.
+//
+// MIGRATION_DATABASE_URL no vive acá a propósito: la usa únicamente
+// drizzle.config.ts (que la lee directo de process.env, ver ese archivo). No
+// es una credencial que la app en runtime necesite para arrancar.
 
-const serverSchema = z.object({
-  DATABASE_URL: z.string().url(),
-  MIGRATION_DATABASE_URL: z.string().url(),
-  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
-  MESSAGING_PROVIDER: z.enum(["console", "manual_link", "cloud_api"]),
-});
-
-const clientSchema = z.object({
-  NEXT_PUBLIC_SUPABASE_URL: z.string().url(),
-  NEXT_PUBLIC_SUPABASE_ANON_KEY: z.string().min(1),
-  NEXT_PUBLIC_APP_URL: z.string().url(),
+const schema = z.object({
+  DATABASE_URL: z.url(),
 });
 
 function parseEnv() {
-  // Next.js solo reemplaza process.env.NEXT_PUBLIC_* cuando la referencia es
-  // literal, por eso cada variable se lee explícita en vez de armar el objeto
-  // dinámicamente.
-  const server = serverSchema.safeParse({
+  if (process.env.SKIP_ENV_VALIDATION === "true") {
+    // Para CI o builds de análisis que no van a ejecutar la app de verdad
+    // (ej: un build que solo corre para chequear tipos, sin acceso a
+    // secretos). Nunca en runtime: saltear esto en producción hace arrancar
+    // la app sin haber validado nada.
+    return process.env as unknown as z.infer<typeof schema>;
+  }
+
+  const parsed = schema.safeParse({
     DATABASE_URL: process.env.DATABASE_URL,
-    MIGRATION_DATABASE_URL: process.env.MIGRATION_DATABASE_URL,
-    SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
-    MESSAGING_PROVIDER: process.env.MESSAGING_PROVIDER,
   });
 
-  const client = clientSchema.safeParse({
-    NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL,
-    NEXT_PUBLIC_SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
-    NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL,
-  });
-
-  if (!server.success || !client.success) {
-    const issues = [
-      ...(server.success ? [] : server.error.issues),
-      ...(client.success ? [] : client.error.issues),
-    ];
-    const details = issues
+  if (!parsed.success) {
+    const details = parsed.error.issues
       .map((issue) => `  - ${issue.path.join(".")}: ${issue.message}`)
       .join("\n");
 
@@ -48,7 +46,7 @@ function parseEnv() {
     );
   }
 
-  return { ...server.data, ...client.data };
+  return parsed.data;
 }
 
 export const env = parseEnv();
