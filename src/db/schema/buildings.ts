@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import {
   boolean,
   check,
+  index,
   pgTable,
   text,
   uniqueIndex,
@@ -35,16 +36,22 @@ export const buildings = pgTable(
     ...timestamps(),
   },
   (t) => [
-    // Único (organization_id, slug): hace de constraint de negocio Y de
-    // índice para "buscar edificio por slug dentro de esta organización".
-    // Al tener organization_id como columna líder, también sirve para
-    // "listar edificios de esta organización" sin necesitar un índice
-    // aparte solo sobre organization_id.
-    uniqueIndex("buildings_organization_id_slug_unique").on(
-      t.organizationId,
-      t.slug,
-    ),
-    check("buildings_slug_format", sql`${t.slug} ~ '^[a-z0-9-]+$'`),
+    // Único (organization_id, slug) entre edificios ACTIVOS solamente
+    // (parcial, WHERE deleted_at IS NULL): con borrado lógico, un índice
+    // único total impediría reutilizar el slug de un edificio dado de baja,
+    // porque la fila borrada -invisible para el usuario- lo seguiría
+    // ocupando.
+    uniqueIndex("buildings_organization_id_slug_unique")
+      .on(t.organizationId, t.slug)
+      .where(sql`${t.deletedAt} is null`),
+    // Al ser parcial, el índice de arriba ya no sirve para "listar TODOS los
+    // edificios de esta organización" (activos + dados de baja, ej. una
+    // papelera o una vista de auditoría) porque esa consulta no garantiza
+    // deleted_at IS NULL. Este índice plano cubre ese caso.
+    index("buildings_organization_id_idx").on(t.organizationId),
+    // Sin guiones al principio/final ni consecutivos: "torre-norte" válido,
+    // "-torre" / "torre-" / "torre--norte" / "-" inválidos, "t" válido.
+    check("buildings_slug_format", sql`${t.slug} ~ '^[a-z0-9]+(-[a-z0-9]+)*$'`),
     check(
       // \\+ (no \+): en un template string de JS, \+ no es un escape
       // reconocido y el backslash se pierde antes de llegar a Postgres,

@@ -69,6 +69,7 @@ import {
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { UnitTag } from "@/features/buildings/components/unit-tag";
+import { UNIT_TYPE_LABEL } from "@/features/buildings/unit-type";
 import {
   PriorityBadge,
   type Priority,
@@ -268,6 +269,16 @@ export default function StyleguidePage() {
             <UnitTag unit="12°A" />
             <UnitTag unit="PB" size="sm" />
             <TicketCode code="TC-2026-0143" />
+          </div>
+          <div className="text-ink-muted flex flex-wrap gap-x-4 gap-y-1 text-sm">
+            {Object.entries(UNIT_TYPE_LABEL).map(([value, label]) => (
+              <span key={value}>
+                <span className="text-ink-muted font-mono text-xs">
+                  {value}
+                </span>{" "}
+                → {label}
+              </span>
+            ))}
           </div>
           <div className="flex flex-wrap gap-2">
             {PRIORITIES.map((priority) => (

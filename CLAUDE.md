@@ -62,9 +62,25 @@ Regla clave: la lógica de dominio vive en `src/features/<dominio>/`;
 - El cliente de Supabase en el navegador se usa SOLO para Auth y Storage,
   nunca para leer ni escribir tablas de negocio.
 - Dos conexiones a Postgres, porque Supabase las trata distinto (ver
-  `.env.example`): `DATABASE_URL` (pooler de transacciones, puerto 6543) para
-  la app en runtime, sin prepared statements; `MIGRATION_DATABASE_URL`
-  (pooler de sesión, puerto 5432) para `drizzle-kit`.
+  `.env.example`): `DATABASE_URL` para la app en runtime, sin prepared
+  statements; `MIGRATION_DATABASE_URL` (siempre pooler de sesión, puerto 5432) para `drizzle-kit`.
+- `DATABASE_URL` apunta a un pooler distinto según el entorno, a propósito
+  (no es un parche): pooler de transacciones (6543) en Vercel, que es lo que
+  Supabase recomienda para serverless (muchas instancias efímeras); pooler de
+  sesión (5432) en desarrollo local, porque el dev server es un solo proceso
+  persistente, no muchas instancias efímeras — el caso para el que Supabase
+  recomienda sesión o conexión directa. `{ prepare: false }` en
+  `src/db/index.ts` es compatible con los dos, así que el código no cambia
+  entre entornos. La primera verificación real contra el puerto 6543 va a ser
+  el primer deploy en Vercel.
+- Borrado lógico + unicidad: los índices únicos que compiten con
+  `deleted_at` son parciales (`WHERE deleted_at IS NULL`), para que un slug o
+  una unidad dados de baja no bloqueen reutilizar ese valor. `public_token`
+  de `buildings` es la excepción: único de forma TOTAL, porque un token de
+  URL pública no se reutiliza aunque el edificio esté dado de baja.
+- `updated_at` lo pone un trigger de base (`set_updated_at()`, aplicado a
+  `organizations`, `buildings` y `units`), no la aplicación. Las Server
+  Actions nunca lo setean a mano.
 
 ## Reglas de seguridad (no negociables)
 
