@@ -387,6 +387,22 @@ avisar, como pide la regla de abajo.
 fuera del pipeline de build de Next). El seed arma su propia conexión con
 `DATABASE_URL` directo.
 
+**`app_users` (el admin vinculado a la organización) es opcional y manual:**
+el seed no puede crear el usuario de Supabase Auth (vive en un esquema que
+administra Supabase, y además tiene que crearse a mano desde el dashboard,
+no por script). Pasos para crear uno:
+
+1. Dashboard de Supabase → el proyecto → **Authentication → Users → Add
+   user → Create new user**.
+2. Cargar email y contraseña. Activar **Auto Confirm User** para no
+   depender de un mail de confirmación.
+3. Copiar el **User UID** que Supabase le asigna (aparece en la lista de
+   usuarios y en el detalle del usuario).
+4. Correr el seed con `SEED_ADMIN_USER_ID=<ese uuid>` (opcionalmente
+   `SEED_ADMIN_DISPLAY_NAME="Nombre"`, default `"Administrador"`) además de
+   `SEED_CONFIRM`. Sin `SEED_ADMIN_USER_ID`, el seed corre igual pero no
+   crea la fila en `app_users` (lo avisa por consola, no falla).
+
 ## Qué NO hacer
 
 - No instalar dependencias nuevas sin avisar y justificar.

@@ -4,16 +4,15 @@ import { z } from "zod";
 
 // REGLA: una variable se agrega a este esquema en el mismo paso en que algún
 // código empieza a leerla, nunca antes. Hoy lo único que lee una variable de
-// entorno es src/db/index.ts (DATABASE_URL). No agregues acá
-// SUPABASE_SERVICE_ROLE_KEY, MESSAGING_PROVIDER ni las NEXT_PUBLIC_* hasta
-// que algo las importe de verdad — ver PASO 2.1b en el historial: validar
-// variables que nada consume obliga a rellenarlas con dummies para poder
-// probar cualquier otra cosa, y eso invalida la validación.
+// entorno de acá es src/db/index.ts (DATABASE_URL). No agregues
+// SUPABASE_SERVICE_ROLE_KEY ni MESSAGING_PROVIDER hasta que algo las importe
+// de verdad — ver PASO 2.1b en el historial: validar variables que nada
+// consume obliga a rellenarlas con dummies para poder probar cualquier otra
+// cosa, y eso invalida la validación.
 //
-// Cuando aparezca la primera NEXT_PUBLIC_*, va en un schema aparte: Next.js
-// solo reemplaza process.env.NEXT_PUBLIC_* en el bundle del cliente cuando la
-// referencia es literal, así que cada variable pública se lee explícita, no
-// armada dinámicamente.
+// Las NEXT_PUBLIC_* NO van acá: viven en src/lib/env.public.ts, un schema
+// aparte sin "server-only" (este archivo sí lo tiene), porque
+// src/lib/supabase/client.ts corre en el navegador y necesita leerlas.
 //
 // MIGRATION_DATABASE_URL no vive acá a propósito: la usa únicamente
 // drizzle.config.ts (que la lee directo de process.env, ver ese archivo). No

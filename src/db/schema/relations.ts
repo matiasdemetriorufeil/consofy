@@ -2,6 +2,7 @@ import { relations } from "drizzle-orm";
 
 import { announcementRecipients } from "./announcement-recipients";
 import { announcements } from "./announcements";
+import { appUsers } from "./app-users";
 import { buildings } from "./buildings";
 import { categories } from "./categories";
 import { documents } from "./documents";
@@ -17,6 +18,7 @@ import { unitOccupancies } from "./unit-occupancies";
 import { units } from "./units";
 
 export const organizationsRelations = relations(organizations, ({ many }) => ({
+  appUsers: many(appUsers),
   buildings: many(buildings),
   people: many(people),
   categories: many(categories),
@@ -229,5 +231,12 @@ export const notificationsRelations = relations(notifications, ({ one }) => ({
   incident: one(incidents, {
     fields: [notifications.relatedIncidentId],
     references: [incidents.id],
+  }),
+}));
+
+export const appUsersRelations = relations(appUsers, ({ one }) => ({
+  organization: one(organizations, {
+    fields: [appUsers.organizationId],
+    references: [organizations.id],
   }),
 }));

@@ -1,5 +1,6 @@
 export * from "./health-check";
 export * from "./organizations";
+export * from "./app-users";
 export * from "./buildings";
 export * from "./units";
 export * from "./people";

@@ -1,0 +1,107 @@
+import "server-only";
+
+import type { User } from "@supabase/supabase-js";
+import { eq } from "drizzle-orm";
+import { redirect } from "next/navigation";
+import { cache } from "react";
+
+import { db } from "@/db";
+import { appUsers, organizations } from "@/db/schema";
+
+import { createClient } from "./supabase/server";
+
+export type Session = {
+  user: User;
+};
+
+// getUser(), no getSession() de supabase-js (a pesar del nombre de ESTA
+// función, que sigue el pedido del paso): supabase.auth.getSession() lee la
+// sesión de la cookie sin revalidarla contra el servidor de Auth -- si la
+// cookie fue manipulada o el usuario fue baneado/borrado después de
+// emitido el JWT, getSession() no se entera. getUser() hace el round-trip
+// real a Supabase en cada llamada, que es el costo correcto de pagar acá:
+// esta función es la base de toda decisión de autorización del proyecto
+// (ver requireUser() abajo), no el refresco de rutina de cada request que
+// ya hace src/proxy.ts con getClaims() (ese sí puede ser liviano, porque
+// corre en cada request; este se llama mucho menos seguido).
+//
+// cache() de React: memoiza por request -- si dos Server Components de la
+// misma página llaman getSession() (directo o vía requireUser()), la
+// segunda llamada no repite el round-trip a Supabase.
+export const getSession = cache(async (): Promise<Session | null> => {
+  const supabase = await createClient();
+  const { data, error } = await supabase.auth.getUser();
+
+  if (error || !data.user) {
+    return null;
+  }
+
+  return { user: data.user };
+});
+
+export type AuthorizedUser = {
+  user: User;
+  appUser: {
+    id: string;
+    displayName: string;
+    role: (typeof appUsers.$inferSelect)["role"];
+  };
+  organization: {
+    id: string;
+    name: string;
+    timezone: string;
+  };
+};
+
+// Esta función es la base de toda la autorización del proyecto -- diseñada
+// para que sea imposible de usar mal: el único tipo de retorno que existe
+// (AuthorizedUser) siempre trae el usuario Y su organización juntos, nunca
+// uno sin el otro. No hay una función "getUser()" exportada que devuelva
+// el usuario solo -- si hiciera falta, sería un atajo que invita a un bug
+// real: código que verifica "hay usuario" pero se olvida de filtrar por
+// organización antes de tocar datos.
+//
+// Redirige a /login en dos casos, no solo uno: sin sesión de Supabase
+// (nadie logueado), y CON sesión de Supabase pero sin fila en app_users
+// (un usuario de auth.users que existe pero nunca se vinculó a una
+// organización -- ver la nota sobre la falta de FK a auth.users en
+// app-users.ts). El segundo caso no debería pasar en el flujo normal, pero
+// tratarlo iguial que "no hay sesión" es la opción segura: no hay
+// autorización posible sin organización.
+export const requireUser = cache(async (): Promise<AuthorizedUser> => {
+  const session = await getSession();
+  if (!session) {
+    redirect("/login");
+  }
+
+  const [row] = await db
+    .select({
+      appUserId: appUsers.id,
+      displayName: appUsers.displayName,
+      role: appUsers.role,
+      organizationId: organizations.id,
+      organizationName: organizations.name,
+      organizationTimezone: organizations.timezone,
+    })
+    .from(appUsers)
+    .innerJoin(organizations, eq(appUsers.organizationId, organizations.id))
+    .where(eq(appUsers.id, session.user.id));
+
+  if (!row) {
+    redirect("/login");
+  }
+
+  return {
+    user: session.user,
+    appUser: {
+      id: row.appUserId,
+      displayName: row.displayName,
+      role: row.role,
+    },
+    organization: {
+      id: row.organizationId,
+      name: row.organizationName,
+      timezone: row.organizationTimezone,
+    },
+  };
+});

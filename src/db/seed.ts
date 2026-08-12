@@ -166,6 +166,7 @@ async function main() {
   await db.delete(schema.people);
   await db.delete(schema.units);
   await db.delete(schema.buildings);
+  await db.delete(schema.appUsers);
   await db.delete(schema.organizations);
   console.log("listo.\n");
 
@@ -1411,6 +1412,31 @@ async function main() {
     },
   ]);
   console.log("documentos: 3");
+
+  // ---------------------------------------------------------------------
+  // app_users: vincula un usuario de Supabase Auth con esta organización.
+  // El seed NO puede crear el usuario de auth.users -- eso vive en un
+  // esquema que administra Supabase, y además el paso 3.1 pide
+  // explícitamente crearlo a mano desde el dashboard, no por script. Por
+  // eso esto es opcional y condicional a una variable de entorno: si no
+  // está seteada, se lo salta con un aviso en vez de fallar todo el seed
+  // (el resto de los datos no depende de que exista un admin).
+  const adminUserId = process.env.SEED_ADMIN_USER_ID;
+  if (adminUserId) {
+    const adminDisplayName =
+      process.env.SEED_ADMIN_DISPLAY_NAME ?? "Administrador";
+    await db.insert(schema.appUsers).values({
+      id: adminUserId,
+      organizationId: organization.id,
+      displayName: adminDisplayName,
+      role: "admin",
+    });
+    console.log(`app_users: 1 (${adminDisplayName}, ${adminUserId})`);
+  } else {
+    console.log(
+      "app_users: 0 (SEED_ADMIN_USER_ID no seteada -- ver CLAUDE.md > Datos de prueba (seed) para los pasos de creación manual)",
+    );
+  }
 
   console.log("\n--- seed completo ---");
   await sql.end({ timeout: 5 });
