@@ -1,7 +1,7 @@
 "use client";
 
 import { zodResolver } from "@hookform/resolvers/zod";
-import { startTransition, useActionState } from "react";
+import { startTransition, useActionState, useEffect, useRef } from "react";
 import { useForm } from "react-hook-form";
 
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -45,6 +45,23 @@ export function LoginForm() {
     defaultValues: { email: "", password: "" },
   });
 
+  // Foco al fallar (punto 5): los errores de VALIDACIÓN de cliente (campo
+  // vacío, email mal formado) ya mueven el foco solos -- react-hook-form
+  // enfoca el primer campo inválido por default (shouldFocusError), no
+  // hace falta nada de más para ese caso. El hueco real es el error del
+  // SERVIDOR (credenciales incorrectas, rate limit, etc.): ahí no hay
+  // ningún campo "inválido" para RHF, el foco se queda donde estaba (el
+  // botón) si no se hace nada. Al email, no al Alert: así la persona puede
+  // volver a escribir de una, sin un tab extra.
+  const emailRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (state.error) {
+      emailRef.current?.focus();
+    }
+  }, [state.error]);
+
+  const { ref: emailRegisterRef, ...emailRegister } = register("email");
+
   return (
     <Card className="w-full max-w-sm">
       <CardHeader>
@@ -78,7 +95,11 @@ export function LoginForm() {
                 type="email"
                 autoComplete="email"
                 aria-invalid={!!errors.email}
-                {...register("email")}
+                {...emailRegister}
+                ref={(el) => {
+                  emailRegisterRef(el);
+                  emailRef.current = el;
+                }}
               />
               <FieldError errors={[errors.email]} />
             </Field>

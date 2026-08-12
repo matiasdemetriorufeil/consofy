@@ -47,6 +47,35 @@ import { loginAttempts } from "@/db/schema";
 //      nativa.
 // Por eso el límite propio de acá es la defensa real contra fuerza bruta
 // dirigida a una cuenta, no un duplicado de algo que Supabase ya cubre.
+//
+// -----------------------------------------------------------------------
+// Limitaciones reales de ESTA implementación (no es perfecta, y no
+// pretende serlo)
+// -----------------------------------------------------------------------
+// 1. El límite por IP confía en x-forwarded-for, que es un header que el
+//    CLIENTE puede mandar con cualquier valor si nada por delante lo
+//    sobreescribe. En Vercel esto es confiable (su borde reemplaza el
+//    valor entrante, no lo reenvía tal cual -- es la garantía de la que
+//    depende getClientIp()), pero es una suposición atada al deploy
+//    target, no una propiedad de este código en abstracto: corriendo
+//    detrás de otro proxy que reenvíe el header del cliente sin tocarlo,
+//    alguien podría mandar un x-forwarded-for distinto en cada intento y
+//    esquivar el límite por IP por completo.
+// 2. Por eso el límite por EMAIL es la defensa real, no el de IP: no
+//    depende de ningún header, solo del dato que la persona atacante
+//    necesita variar para que el ataque tenga sentido (probar contraseñas
+//    contra UNA cuenta). El de IP es una capa extra, más débil, para
+//    frenar volumen bruto -- no al revés.
+// 3. Ninguno de los dos frena un ataque "lento y distribuido" (probar una
+//    sola contraseña por cuenta, contra muchas cuentas, desde muchas IPs
+//    distintas): cada intento individual queda por debajo de los dos
+//    umbrales. Es una limitación inherente a cualquier rate limit basado
+//    en una sola clave (email o IP) -- no es especial de esta
+//    implementación, ni Redis ni un servicio pago la resuelven gratis
+//    tampoco sin algo más (ej. CAPTCHA, MFA). Para el perfil de esta app
+//    (un puñado de administradores, no un SaaS masivo) el riesgo real es
+//    bajo, pero es honesto dejarlo escrito en vez de dar a entender que
+//    esto es fuerza-bruta-proof.
 const EMAIL_WINDOW_MINUTES = 15;
 const EMAIL_MAX_FAILED_ATTEMPTS = 5;
 const IP_WINDOW_MINUTES = 15;
