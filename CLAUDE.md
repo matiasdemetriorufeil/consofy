@@ -102,6 +102,53 @@ Regla clave: la lógica de dominio vive en `src/features/<dominio>/`;
   solapan en el pasado, pero eso no está pedido hoy — si hace falta más
   adelante (ej. auditoría de historial de ocupantes), ahí se justifica.
 
+## Integridad entre organizaciones
+
+**Regla para toda tabla nueva:** si una tabla referencia más de una entidad de
+negocio a la vez (ej. `unit_occupancies` referenciando `units` y `people`),
+lleva su propia columna `organization_id` (denormalizada desde sus padres) y
+usa **FK compuestas** `(fk_id, organization_id) -> padre(id, organization_id)`
+en vez de FK simples. Sin esto, nada impide en la base que una fila mezcle
+entidades de dos organizaciones distintas — la aplicación puede evitarlo, pero
+no puede garantizarlo, y con cada tabla que referencia más entidades a la vez
+(`tickets` en el paso siguiente referencia cuatro) el riesgo se multiplica. Esto
+aplica a todas las tablas de los pasos siguientes.
+
+**Mecanismo** (Postgres, no específico de Drizzle): una FK compuesta solo es
+legal si la tabla referenciada tiene una constraint UNIQUE o PK _exacta_ sobre
+esas columnas, en ese orden — Postgres no la deriva de que `id` ya sea único
+por sí solo. Por eso `buildings`, `units` y `people` tienen cada una un
+`UNIQUE(id, organization_id)` además de su PK en `id`: es una constraint
+lógicamente redundante para probar que `id` es único (ya lo es), pero
+obligatoria para que la FK compuesta sea válida. Costo: un índice B-tree más
+por tabla (dos uuids por fila), mantenido en cada INSERT/UPDATE/DELETE — bajo
+para el volumen de escritura esperado en esta app. `organizations` NO tiene
+(ni puede tener) este `UNIQUE`: es la raíz de la jerarquía, no tiene su propia
+columna `organization_id`; las FK simples existentes hacia `organizations.id`
+no cambian.
+
+**Por qué no hace falta un trigger para el `organization_id` denormalizado:**
+evalué bloquear su UPDATE con un trigger, pero la FK compuesta con el
+`ON UPDATE` default de Postgres (`NO ACTION`, no diferido) ya lo cubre en los
+dos sentidos, verificado con una prueba real:
+
+- Si se intenta cambiar `units.organization_id` a mano sin tocar
+  `building_id`, la FK compuesta de `units` hacia `buildings` rechaza el
+  UPDATE porque no hay una fila en `buildings` con ese `(id, organization_id)`.
+- Si `units` tiene ocupaciones vigentes, cambiar su `organization_id` además
+  rompería la FK compuesta que `unit_occupancies` tiene hacia `units`, y
+  Postgres lo bloquea por esa vía también.
+
+Ningún trigger adicional agrega protección real acá; solo sería código muerto.
+
+**Índices existentes:** revisé si los `UNIQUE(id, organization_id)` nuevos
+volvían redundante algún índice existente (ej.
+`buildings_organization_id_idx`, `people_organization_id_idx`). Ninguno se
+sacó: los `UNIQUE(id, organization_id)` tienen `id` como columna líder, no
+`organization_id`, así que no sirven para las consultas "listar todo lo de
+esta organización" que esos índices planos sí resuelven (un B-tree solo se
+aprovecha por el prefijo izquierdo de sus columnas).
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.

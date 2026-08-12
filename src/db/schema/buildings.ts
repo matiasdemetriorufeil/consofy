@@ -5,6 +5,7 @@ import {
   index,
   pgTable,
   text,
+  unique,
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
@@ -36,6 +37,13 @@ export const buildings = pgTable(
     ...timestamps(),
   },
   (t) => [
+    // Redundante con la PK (id) para probar unicidad de id solo, pero
+    // obligatoria para que units pueda tener una FK compuesta
+    // (building_id, organization_id) -> buildings(id, organization_id):
+    // Postgres exige una unique/PK constraint exacta sobre esas dos
+    // columnas, no la deriva de que id ya sea único por sí solo. Ver
+    // CLAUDE.md > Integridad entre organizaciones.
+    unique("buildings_id_organization_id_unique").on(t.id, t.organizationId),
     // Único (organization_id, slug) entre edificios ACTIVOS solamente
     // (parcial, WHERE deleted_at IS NULL): con borrado lógico, un índice
     // único total impediría reutilizar el slug de un edificio dado de baja,

@@ -4,6 +4,7 @@ import {
   index,
   pgTable,
   text,
+  unique,
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
@@ -39,6 +40,11 @@ export const people = pgTable(
     ...timestamps(),
   },
   (t) => [
+    // Necesaria para que unit_occupancies pueda referenciar
+    // people(id, organization_id) con una FK compuesta. Redundante para
+    // probar que id es único (ya lo es, es la PK); obligatoria para
+    // Postgres igual. Ver CLAUDE.md > Integridad entre organizaciones.
+    unique("people_id_organization_id_unique").on(t.id, t.organizationId),
     // Único dentro de la organización entre personas ACTIVAS (parcial, WHERE
     // deleted_at IS NULL): mismo motivo que slug en buildings. NULL no
     // necesita coalesce acá -- dos personas con teléfono desconocido no son

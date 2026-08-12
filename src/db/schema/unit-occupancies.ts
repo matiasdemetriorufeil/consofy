@@ -3,6 +3,7 @@ import {
   boolean,
   check,
   date,
+  foreignKey,
   index,
   pgEnum,
   pgTable,
@@ -22,12 +23,13 @@ export const unitOccupancies = pgTable(
   "unit_occupancies",
   {
     id: idColumn(),
-    unitId: uuid("unit_id")
-      .notNull()
-      .references(() => units.id, { onDelete: "restrict" }),
-    personId: uuid("person_id")
-      .notNull()
-      .references(() => people.id, { onDelete: "restrict" }),
+    // Denormalizado desde units.organization_id (y coincide con
+    // people.organization_id: las dos FK compuestas de abajo lo exigen).
+    // No se actualiza a mano nunca -- ver CLAUDE.md > Integridad entre
+    // organizaciones.
+    organizationId: uuid("organization_id").notNull(),
+    unitId: uuid("unit_id").notNull(),
+    personId: uuid("person_id").notNull(),
     role: occupancyRole("role").notNull(),
     isPrimary: boolean("is_primary").notNull().default(false),
     // date, no timestamp: importa el día, no la hora, y evita líos de huso
@@ -43,6 +45,18 @@ export const unitOccupancies = pgTable(
     ...timestamps(),
   },
   (t) => [
+    // Dos FK compuestas: la unidad y la persona de una ocupación tienen que
+    // pertenecer las dos a esta misma organización. Es lo que hace
+    // imposible -a nivel base, no de aplicación- una ocupación que cruce
+    // organizaciones.
+    foreignKey({
+      columns: [t.unitId, t.organizationId],
+      foreignColumns: [units.id, units.organizationId],
+    }).onDelete("restrict"),
+    foreignKey({
+      columns: [t.personId, t.organizationId],
+      foreignColumns: [people.id, people.organizationId],
+    }).onDelete("restrict"),
     // Un solo contacto principal vigente por unidad.
     uniqueIndex("unit_occupancies_primary_per_unit_unique")
       .on(t.unitId)

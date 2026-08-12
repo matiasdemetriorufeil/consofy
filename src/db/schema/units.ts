@@ -1,9 +1,11 @@
 import { sql } from "drizzle-orm";
 import {
+  foreignKey,
   index,
   pgEnum,
   pgTable,
   text,
+  unique,
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
@@ -26,9 +28,12 @@ export const units = pgTable(
   "units",
   {
     id: idColumn(),
-    buildingId: uuid("building_id")
-      .notNull()
-      .references(() => buildings.id, { onDelete: "restrict" }),
+    // Denormalizado desde buildings.organization_id a propósito: es lo que
+    // hace posible la FK compuesta de abajo. No se actualiza a mano nunca
+    // (ver CLAUDE.md > Integridad entre organizaciones: la FK compuesta ya
+    // impide que se desincronice, no hace falta un trigger).
+    organizationId: uuid("organization_id").notNull(),
+    buildingId: uuid("building_id").notNull(),
     // Nullable a propósito: muchos edificios no tienen torres.
     tower: text("tower"),
     // Texto, no integer: "PB", "EP", "Subsuelo 1" son pisos válidos y
@@ -39,6 +44,18 @@ export const units = pgTable(
     ...timestamps(),
   },
   (t) => [
+    // FK compuesta: exige que building_id Y organization_id coincidan con
+    // una fila real de buildings a la vez. Sin esto, nada impide guardar
+    // una unidad cuyo organization_id no sea el de su propio edificio.
+    foreignKey({
+      columns: [t.buildingId, t.organizationId],
+      foreignColumns: [buildings.id, buildings.organizationId],
+    }).onDelete("restrict"),
+    // Necesaria para que unit_occupancies pueda referenciar
+    // units(id, organization_id) con una FK compuesta. Mismo motivo que en
+    // buildings: redundante para probar que id es único, obligatoria para
+    // Postgres.
+    unique("units_id_organization_id_unique").on(t.id, t.organizationId),
     // NULL != NULL en SQL: un índice único común sobre (building_id, tower,
     // floor, number) no bloquea dos filas con tower NULL en el mismo piso y
     // número. coalesce(tower, '') normaliza NULL a un valor concreto para
