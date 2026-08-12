@@ -10,7 +10,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 
-import { idColumn, timestamps } from "./_shared";
+import { denyAnonAuthenticated, idColumn, timestamps } from "./_shared";
 import { organizations } from "./organizations";
 
 // Valores en inglés (dato de base, no UI) -- ver CLAUDE.md > Glosario. El
@@ -65,5 +65,6 @@ export const categories = pgTable(
     uniqueIndex("categories_organization_id_name_unique")
       .on(t.organizationId, t.name)
       .where(sql`${t.deletedAt} is null`),
+    denyAnonAuthenticated(),
   ],
 ).enableRLS();

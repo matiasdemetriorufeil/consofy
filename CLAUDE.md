@@ -149,6 +149,88 @@ sacó: los `UNIQUE(id, organization_id)` tienen `id` como columna líder, no
 esta organización" que esos índices planos sí resuelven (un B-tree solo se
 aprovecha por el prefijo izquierdo de sus columnas).
 
+## Políticas RLS
+
+**El rol de la app evade RLS.** Verificado contra la base real (no es una
+suposición): tanto `DATABASE_URL` como `MIGRATION_DATABASE_URL` conectan como
+el rol `postgres` de Supabase, que tiene `rolbypassrls = true` (no es
+superusuario, pero tiene el atributo BYPASSRLS explícito). Esto significa que
+**ninguna policy de este archivo protege a la app de sus propios bugs** — un
+`SELECT` sin filtrar por `organization_id` en una Server Action va a traer
+filas de todas las organizaciones sin que RLS lo impida, porque el motor de
+RLS ni siquiera se evalúa para este rol. La defensa contra eso es la que ya
+dice la sección "Acceso a datos": cada query filtra por organización a mano
+en la capa de aplicación. RLS acá abajo protege exclusivamente contra `anon`
+y `authenticated`, los roles que PostgREST expone directo al navegador con la
+anon key (pública, viaja en el bundle) o con el JWT de un usuario logueado.
+
+**Las doce-y-pico tablas** (en la práctica 17: las 12 de negocio más
+`health_check`, `ticket_code_counters` y las tablas puente/log que no siempre
+se cuentan) llevan **dos capas independientes** de bloqueo para `anon` y
+`authenticated`, no una:
+
+1. **Policy explícita `deny_anon_authenticated`** en cada tabla (`RESTRICTIVE`,
+   `FOR ALL`, `USING (false)`, `WITH CHECK (false)`). `RESTRICTIVE`, no
+   `PERMISSIVE` (el default): las policies `PERMISSIVE` se combinan entre sí
+   con OR, así que una policy `PERMISSIVE` que deniega todo hoy no bloquea una
+   policy `PERMISSIVE` que alguien agregue mañana para el mismo rol/comando
+   (`false OR <lo que sea>` deja pasar filas). Una policy `RESTRICTIVE` se
+   combina con AND contra todas las demás, incluidas las `PERMISSIVE`
+   futuras — `false AND cualquier-cosa` siempre da `false`. Es la única forma
+   de que "anon/authenticated no acceden nunca" sea una garantía estructural
+   y no el estado por default de hoy nada más.
+
+   Con RLS activo y CERO policies el resultado para esos roles ya es
+   deny-all — no hacía falta escribir nada para que funcionara. Se escribió
+   igual porque el linter de seguridad de Supabase marca "RLS enabled, no
+   policies" como INFO (`0008_rls_enabled_no_policy`) por ser ambiguo: no
+   distingue "bloqueado a propósito" de "se olvidaron las policies". Es la
+   recomendación oficial de Supabase para este caso exacto ("some users may
+   enable RLS with no policies intentionally to restrict access over APIs...
+   we recommend making that intent explicit with a rejection policy").
+
+2. **`REVOKE ALL` sobre `anon`/`authenticated`** en cada tabla (más
+   `REVOKE EXECUTE` en las funciones y `REVOKE ALL` en la única secuencia).
+   Verificado antes de tocar nada: el proyecto de Supabase le daba por
+   default privilegios COMPLETOS (`arwdDxtm`) a `anon`/`authenticated` sobre
+   toda tabla nueva, y `EXECUTE` sobre toda función nueva (esto último por
+   default de Postgres, no de Supabase: las funciones nuevas otorgan EXECUTE
+   a PUBLIC automáticamente al crearse, algo que las tablas NO hacen).
+   El GRANT de tabla es una capa evaluada ANTES de que Postgres llegue a
+   mirar RLS — si alguna vez una tabla queda con RLS deshabilitado por error
+   (un `DROP POLICY`, un `ALTER TABLE ... DISABLE ROW LEVEL SECURITY`, un
+   bug de migración), el GRANT abierto sería lo único que queda entre
+   `anon`/`authenticated` y la tabla completa. El REVOKE cierra esa puerta de
+   forma independiente de RLS.
+
+   Esto NO es "en vez de" las policies — es una capa aparte. La documentación
+   de Supabase solo menciona REVOKE como alternativa para VISTAS (que no
+   soportan policies de la misma forma) o para sacar un esquema entero de
+   "Exposed schemas" en la API; para TABLAS, su mecanismo primario y
+   documentado son las RLS policies. Hacer las dos cosas acá es una decisión
+   propia, no la recomendación textual de Supabase — el REVOKE es barato y
+   cierra un modo de falla (RLS deshabilitado por error) que las policies por
+   sí solas no cubren.
+
+**Tablas y funciones futuras:** `ALTER DEFAULT PRIVILEGES FOR ROLE postgres
+IN SCHEMA public` revoca de `anon`, `authenticated` y `PUBLIC` los privilegios
+sobre tablas, funciones y secuencias que create el rol `postgres` de acá en
+adelante (que es el rol con el que corren todas nuestras migraciones). Esto
+soluciona el problema real de "mañana se crea una tabla y alguien se olvida
+de RLS": con los defaults de Supabase sin tocar, esa tabla nace con
+`anon`/`authenticated` ya habilitados a nivel de grant, así que un
+`.enableRLS()` olvidado la deja completamente abierta. Con el default
+revocado, esa misma tabla nace SIN esos grants — un `.enableRLS()` olvidado
+sigue siendo un bug (el linter lo va a marcar como `0013_rls_disabled_in_public`,
+ERROR), pero ya no es una brecha real: `anon`/`authenticated` reciben
+`permission denied` en el grant antes de que RLS entre en juego.
+
+Lo que el `DEFAULT PRIVILEGES` NO hace: crear la policy `deny_anon_authenticated`
+en tablas nuevas. Postgres no tiene un mecanismo de "policy por default" — cada
+tabla nueva sigue necesitando su propio `.enableRLS()` (ya es la convención,
+ver `_shared.ts`) y su propia `denyAnonAuthenticated()` en el array de
+`extraConfig` para que el linter no la marque como `0008_rls_enabled_no_policy`.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
@@ -242,6 +324,68 @@ se contaminen entre sí:
   cambios que da `generate` + `migrate`. Existe solo por si hace falta
   prototipar algo descartable en una base personal, nunca contra Supabase.
 - `npm run db:studio` — abre Drizzle Studio para inspeccionar la base.
+- `npm run db:seed` — borra y recrea datos de desarrollo realistas. Ver
+  "Datos de prueba (seed)" más abajo antes de correrlo.
+
+## Datos de prueba (seed)
+
+`src/db/seed.ts` (`npm run db:seed`) llena la base con una organización, 3
+edificios, ~40 unidades, ~50 personas, ocupaciones, 8 categorías, ~30 reclamos
+y contenido de avisos/recordatorios/documentos/un incidente — pensado para
+desarrollar el panel sin cargar todo a mano. No es un script de producción.
+
+**Salvaguardas, ninguna decorativa:**
+
+1. Aborta si `NODE_ENV=production`, sin excepción, no salteable.
+2. Exige `SEED_CONFIRM` con un valor largo y específico (no `true`/`1`, que
+   alguien podría tener seteado por otra razón). Nunca salteable.
+3. Muestra el host y la base a los que se va a conectar y pide confirmación
+   interactiva escrita a mano. Salteable con `--yes` (para CI/scripts) — pero
+   `--yes` solo saltea el prompt, no el punto 2.
+
+Correrlo: `SEED_CONFIRM=si-quiero-borrar-y-recrear-los-datos-de-desarrollo npm run db:seed`
+(agregar `-- --yes` al final para saltear la confirmación interactiva). El
+valor exacto de `SEED_CONFIRM` está en la constante `SEED_CONFIRM_VALUE` de
+`seed.ts`.
+
+**Idempotente por borrado total, no por upsert:** cada corrida borra TODO el
+contenido de las tablas de negocio (en el orden inverso de sus FK, que son
+todas `RESTRICT`, nunca `CASCADE`) y lo recrea desde cero. Se eligió por
+sobre upsert porque las filas no tienen una clave natural conveniente para
+`ON CONFLICT` en la mayoría de las tablas, y un wipe-and-recreate es mucho
+más simple de razonar (no hay estados intermedios entre corridas) — aceptable
+precisamente porque esto nunca corre contra una base con datos reales (ver
+salvaguardas arriba). Esto también resuelve solo el problema del contador de
+`public_code`: como los edificios se recrean con id nuevo en cada corrida,
+`ticket_code_counters` nunca tiene una fila vieja que reutilizar — igual el
+script borra explícitamente esa tabla antes de los `buildings`, porque su FK
+(`building_id`, restrict) rompería el DELETE de `buildings` si no.
+
+**Determinista con un PRNG con semilla fija (mulberry32), no `Math.random()`:**
+mismo contenido en cada corrida — verificado corriendo el seed dos veces y
+comparando un fingerprint de todos los campos de contenido (nombres,
+teléfonos, títulos y descripciones de reclamos, etc.), que dio idéntico byte
+a byte. La excepción deliberada son las fechas relativas a "hoy" (`reported_at`
+de los reclamos, `due_date` de los recordatorios): el pedido de "reclamos de
+los últimos 90 días" es por definición relativo al momento de la corrida, así
+que lo determinista ahí es el offset en días, no la fecha calendario
+resultante.
+
+**Corre con `tsx`** (`src/db/seed.ts` es TypeScript), no con `node` directo:
+Node 22 puede stripear tipos pero no resuelve imports relativos sin extensión
+como los de `src/db/schema/`. `tsx` ya está disponible en
+`node_modules/.bin` como dependencia transitiva de `drizzle-kit` (que lo usa
+para su propio `drizzle.config.ts`) — no se instaló nada nuevo para este
+paso. Es un poco frágil apoyarse en una dependencia transitiva para un script
+propio: si en algún momento `drizzle-kit` deja de depender de `tsx`,
+`db:seed` se rompe. Si preferís robustez sobre no tocar `package.json` de
+más, se puede agregar `tsx` como devDependency directa — no lo hice sin
+avisar, como pide la regla de abajo.
+
+**No usa `src/db/index.ts`:** ese módulo importa `src/lib/env.ts`, que importa
+`server-only` (un paquete de Next.js que tira una excepción si se lo importa
+fuera del pipeline de build de Next). El seed arma su propia conexión con
+`DATABASE_URL` directo.
 
 ## Qué NO hacer
 

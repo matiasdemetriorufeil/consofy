@@ -9,7 +9,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 
-import { idColumn, timestamps } from "./_shared";
+import { denyAnonAuthenticated, idColumn, timestamps } from "./_shared";
 import { organizations } from "./organizations";
 
 export const people = pgTable(
@@ -70,5 +70,6 @@ export const people = pgTable(
       sql`${t.phoneE164} ~ '^\\+[1-9][0-9]{1,14}$'`,
     ),
     check("people_email_lowercase", sql`${t.email} = lower(${t.email})`),
+    denyAnonAuthenticated(),
   ],
 ).enableRLS();

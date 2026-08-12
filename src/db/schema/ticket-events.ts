@@ -9,7 +9,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 
-import { idColumn } from "./_shared";
+import { denyAnonAuthenticated, idColumn } from "./_shared";
 import { tickets } from "./tickets";
 
 export const ticketEventType = pgEnum("ticket_event_type", [
@@ -72,5 +72,6 @@ export const ticketEvents = pgTable(
     // igual que ticket_attachments, no es una de las 4 consultas de
     // bandeja del punto 6 pero es la razón de ser de esta tabla.
     index("ticket_events_ticket_id_created_at_idx").on(t.ticketId, t.createdAt),
+    denyAnonAuthenticated(),
   ],
 ).enableRLS();

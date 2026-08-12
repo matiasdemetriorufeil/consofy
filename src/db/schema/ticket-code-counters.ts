@@ -1,5 +1,6 @@
 import { integer, pgTable, primaryKey, uuid } from "drizzle-orm/pg-core";
 
+import { denyAnonAuthenticated } from "./_shared";
 import { buildings } from "./buildings";
 
 // Contador atómico para tickets.public_code (ver tickets.ts y la función
@@ -34,5 +35,8 @@ export const ticketCodeCounters = pgTable(
     year: integer("year").notNull(),
     lastValue: integer("last_value").notNull().default(0),
   },
-  (t) => [primaryKey({ columns: [t.buildingId, t.year] })],
+  (t) => [
+    primaryKey({ columns: [t.buildingId, t.year] }),
+    denyAnonAuthenticated(),
+  ],
 ).enableRLS();

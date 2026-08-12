@@ -11,7 +11,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 
-import { idColumn, timestamps } from "./_shared";
+import { denyAnonAuthenticated, idColumn, timestamps } from "./_shared";
 import { buildings } from "./buildings";
 import { categories, ticketPriority } from "./categories";
 import { incidents } from "./incidents";
@@ -212,5 +212,6 @@ export const tickets = pgTable(
       t.categoryId,
       t.reportedAt,
     ),
+    denyAnonAuthenticated(),
   ],
 ).enableRLS();

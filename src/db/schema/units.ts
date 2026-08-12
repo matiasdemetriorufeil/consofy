@@ -10,7 +10,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 
-import { idColumn, timestamps } from "./_shared";
+import { denyAnonAuthenticated, idColumn, timestamps } from "./_shared";
 import { buildings } from "./buildings";
 
 // Valores en inglés: son datos de base (código), no UI. La traducción vive
@@ -72,5 +72,6 @@ export const units = pgTable(
     // arriba, al ser parcial, no sirve para "listar TODAS las unidades de
     // este edificio" (activas + dadas de baja).
     index("units_building_id_idx").on(t.buildingId),
+    denyAnonAuthenticated(),
   ],
 ).enableRLS();

@@ -7,7 +7,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 
-import { idColumn, timestamps } from "./_shared";
+import { denyAnonAuthenticated, idColumn, timestamps } from "./_shared";
 import { tickets } from "./tickets";
 
 export const ticketAttachments = pgTable(
@@ -41,5 +41,6 @@ export const ticketAttachments = pgTable(
     // carga, que created_at ya da gratis. Agregar un campo de orden manual
     // ahora sería una columna sin ningún camino de escritura real -- no
     // hay pedida ninguna función de reordenar adjuntos a mano.
+    denyAnonAuthenticated(),
   ],
 ).enableRLS();

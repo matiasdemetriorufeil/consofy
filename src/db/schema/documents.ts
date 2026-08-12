@@ -9,7 +9,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 
-import { idColumn, timestamps } from "./_shared";
+import { denyAnonAuthenticated, idColumn, timestamps } from "./_shared";
 import { buildings } from "./buildings";
 import { organizations } from "./organizations";
 
@@ -79,5 +79,6 @@ export const documents = pgTable(
       t.category,
       t.visibility,
     ),
+    denyAnonAuthenticated(),
   ],
 ).enableRLS();

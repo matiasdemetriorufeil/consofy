@@ -11,7 +11,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 
-import { idColumn, timestamps } from "./_shared";
+import { denyAnonAuthenticated, idColumn, timestamps } from "./_shared";
 import { buildings } from "./buildings";
 import { organizations } from "./organizations";
 
@@ -85,5 +85,6 @@ export const reminders = pgTable(
     // historial de fumigaciones pasadas" es WHERE series_id = ? ORDER BY
     // due_date.
     index("reminders_series_id_due_date_idx").on(t.seriesId, t.dueDate),
+    denyAnonAuthenticated(),
   ],
 ).enableRLS();

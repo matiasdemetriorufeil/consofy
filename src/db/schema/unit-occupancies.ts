@@ -11,7 +11,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 
-import { idColumn, timestamps } from "./_shared";
+import { denyAnonAuthenticated, idColumn, timestamps } from "./_shared";
 import { people } from "./people";
 import { units } from "./units";
 
@@ -85,5 +85,6 @@ export const unitOccupancies = pgTable(
       "unit_occupancies_ended_on_after_started_on",
       sql`${t.endedOn} is null or ${t.endedOn} > ${t.startedOn}`,
     ),
+    denyAnonAuthenticated(),
   ],
 ).enableRLS();

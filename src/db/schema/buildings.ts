@@ -10,7 +10,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 
-import { idColumn, timestamps } from "./_shared";
+import { denyAnonAuthenticated, idColumn, timestamps } from "./_shared";
 import { organizations } from "./organizations";
 
 export const buildings = pgTable(
@@ -88,5 +88,6 @@ export const buildings = pgTable(
       "buildings_admin_whatsapp_e164_format",
       sql`${t.adminWhatsappE164} ~ '^\\+[1-9][0-9]{1,14}$'`,
     ),
+    denyAnonAuthenticated(),
   ],
 ).enableRLS();

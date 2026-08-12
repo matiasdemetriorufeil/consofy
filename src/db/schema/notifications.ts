@@ -9,7 +9,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 
-import { idColumn, timestamps } from "./_shared";
+import { denyAnonAuthenticated, idColumn, timestamps } from "./_shared";
 import { incidents } from "./incidents";
 import { organizations } from "./organizations";
 import { reminders } from "./reminders";
@@ -77,5 +77,6 @@ export const notifications = pgTable(
     index("notifications_organization_id_unread_idx")
       .on(t.organizationId)
       .where(sql`${t.readAt} is null`),
+    denyAnonAuthenticated(),
   ],
 ).enableRLS();
