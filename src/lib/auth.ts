@@ -53,25 +53,15 @@ export type AuthorizedUser = {
   };
 };
 
-// Esta función es la base de toda la autorización del proyecto -- diseñada
-// para que sea imposible de usar mal: el único tipo de retorno que existe
-// (AuthorizedUser) siempre trae el usuario Y su organización juntos, nunca
-// uno sin el otro. No hay una función "getUser()" exportada que devuelva
-// el usuario solo -- si hiciera falta, sería un atajo que invita a un bug
-// real: código que verifica "hay usuario" pero se olvida de filtrar por
-// organización antes de tocar datos.
-//
-// Redirige a /login en dos casos, no solo uno: sin sesión de Supabase
-// (nadie logueado), y CON sesión de Supabase pero sin fila en app_users
-// (un usuario de auth.users que existe pero nunca se vinculó a una
-// organización -- ver la nota sobre la falta de FK a auth.users en
-// app-users.ts). El segundo caso no debería pasar en el flujo normal, pero
-// tratarlo iguial que "no hay sesión" es la opción segura: no hay
-// autorización posible sin organización.
-export const requireUser = cache(async (): Promise<AuthorizedUser> => {
+// Un usuario "autorizado" es sesión de Supabase + fila en app_users
+// resuelta en la misma consulta (join), nunca una sin la otra -- ver
+// AuthorizedUser abajo. Privada: las dos funciones públicas de este
+// archivo (requireUser, getAuthorizedUser) se arman sobre esta, difieren
+// solo en qué hacen cuando NO hay usuario autorizado.
+async function resolveAuthorizedUser(): Promise<AuthorizedUser | null> {
   const session = await getSession();
   if (!session) {
-    redirect("/login");
+    return null;
   }
 
   const [row] = await db
@@ -88,7 +78,7 @@ export const requireUser = cache(async (): Promise<AuthorizedUser> => {
     .where(eq(appUsers.id, session.user.id));
 
   if (!row) {
-    redirect("/login");
+    return null;
   }
 
   return {
@@ -104,4 +94,42 @@ export const requireUser = cache(async (): Promise<AuthorizedUser> => {
       timezone: row.organizationTimezone,
     },
   };
+}
+
+// Esta función es la base de toda la autorización del proyecto -- diseñada
+// para que sea imposible de usar mal: el único tipo de retorno que existe
+// (AuthorizedUser) siempre trae el usuario Y su organización juntos, nunca
+// uno sin el otro. No hay una función "getUser()" exportada que devuelva
+// el usuario solo -- si hiciera falta, sería un atajo que invita a un bug
+// real: código que verifica "hay usuario" pero se olvida de filtrar por
+// organización antes de tocar datos.
+//
+// Redirige a /login en dos casos, no solo uno: sin sesión de Supabase
+// (nadie logueado), y CON sesión de Supabase pero sin fila en app_users
+// (un usuario de auth.users que existe pero nunca se vinculó a una
+// organización -- ver la nota sobre la falta de FK a auth.users en
+// app-users.ts). El segundo caso no debería pasar en el flujo normal, pero
+// tratarlo igual que "no hay sesión" es la opción segura: no hay
+// autorización posible sin organización.
+export const requireUser = cache(async (): Promise<AuthorizedUser> => {
+  const authorized = await resolveAuthorizedUser();
+  if (!authorized) {
+    redirect("/login");
+  }
+  return authorized;
 });
+
+// Variante sin redirect, para la página de /login: necesita saber "¿ya hay
+// una sesión completamente autorizada?" para mandar directo al panel, pero
+// SIN poder usar requireUser() ahí -- si lo usara, una sesión de Supabase
+// válida sin fila en app_users (ver el comentario de arriba) generaría un
+// loop infinito de redirects entre /login y /panel (login manda a panel
+// por tener sesión, panel manda de vuelta a login por no tener app_users,
+// login vuelve a mandar a panel...). Con esta variante, ese caso borde cae
+// en "no autorizado" sin redirigir -- la página de login simplemente se
+// muestra igual.
+export const getAuthorizedUser = cache(
+  async (): Promise<AuthorizedUser | null> => {
+    return resolveAuthorizedUser();
+  },
+);

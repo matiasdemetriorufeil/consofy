@@ -1,0 +1,106 @@
+"use client";
+
+import { zodResolver } from "@hookform/resolvers/zod";
+import { startTransition, useActionState } from "react";
+import { useForm } from "react-hook-form";
+
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Field,
+  FieldError,
+  FieldGroup,
+  FieldLabel,
+} from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+
+import { loginAction } from "../actions";
+import {
+  initialLoginState,
+  loginSchema,
+  type LoginInput,
+} from "../login-schema";
+
+export function LoginForm() {
+  // useActionState, no useFormStatus: useFormStatus solo lee el estado de
+  // un <form action={...}> nativo desde un componente HIJO de ese form. Acá
+  // el submit lo maneja react-hook-form (handleSubmit hace la validación
+  // client-side con el mismo esquema Zod del servidor, y recién si pasa
+  // dispara la Server Action a mano) -- no hay un <form action={fn}>
+  // nativo del que useFormStatus pueda leer nada. useActionState sí sirve
+  // igual, llamado a mano: su isPending cubre el estado de carga del botón
+  // sin depender de esa integración nativa.
+  const [state, dispatch, isPending] = useActionState(
+    loginAction,
+    initialLoginState,
+  );
+
+  const {
+    register,
+    handleSubmit,
+    formState: { errors },
+  } = useForm<LoginInput>({
+    resolver: zodResolver(loginSchema),
+    defaultValues: { email: "", password: "" },
+  });
+
+  return (
+    <Card className="w-full max-w-sm">
+      <CardHeader>
+        <CardTitle className="text-center text-xl">Consofy</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <form
+          noValidate
+          onSubmit={handleSubmit((data) =>
+            // startTransition explícito: el dispatch de useActionState solo
+            // se envuelve en una transición SOLO cuando Next la dispara por
+            // el mecanismo nativo de <form action={fn}> -- llamado a mano
+            // (como acá, desde handleSubmit de react-hook-form) no lo hace
+            // solo. Sin esto, React tira un warning en consola y isPending
+            // deja de ser confiable -- lo encontré así, con la consola real
+            // del navegador, no leyendo la documentación.
+            startTransition(() => dispatch(data)),
+          )}
+        >
+          <FieldGroup>
+            {state.error && (
+              <Alert variant="destructive">
+                <AlertDescription>{state.error}</AlertDescription>
+              </Alert>
+            )}
+
+            <Field data-invalid={!!errors.email}>
+              <FieldLabel htmlFor="email">Email</FieldLabel>
+              <Input
+                id="email"
+                type="email"
+                autoComplete="email"
+                aria-invalid={!!errors.email}
+                {...register("email")}
+              />
+              <FieldError errors={[errors.email]} />
+            </Field>
+
+            <Field data-invalid={!!errors.password}>
+              <FieldLabel htmlFor="password">Contraseña</FieldLabel>
+              <Input
+                id="password"
+                type="password"
+                autoComplete="current-password"
+                aria-invalid={!!errors.password}
+                {...register("password")}
+              />
+              <FieldError errors={[errors.password]} />
+            </Field>
+
+            <Button type="submit" disabled={isPending} className="w-full">
+              {isPending ? "Ingresando…" : "Ingresar"}
+            </Button>
+          </FieldGroup>
+        </form>
+      </CardContent>
+    </Card>
+  );
+}

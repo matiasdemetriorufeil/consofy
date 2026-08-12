@@ -7,7 +7,25 @@ import { updateSession } from "@/lib/supabase/middleware";
 // quedó deprecado. Este proyecto usa Next 16, así que va con el nombre
 // vigente. Ver https://nextjs.org/docs/messages/middleware-to-proxy.
 export async function proxy(request: NextRequest) {
-  return await updateSession(request);
+  const response = await updateSession(request);
+
+  // Cache-Control: no-store en /panel/*, encontrado con una prueba real en
+  // el navegador (paso 3.2, punto 8): sin esto, después de cerrar sesión el
+  // botón atrás del navegador restauraba el panel desde el bfcache (back-
+  // forward cache) -- una foto en memoria de la página tal como quedó
+  // renderizada, que el navegador puede mostrar sin volver a pedirle nada
+  // al servidor. `dynamic = "force-dynamic"` (en panel/layout.tsx) evita
+  // que Next.js cachee/prerenderice la respuesta del SERVIDOR, pero no le
+  // dice nada al NAVEGADOR sobre si puede guardar esa respuesta en bfcache
+  // -- son dos cachés distintos. no-store es justamente la señal que hace
+  // que Chrome (y el resto) excluyan la página del bfcache, forzando un
+  // pedido nuevo al servidor si se vuelve con atrás -- y ese pedido nuevo sí
+  // encuentra la sesión cerrada y redirige a /login.
+  if (request.nextUrl.pathname.startsWith("/panel")) {
+    response.headers.set("Cache-Control", "no-store");
+  }
+
+  return response;
 }
 
 export const config = {

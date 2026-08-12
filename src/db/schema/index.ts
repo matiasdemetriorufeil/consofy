@@ -16,4 +16,5 @@ export * from "./announcement-recipients";
 export * from "./reminders";
 export * from "./documents";
 export * from "./notifications";
+export * from "./login-attempts";
 export * from "./relations";

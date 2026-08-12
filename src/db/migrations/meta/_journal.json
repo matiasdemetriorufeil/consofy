@@ -120,6 +120,13 @@
       "when": 1786564739205,
       "tag": "0016_faulty_arclight",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1786571456567,
+      "tag": "0017_last_fallen_one",
+      "breakpoints": true
     }
   ]
 }
