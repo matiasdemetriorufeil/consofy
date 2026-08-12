@@ -43,6 +43,20 @@
       "when": 1786543185092,
       "tag": "0005_composite_org_fks",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1786545169587,
+      "tag": "0006_late_nebula",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1786545231350,
+      "tag": "0007_ticket_public_code_trigger",
+      "breakpoints": true
     }
   ]
 }
