@@ -71,6 +71,20 @@
       "when": 1786546224348,
       "tag": "0009_ticket_public_code_prefix",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1786547086198,
+      "tag": "0010_yellow_tana_nile",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1786547116889,
+      "tag": "0011_incidents_announcements_reminders_documents_notifications_triggers",
+      "breakpoints": true
     }
   ]
 }

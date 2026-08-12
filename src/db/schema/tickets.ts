@@ -14,6 +14,7 @@ import {
 import { idColumn, timestamps } from "./_shared";
 import { buildings } from "./buildings";
 import { categories, ticketPriority } from "./categories";
+import { incidents } from "./incidents";
 import { organizations } from "./organizations";
 import { people } from "./people";
 import { units } from "./units";
@@ -105,14 +106,8 @@ export const tickets = pgTable(
       .defaultNow(),
     resolvedAt: timestamp("resolved_at", { withTimezone: true }),
     closedAt: timestamp("closed_at", { withTimezone: true }),
-    // Sin FK: incidents (etapa 7) todavía no existe. Se agrega la columna
-    // ahora para no tener que reescribir esta tabla completa después; en
-    // la etapa 7 se agrega una FK compuesta (incident_id, organization_id)
-    // -> incidents(id, organization_id) en una migración nueva, siguiendo
-    // el mismo patrón que el resto del esquema. Se descartó crear una
-    // tabla incidents mínima ahora: sería modelar algo que este paso no
-    // pidió, con menos contexto del que va a haber en la etapa 7 sobre qué
-    // necesita realmente "agrupar reclamos en un problema en común".
+    // La columna se agregó sin FK en el paso 2.4 (incidents todavía no
+    // existía). Ahora sí tiene su FK compuesta -- ver más abajo.
     incidentId: uuid("incident_id"),
     ...timestamps(),
   },
@@ -139,6 +134,15 @@ export const tickets = pgTable(
     foreignKey({
       columns: [t.categoryId, t.organizationId],
       foreignColumns: [categories.id, categories.organizationId],
+    }).onDelete("restrict"),
+    // Pendiente desde el paso 2.4 (incidents no existía todavía). Nullable
+    // (MATCH SIMPLE): la mayoría de los reclamos nunca se agrupan en un
+    // incidente. onDelete restrict igual que el resto -- no tiene sentido
+    // borrar físicamente un incidente con reclamos que todavía lo
+    // referencian.
+    foreignKey({
+      columns: [t.incidentId, t.organizationId],
+      foreignColumns: [incidents.id, incidents.organizationId],
     }).onDelete("restrict"),
     // Necesaria para que ticket_attachments y ticket_events referencien
     // tickets(id, organization_id) con FK compuesta. Ver CLAUDE.md >
