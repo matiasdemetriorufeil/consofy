@@ -31,6 +31,12 @@ export const buildings = pgTable(
     // la identidad interna de la fila ni las FKs que apuntan a ella.
     // uuid con default aleatorio ya cumple "no adivinable ni secuencial".
     publicToken: uuid("public_token").notNull().defaultRandom().unique(),
+    // Prefijo legible para tickets.public_code ("TC" de "Torre Central" ->
+    // "TC-2026-0143"). Mayúsculas fijo (no se normaliza en la app: si se
+    // permitiera minúsculas habría que decidir case-folding en dos lugares
+    // -- acá y en el trigger que arma el código -- y sería una fuente de
+    // bugs sutiles si algún día difieren). Ver CHECK de formato más abajo.
+    codePrefix: text("code_prefix").notNull(),
     adminWhatsappE164: text("admin_whatsapp_e164").notNull(),
     notes: text("notes"),
     active: boolean("active").notNull().default(true),
@@ -57,9 +63,23 @@ export const buildings = pgTable(
     // papelera o una vista de auditoría) porque esa consulta no garantiza
     // deleted_at IS NULL. Este índice plano cubre ese caso.
     index("buildings_organization_id_idx").on(t.organizationId),
+    // Único (organization_id, code_prefix) entre edificios NO borrados
+    // (parcial): mismo motivo que slug -- un edificio dado de baja no debe
+    // bloquear reutilizar su prefijo. Es lo que garantiza, junto con el
+    // contador por (building_id, year), que dos reclamos de la misma
+    // organización nunca compartan public_code -- ver tickets.ts.
+    uniqueIndex("buildings_organization_id_code_prefix_unique")
+      .on(t.organizationId, t.codePrefix)
+      .where(sql`${t.deletedAt} is null`),
     // Sin guiones al principio/final ni consecutivos: "torre-norte" válido,
     // "-torre" / "torre-" / "torre--norte" / "-" inválidos, "t" válido.
     check("buildings_slug_format", sql`${t.slug} ~ '^[a-z0-9]+(-[a-z0-9]+)*$'`),
+    // Solo A-Z mayúsculas, 2 a 4 caracteres: "TC", "TNOR", no "tc" ni "T"
+    // ni "TORRE1".
+    check(
+      "buildings_code_prefix_format",
+      sql`${t.codePrefix} ~ '^[A-Z]{2,4}$'`,
+    ),
     check(
       // \\+ (no \+): en un template string de JS, \+ no es un escape
       // reconocido y el backslash se pierde antes de llegar a Postgres,

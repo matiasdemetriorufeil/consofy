@@ -87,9 +87,10 @@ export const tickets = pgTable(
     publicCode: text("public_code")
       .notNull()
       // Default "vacío" real pero irrelevante en la práctica: lo pone
-      // SIEMPRE el trigger set_ticket_public_code() (BEFORE INSERT, ver la
-      // migración 0007), que sobreescribe el valor sin condición en cada
-      // INSERT. Este default solo existe para que Drizzle no exija
+      // SIEMPRE el trigger set_ticket_public_code() (BEFORE INSERT, creado
+      // en la migración 0007 y con el formato PREFIJO-AÑO-NNNN desde la
+      // 0009), que sobreescribe el valor sin condición en cada INSERT. Este
+      // default solo existe para que Drizzle no exija
       // public_code en el tipo de INSERT de la aplicación -- ningún código
       // de la app debe setearlo a mano, ni podría acertar el valor
       // correcto sin repetir la lógica del contador.
@@ -143,11 +144,26 @@ export const tickets = pgTable(
     // tickets(id, organization_id) con FK compuesta. Ver CLAUDE.md >
     // Integridad entre organizaciones.
     unique("tickets_id_organization_id_unique").on(t.id, t.organizationId),
-    // Único GLOBAL (no parcial, no por organización): dos reclamos de
-    // cualquier organización nunca comparten código. El índice único que
-    // respalda esta constraint es también lo que sirve "buscar un reclamo
-    // por public_code" -- no hace falta un índice aparte para eso.
-    unique("tickets_public_code_unique").on(t.publicCode),
+    // Único POR ORGANIZACIÓN, no global (cambio del paso 2.4b): el código
+    // ahora lleva el prefijo del edificio (PREFIJO-AÑO-NNNN), que solo es
+    // único DENTRO de cada organización (dos organizaciones distintas
+    // pueden tener cada una un edificio con prefijo "TC"). Un UNIQUE global
+    // sobre public_code dejaría que un reclamo de la organización B hiciera
+    // fallar un INSERT de la organización A por una coincidencia de código
+    // totalmente ajena a ella -- un bug real, no solo un caso raro.
+    //
+    // Por qué esto no rompe nada: el único lugar donde alguien busca un
+    // reclamo por public_code es el formulario público de consulta de
+    // estado, que llega vía el token de un edificio puntual -- ahí ya se
+    // conoce la organización antes de leer el código, así que nunca hace
+    // falta una búsqueda ciega global. Total, no parcial (sin WHERE
+    // deleted_at IS NULL): un código ya emitido no se reutiliza ni aunque
+    // el reclamo se borre lógicamente -- mismo criterio que
+    // buildings.public_token.
+    unique("tickets_organization_id_public_code_unique").on(
+      t.organizationId,
+      t.publicCode,
+    ),
     // Al menos uno de los dos: sin esto, un reclamo podría quedar sin
     // ninguna forma de ubicar la unidad (ni id ni texto libre).
     check(
