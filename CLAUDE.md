@@ -231,11 +231,65 @@ tabla nueva sigue necesitando su propio `.enableRLS()` (ya es la convención,
 ver `_shared.ts`) y su propia `denyAnonAuthenticated()` en el array de
 `extraConfig` para que el linter no la marque como `0008_rls_enabled_no_policy`.
 
+## Autorización de rutas y Server Actions
+
+**El layout de una ruta protege lo que se renderiza ahí, nada más.**
+Verificado contra la documentación oficial de Next.js 16
+(`nextjs.org/docs/app/guides/authentication#layouts-and-auth-checks` y
+`nextjs.org/docs/app/getting-started/mutating-data`), no asumido -- tres
+límites concretos que cambian cómo se escribe código en este proyecto:
+
+1. **Los layouts de servidor no se re-ejecutan en cada navegación del lado
+   del cliente.** Cita textual: _"these don't re-render on navigation,
+   meaning the user session won't be checked on every route change"_
+   (Partial Rendering). El layout de `/panel` corre una vez por respuesta
+   completa del servidor, no en cada click de un `<Link>` entre dos
+   páginas que ya comparten ese layout.
+2. **Un layout no controla si el resto de la ruta se ejecuta.** Los
+   segmentos hijos (páginas, Server Actions definidas ahí) los renderiza
+   el router, no el layout -- un layout que "esconde" contenido no impide
+   que ese contenido corra ni que aparezca en el RSC Payload.
+3. **Las Server Actions y los Route Handlers son endpoints POST/HTTP
+   invocables de forma directa**, sin pasar por ningún layout. Cita
+   textual: _"Server Functions are reachable via direct POST requests,
+   not just through your application's UI. Always verify authentication
+   and authorization inside every Server Function."_ Para Route Handlers,
+   la misma página dice explícitamente: _"Treat Route Handlers with the
+   same security considerations as public-facing API endpoints."_
+
+**Conclusión (confirma la hipótesis del paso 3.3):** el layout de
+`/panel` (que llama a `requireUser()`) es la primera línea de defensa
+para el caso normal -- alguien navegando el panel con el navegador -- pero
+NO alcanza para Server Actions ni Route Handlers, que se pueden invocar
+directo por HTTP sin pasar nunca por ese layout. Cada Server Action de
+dominio tiene que resolver su propia autorización, sin depender de en qué
+ruta vive el componente que la llama.
+
+**Patrón obligatorio:** toda Server Action de dominio (la que lee o
+escribe datos de una organización) se define envuelta en
+`authorizedAction()` (`src/lib/auth.ts`), nunca llamando a `requireUser()`
+suelto al principio del cuerpo -- lo segundo compila y funciona igual si
+no te lo olvidás, pero es indistinguible a simple vista de una action que
+se olvidó de chequear. `authorizedAction()` inyecta el contexto
+autorizado (`{ user, appUser, organization }`) como primer argumento: una
+action que NO lo recibe como argumento es, por construcción, una action
+sin autorización -- se nota con solo mirar la firma, sin tener que leer
+el cuerpo entero para confiar en que está protegida.
+
+Excepciones documentadas (y por qué):
+
+- `loginAction` (`src/features/auth/actions.ts`): pública a propósito, es
+  la puerta de entrada -- no hay usuario que autorizar todavía.
+- `logoutAction`: cerrar sesión es seguro sin sesión activa (no toca datos
+  de ninguna organización); forzar `requireUser()` ahí solo agregaría una
+  consulta a la base sin beneficio real.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
 - Toda Server Action valida sesión y pertenencia a la organización antes de
-  tocar datos.
+  tocar datos, envuelta en `authorizedAction()` salvo las excepciones
+  documentadas arriba.
 - Toda entrada del usuario se valida con Zod EN EL SERVIDOR, aunque ya se haya
   validado en el cliente.
 - Credenciales solo en variables de entorno. Nunca en el código ni en commits.

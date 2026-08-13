@@ -2,6 +2,7 @@
 
 import { redirect } from "next/navigation";
 
+import { sanitizeNextPath } from "@/lib/safe-redirect";
 import { createClient } from "@/lib/supabase/server";
 
 import {
@@ -10,6 +11,12 @@ import {
   recordLoginAttempt,
 } from "./login-rate-limit";
 import { loginSchema, type LoginState } from "./login-schema";
+
+// loginAction y logoutAction NO usan authorizedAction() (src/lib/auth.ts)
+// -- son las dos excepciones documentadas en CLAUDE.md > Autorización de
+// rutas y Server Actions: loginAction es la puerta de entrada, pública a
+// propósito; logoutAction es segura de llamar sin sesión (no toca datos
+// de ninguna organización).
 
 // Nunca se llama desde el cliente (ver CLAUDE.md > Reglas de WhatsApp... y en
 // general, todo acceso a Auth/datos pasa por el servidor): la contraseña
@@ -28,7 +35,7 @@ export async function loginAction(
     // credenciales incorrectas, nunca revela qué campo falló.
     return { error: "El email o la contraseña no coinciden." };
   }
-  const { email, password } = parsed.data;
+  const { email, password, next } = parsed.data;
 
   const ip = await getClientIp();
 
@@ -65,10 +72,16 @@ export async function loginAction(
     };
   }
 
+  // sanitizeNextPath() acá, no antes: `next` llegó como query param de una
+  // URL que cualquiera pudo escribir a mano (?next=https://evil.com), así
+  // que se valida justo antes de usarse -- ver src/lib/safe-redirect.ts
+  // sobre por qué alcanza con el chequeo de prefijo "/panel" para
+  // descartar un open redirect.
+  //
   // redirect() fuera de cualquier try/catch: tira una excepción especial
   // que Next.js necesita que llegue sin interceptar -- envolverla en un
   // catch genérico la convertiría en un error más.
-  redirect("/panel");
+  redirect(sanitizeNextPath(next));
 }
 
 export async function logoutAction() {

@@ -22,7 +22,7 @@ import {
   type LoginInput,
 } from "../login-schema";
 
-export function LoginForm() {
+export function LoginForm({ next }: { next?: string }) {
   // useActionState, no useFormStatus: useFormStatus solo lee el estado de
   // un <form action={...}> nativo desde un componente HIJO de ese form. Acá
   // el submit lo maneja react-hook-form (handleSubmit hace la validación
@@ -78,7 +78,13 @@ export function LoginForm() {
             // solo. Sin esto, React tira un warning en consola y isPending
             // deja de ser confiable -- lo encontré así, con la consola real
             // del navegador, no leyendo la documentación.
-            startTransition(() => dispatch(data)),
+            //
+            // `next` viaja junto con email/password, no por su cuenta: es
+            // más simple que coordinar dos fuentes de estado, y de todos
+            // modos se vuelve a sanitizar en el servidor antes de usarse
+            // (ver loginAction) -- acá no es más que un dato de más en el
+            // mismo payload.
+            startTransition(() => dispatch({ ...data, next })),
           )}
         >
           <FieldGroup>

@@ -1,4 +1,4 @@
-import type { NextRequest } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
 
 import { updateSession } from "@/lib/supabase/middleware";
 
@@ -7,22 +7,48 @@ import { updateSession } from "@/lib/supabase/middleware";
 // quedó deprecado. Este proyecto usa Next 16, así que va con el nombre
 // vigente. Ver https://nextjs.org/docs/messages/middleware-to-proxy.
 export async function proxy(request: NextRequest) {
-  const response = await updateSession(request);
+  const { response, hasSession } = await updateSession(request);
+  const pathname = request.nextUrl.pathname;
 
-  // Cache-Control: no-store en /panel/*, encontrado con una prueba real en
-  // el navegador (paso 3.2, punto 8): sin esto, después de cerrar sesión el
-  // botón atrás del navegador restauraba el panel desde el bfcache (back-
-  // forward cache) -- una foto en memoria de la página tal como quedó
-  // renderizada, que el navegador puede mostrar sin volver a pedirle nada
-  // al servidor. `dynamic = "force-dynamic"` (en panel/layout.tsx) evita
-  // que Next.js cachee/prerenderice la respuesta del SERVIDOR, pero no le
-  // dice nada al NAVEGADOR sobre si puede guardar esa respuesta en bfcache
-  // -- son dos cachés distintos. no-store es justamente la señal que hace
-  // que Chrome (y el resto) excluyan la página del bfcache, forzando un
-  // pedido nuevo al servidor si se vuelve con atrás -- y ese pedido nuevo sí
-  // encuentra la sesión cerrada y redirige a /login.
-  if (request.nextUrl.pathname.startsWith("/panel")) {
+  if (pathname.startsWith("/panel")) {
+    // Cache-Control: no-store en /panel/*, encontrado con una prueba real
+    // en el navegador (paso 3.2, punto 8): sin esto, después de cerrar
+    // sesión el botón atrás del navegador restauraba el panel desde el
+    // bfcache (back-forward cache) -- una foto en memoria de la página tal
+    // como quedó renderizada, que el navegador puede mostrar sin volver a
+    // pedirle nada al servidor. `dynamic = "force-dynamic"` (en
+    // panel/layout.tsx) evita que Next.js cachee/prerenderice la
+    // respuesta del SERVIDOR, pero no le dice nada al NAVEGADOR sobre si
+    // puede guardar esa respuesta en bfcache -- son dos cachés distintos.
+    // no-store es justamente la señal que hace que Chrome (y el resto)
+    // excluyan la página del bfcache, forzando un pedido nuevo al
+    // servidor si se vuelve con atrás -- y ese pedido nuevo sí encuentra
+    // la sesión cerrada y redirige a /login.
     response.headers.set("Cache-Control", "no-store");
+
+    // Redirect optimista (paso 3.3, punto 6): sin sesión, ni vale la pena
+    // dejar que la request siga hasta el layout -- se corta acá, en el
+    // único lugar del pipeline que todavía tiene el path exacto que se
+    // pidió. Se guarda en `next` para volver ahí después del login, en
+    // vez de mandar siempre a la home del panel. No hace falta
+    // sanitizeNextPath() (src/lib/safe-redirect.ts) acá: el valor sale del
+    // propio request (siempre empieza con "/panel", por el chequeo de
+    // arriba), no de un input externo. SÍ se aplica del otro lado -- en
+    // loginAction y en /login -- porque ahí `next` ya es un query param
+    // que cualquiera pudo escribir a mano en la URL.
+    if (!hasSession) {
+      const loginUrl = new URL("/login", request.url);
+      loginUrl.searchParams.set("next", pathname + request.nextUrl.search);
+      const redirectResponse = NextResponse.redirect(loginUrl);
+      // Copiar las cookies del response original: updateSession() puede
+      // haber refrescado el token de Supabase, y si se descartan acá esa
+      // renovación se pierde en silencio (mismo cuidado que ya toma
+      // updateSession() con supabaseResponse).
+      response.cookies.getAll().forEach((cookie) => {
+        redirectResponse.cookies.set(cookie);
+      });
+      return redirectResponse;
+    }
   }
 
   return response;

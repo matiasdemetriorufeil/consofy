@@ -133,3 +133,26 @@ export const getAuthorizedUser = cache(
     return resolveAuthorizedUser();
   },
 );
+
+// Por qué hace falta esto ADEMÁS del layout de /panel: ver CLAUDE.md >
+// Autorización de rutas y Server Actions. Resumen -- una Server Action es
+// un endpoint POST invocable por HTTP directo, sin pasar por el layout de
+// la ruta desde la que se la llama en la UI. El layout protege la
+// navegación normal; esto protege la Server Action en sí, sin importar
+// desde dónde se invoque.
+//
+// Ergonomía: envuelve la action para que reciba el contexto autorizado
+// como PRIMER argumento, en vez de llamar a requireUser() suelto adentro
+// del cuerpo. La diferencia es deliberada -- "suelto adentro" compila y
+// funciona igual si no te olvidás de ponerlo, pero es indistinguible a
+// simple vista de una action que se olvidó. Con el contexto como
+// argumento, la firma sola ya dice si la action está protegida: una que
+// no lo recibe, por construcción, no llama a requireUser().
+export function authorizedAction<Args extends unknown[], Result>(
+  action: (context: AuthorizedUser, ...args: Args) => Promise<Result>,
+): (...args: Args) => Promise<Result> {
+  return async (...args: Args) => {
+    const context = await requireUser();
+    return action(context, ...args);
+  };
+}

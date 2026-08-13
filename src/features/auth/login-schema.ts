@@ -9,6 +9,13 @@ import { z } from "zod";
 export const loginSchema = z.object({
   email: z.email({ message: "Ingresá un email válido." }).trim().toLowerCase(),
   password: z.string().min(1, { message: "Ingresá tu contraseña." }),
+  // A dónde volver después de un login exitoso (paso 3.3, punto 6). Sin
+  // validación de formato acá a propósito: no es un dato que el usuario
+  // "carga mal", es un parámetro de navegación que puede venir manipulado
+  // a mano en la URL -- la defensa real es sanitizeNextPath()
+  // (src/lib/safe-redirect.ts), aplicada recién al USARLO en loginAction,
+  // nunca acá.
+  next: z.string().optional(),
 });
 
 export type LoginInput = z.infer<typeof loginSchema>;

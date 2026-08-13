@@ -8,7 +8,9 @@ import { publicEnv } from "@/lib/env.public";
 // (ver src/proxy.ts) -- lo que vive acá es el HELPER que ese proxy invoca en
 // cada request, no el punto de entrada de Next en sí. El nombre sigue
 // siendo válido para describir qué hace: refresca la sesión de Supabase.
-export async function updateSession(request: NextRequest) {
+export async function updateSession(
+  request: NextRequest,
+): Promise<{ response: NextResponse; hasSession: boolean }> {
   // Hay que devolver ESTE objeto de respuesta con sus cookies actualizadas,
   // no uno nuevo creado más abajo: si en el medio se arma un
   // `NextResponse.next()` distinto y se devuelve ese en cambio, las cookies
@@ -45,19 +47,24 @@ export async function updateSession(request: NextRequest) {
   // claves públicas del proyecto, sin round-trip a los servidores de Auth
   // en cada request -- es el método recomendado hoy para este caso (este
   // proxy corre en toda request que matchee, así que el costo de red de
-  // getUser() en cada una sería alto). El resultado en sí no se usa acá
-  // todavía: llamarlo es lo que dispara el refresco del token si está
-  // vencido (efecto secundario de leer la sesión), que es lo único que
-  // este archivo tiene que garantizar. No confundir con
-  // supabase.auth.getSession(): esa lee la cookie sin validarla, y
-  // Supabase la desaconseja para decisiones de autorización.
+  // getUser() en cada una sería alto). Llamarlo es lo que dispara el
+  // refresco del token si está vencido (efecto secundario de leer la
+  // sesión), que es lo único que este archivo garantizaba antes. No
+  // confundir con supabase.auth.getSession(): esa lee la cookie sin
+  // validarla, y Supabase la desaconseja para decisiones de autorización.
   //
-  // La redirección a /login cuando no hay sesión NO vive acá: ese
-  // criterio es responsabilidad de requireUser() (src/lib/auth.ts),
-  // llamado por cada página/layout que lo necesite -- todavía no existen
-  // rutas protegidas en src/app/ como para decidir acá con qué prefijo de
-  // path proteger, y hacerlo en las dos capas sería lógica duplicada.
-  await supabase.auth.getClaims();
+  // hasSession (a partir de acá) es un chequeo OPTIMISTA, no la
+  // autorización final: solo dice "el JWT es válido", no "existe una fila
+  // en app_users para este usuario". Es intencional que este archivo no
+  // toque la base -- ver la recomendación oficial de Next.js sobre Proxy
+  // ("it's important to only read the session from the cookie... and
+  // avoid database checks to prevent performance issues", ya que corre en
+  // TODA request que matchee, incluidas las prefetcheadas). La
+  // autorización real, contra la base, sigue siendo responsabilidad de
+  // requireUser() (src/lib/auth.ts) en el layout de /panel -- este chequeo
+  // optimista solo existe para poder armar el redirect con `next=` (ver
+  // src/proxy.ts) antes de que el layout entre a jugar.
+  const { data } = await supabase.auth.getClaims();
 
-  return supabaseResponse;
+  return { response: supabaseResponse, hasSession: !!data?.claims };
 }
