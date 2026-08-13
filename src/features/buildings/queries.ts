@@ -1,6 +1,7 @@
 import "server-only";
 
 import { and, asc, eq, isNull } from "drizzle-orm";
+import { cache } from "react";
 
 import { db } from "@/db";
 import { buildings } from "@/db/schema";
@@ -35,7 +36,13 @@ export type ManagedBuildingOption = {
 // Si necesitás la lista completa para gestión/historial/reportes (que SÍ
 // debe incluir los inactivos), usá getManagedBuildings() más abajo, no
 // esta.
-export async function getActiveBuildings(
+//
+// cache() de React: el layout de /panel (para el selector del header) y el
+// dashboard de inicio (paso 3.5, para decidir si hay algún edificio activo
+// antes de mostrar las tarjetas) llaman a esta misma función en la misma
+// request -- sin cache(), eso son dos round-trips idénticos a la base en
+// vez de uno.
+export const getActiveBuildings = cache(async function getActiveBuildings(
   organizationId: string,
 ): Promise<ActiveBuildingOption[]> {
   return db
@@ -49,7 +56,7 @@ export async function getActiveBuildings(
       ),
     )
     .orderBy(asc(buildings.name));
-}
+});
 
 // Para LISTADOS DE GESTIÓN, HISTORIAL Y REPORTES: acá SÍ importa poder ver
 // un edificio pausado (`active = false`), porque se sigue consultando lo

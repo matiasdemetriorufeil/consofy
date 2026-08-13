@@ -1,8 +1,5 @@
 import { getActiveBuildings } from "@/features/buildings/queries";
-import {
-  getSelectedBuildingIdCookie,
-  resolveSelectedBuilding,
-} from "@/features/buildings/selected-building";
+import { getSelectedBuilding } from "@/features/buildings/selected-building";
 import { PanelUserProvider } from "@/features/auth/panel-user-context";
 import { Sidebar } from "@/features/panel/components/sidebar";
 import { SiteHeader } from "@/features/panel/components/site-header";
@@ -36,20 +33,17 @@ export const dynamic = "force-dynamic";
 export default async function PanelLayout({ children }: LayoutProps<"/panel">) {
   const { appUser, organization } = await requireUser();
 
-  // Los edificios activos y la cookie se piden en paralelo: son
-  // independientes entre sí, no hace falta esperar uno para pedir el
-  // otro. resolveSelectedBuilding() (src/features/buildings/selected-building.ts)
-  // cruza los dos -- ver CLAUDE.md > Selector de edificio activo sobre por
-  // qué esto nunca puede fallar ni mostrar un edificio de otra
-  // organización o dado de baja.
-  const [buildings, selectedBuildingIdRaw] = await Promise.all([
+  // getActiveBuildings() y getSelectedBuilding() están cacheadas con
+  // cache() de React (src/features/buildings/queries.ts y
+  // selected-building.ts): esta última internamente vuelve a pedir la
+  // lista de edificios activos, pero al estar cacheada no repite la
+  // consulta -- un solo round-trip real a la base para las dos cosas. Ver
+  // CLAUDE.md > Selector de edificio activo sobre por qué esto nunca puede
+  // fallar ni mostrar un edificio de otra organización o dado de baja.
+  const [buildings, selectedBuilding] = await Promise.all([
     getActiveBuildings(organization.id),
-    getSelectedBuildingIdCookie(),
+    getSelectedBuilding(organization.id),
   ]);
-  const selectedBuilding = resolveSelectedBuilding(
-    buildings,
-    selectedBuildingIdRaw,
-  );
 
   return (
     <PanelUserProvider value={{ appUser, organization }}>

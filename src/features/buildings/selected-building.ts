@@ -1,6 +1,9 @@
 import "server-only";
 
 import { cookies } from "next/headers";
+import { cache } from "react";
+
+import { getActiveBuildings, type ActiveBuildingOption } from "./queries";
 
 // Vive en su propio archivo, sin "use server": la Server Action que setea
 // esto (src/features/buildings/actions.ts) necesita este nombre, y un
@@ -37,3 +40,20 @@ export function resolveSelectedBuilding<T extends { id: string }>(
   }
   return buildings.find((building) => building.id === selectedId) ?? null;
 }
+
+// Combina las dos funciones de arriba con la lista de edificios activos,
+// para cualquier Server Component que necesite saber "¿cuál está elegido
+// AHORA?" sin repetir esas tres líneas -- el layout de /panel (header) y el
+// dashboard de inicio (paso 3.5) llaman a esto. cache() de React: si los
+// dos llaman a esto en la misma request, la segunda llamada no repite el
+// trabajo (y getActiveBuildings ya está cacheada aparte, así que tampoco
+// duplica esa consulta).
+export const getSelectedBuilding = cache(
+  async (organizationId: string): Promise<ActiveBuildingOption | null> => {
+    const [activeBuildings, selectedId] = await Promise.all([
+      getActiveBuildings(organizationId),
+      getSelectedBuildingIdCookie(),
+    ]);
+    return resolveSelectedBuilding(activeBuildings, selectedId);
+  },
+);

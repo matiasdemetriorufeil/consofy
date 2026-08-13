@@ -29,7 +29,14 @@ export function UserMenu() {
           disabled={isPending}
         >
           <User className="size-4" aria-hidden="true" />
-          <span className="max-w-32 truncate">{appUser.displayName}</span>
+          {/* Oculto por debajo de sm: a 375px el header (drawer + selector
+              + campana + esto) no entra con el nombre completo visible --
+              encontrado verificando el paso 3.5 a ese ancho (bug real del
+              header, paso 3.4, no de este paso). El nombre sigue en el
+              aria-label del botón y en el DropdownMenuLabel de adentro. */}
+          <span className="hidden max-w-32 truncate sm:inline">
+            {appUser.displayName}
+          </span>
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
