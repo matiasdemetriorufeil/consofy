@@ -1,4 +1,12 @@
+import { getActiveBuildings } from "@/features/buildings/queries";
+import {
+  getSelectedBuildingIdCookie,
+  resolveSelectedBuilding,
+} from "@/features/buildings/selected-building";
 import { PanelUserProvider } from "@/features/auth/panel-user-context";
+import { Sidebar } from "@/features/panel/components/sidebar";
+import { SiteHeader } from "@/features/panel/components/site-header";
+import { SkipLink } from "@/features/panel/components/skip-link";
 import { requireUser } from "@/lib/auth";
 
 // force-dynamic explícito además del que ya implica requireUser() (usa
@@ -27,9 +35,41 @@ export const dynamic = "force-dynamic";
 // panel-user-context.tsx).
 export default async function PanelLayout({ children }: LayoutProps<"/panel">) {
   const { appUser, organization } = await requireUser();
+
+  // Los edificios activos y la cookie se piden en paralelo: son
+  // independientes entre sí, no hace falta esperar uno para pedir el
+  // otro. resolveSelectedBuilding() (src/features/buildings/selected-building.ts)
+  // cruza los dos -- ver CLAUDE.md > Selector de edificio activo sobre por
+  // qué esto nunca puede fallar ni mostrar un edificio de otra
+  // organización o dado de baja.
+  const [buildings, selectedBuildingIdRaw] = await Promise.all([
+    getActiveBuildings(organization.id),
+    getSelectedBuildingIdCookie(),
+  ]);
+  const selectedBuilding = resolveSelectedBuilding(
+    buildings,
+    selectedBuildingIdRaw,
+  );
+
   return (
     <PanelUserProvider value={{ appUser, organization }}>
-      {children}
+      <SkipLink />
+      <div className="min-h-dvh">
+        <Sidebar />
+        <div className="flex min-h-dvh flex-col md:pl-60">
+          <SiteHeader
+            buildings={buildings}
+            selectedBuildingId={selectedBuilding?.id ?? null}
+          />
+          <main
+            id="main-content"
+            tabIndex={-1}
+            className="flex-1 px-4 py-6 outline-none md:px-6 md:py-8"
+          >
+            {children}
+          </main>
+        </div>
+      </div>
     </PanelUserProvider>
   );
 }

@@ -88,10 +88,43 @@ Regla clave: la lógica de dominio vive en `src/features/<dominio>/`;
   quien todavía no tiene el teléfono. Único dentro de la organización,
   parcial (`WHERE deleted_at IS NULL`); NULL no necesita `coalesce` acá
   porque dos teléfonos desconocidos no son la misma persona.
-- Estados derivados, nunca columnas propias: no hay `buildings.active` como
-  columna aparte (ya existe, se deriva de `deleted_at`) ni
-  `unit_occupancies.active` (se deriva de `ended_on IS NULL`). Guardar el
-  estado en dos lugares garantiza que en algún UPDATE se desincronicen.
+- Estados derivados, nunca columnas propias -- salvo cuando describen dos
+  ejes de negocio realmente independientes, no el mismo estado guardado dos
+  veces. `unit_occupancies.active` es el caso que esta regla SÍ prohíbe: no
+  existe como columna porque sería exactamente `ended_on IS NULL` duplicado,
+  sin ningún significado propio. `categories.active` (paso 2.4) y
+  `buildings.active` (paso 3.4) son el caso contrario: columnas propias, a
+  propósito, porque `deleted_at` y `active` responden preguntas distintas:
+  - **`deleted_at`** (papelera): la fila se fue del sistema. No aparece en
+    ningún listado normal, sin importar el valor de `active`.
+  - **`active = false`, con `deleted_at IS NULL`** (pausa reversible): la
+    fila sigue existiendo y su historial se sigue consultando, pero no
+    recibe actividad nueva. Caso real de `buildings`: terminó el contrato de
+    administración de un edificio -- el administrador quiere seguir viendo
+    los reclamos viejos de ese edificio, pero ni el formulario público ni el
+    selector del header deberían ofrecerlo para reclamos nuevos. Mismo eje
+    para `categories.active`: "ocultar esta categoría del formulario sin
+    borrarla".
+
+  **Qué filtro corresponde según el contexto** (regla general, no solo para
+  `buildings` -- aplica a `categories` y a cualquier tabla futura con el
+  mismo par de columnas):
+  - Selectores que alimentan una carga NUEVA (selector de edificio del
+    header, categorías del formulario público de reclamos):
+    `active = true AND deleted_at IS NULL`. Ver `getActiveBuildings()` en
+    `src/features/buildings/queries.ts`.
+  - Listados de gestión, historial y reportes (donde se consulta lo que ya
+    pasó, no se crea algo nuevo): `deleted_at IS NULL` solamente, mostrando
+    los inactivos con una marca visual en vez de ocultarlos -- una fila
+    inactiva sigue siendo real y consultable, no tiene que desaparecer de
+    la vista de quien administra. Ver `getManagedBuildings()` en el mismo
+    archivo.
+
+  Estas van SIEMPRE como dos funciones separadas y bien nombradas, nunca una
+  sola con un parámetro booleano tipo `incluirInactivos` que alguien tenga
+  que acordarse de pasar bien -- el nombre de la función tiene que dejar
+  claro qué filtro aplica sin que haga falta leer su cuerpo ni su call site.
+
 - Ocupaciones vigentes solapadas (misma unidad + persona + rol, las dos con
   `ended_on IS NULL`): se resuelve con un índice único parcial, no con una
   exclusion constraint + `btree_gist`. Un índice único parcial alcanza para
@@ -283,6 +316,86 @@ Excepciones documentadas (y por qué):
 - `logoutAction`: cerrar sesión es seguro sin sesión activa (no toca datos
   de ninguna organización); forzar `requireUser()` ahí solo agregaría una
   consulta a la base sin beneficio real.
+
+## Selector de edificio activo
+
+El panel entero (reclamos, comunicados, recordatorios, documentos) se
+navega con un edificio "puesto" en el header, igual que un selector de
+tienda/sucursal en cualquier panel multi-tenant chico. Paso 3.4 decide
+dónde vive ese estado, porque todas las pantallas de las etapas siguientes
+dependen de esto.
+
+**Dónde vive: cookie, no `localStorage`, no parámetro de URL, no segmento
+de ruta.**
+
+- `localStorage` está descartado por el enunciado: no es legible desde
+  Server Components (todo lo que renderiza HTML en este panel es Server
+  Component por default -- ver CLAUDE.md > Convenciones), así que cualquier
+  página necesitaría un round-trip cliente extra solo para saber qué
+  edificio mostrar. Tampoco sobrevive a un usuario que borra datos del
+  sitio o cambia de navegador.
+- **Segmento de ruta** (`/panel/[buildingId]/tickets`) es la opción más
+  "correcta" en términos de URLs compartibles, pero fuerza una estructura
+  que no le queda bien a la mitad de las secciones: Edificios (gestiona la
+  LISTA completa, no un edificio a la vez) y Configuración son de
+  organización, no de un edificio puntual. Meterlas bajo un segmento de
+  edificio las obligaría a ignorar ese segmento todo el tiempo, o a vivir
+  fuera del prefijo `/panel/[buildingId]/` mientras el resto sí lo usa --
+  dos convenciones de ruta conviviendo en el mismo panel.
+- **Parámetro de URL** (`?building=...`) es legible en servidor y no tiene
+  el problema de arriba, pero exige que CADA link interno lo propague a
+  mano. Un solo `<Link href="/panel/tickets">` sin el query string
+  rompería la persistencia "entre navegaciones" que pide el paso 3.4 --
+  exactamente el tipo de olvido silencioso que ya se evitó en el paso 3.3
+  con `authorizedAction()`. Nada fuerza a que todos los links del panel
+  (incluidos los que se agreguen en pasos futuros) se acuerden de
+  incluirlo.
+- **Cookie** (elegida): persiste sola entre recargas y entre navegaciones
+  sin que ningún link tenga que saber que existe -- el navegador la manda
+  sola en cada request. Es legible en Server Components con `cookies()` (ya
+  se usa así para la sesión de Supabase, mismo mecanismo, cero conceptos
+  nuevos). Se escribe desde una Server Action (`setSelectedBuildingAction`,
+  `src/features/buildings/actions.ts`), porque Next.js solo permite setear
+  cookies desde ahí (o Route Handlers) -- nunca desde un Server Component
+  en render.
+
+  Trade-off aceptado: una cookie no es por-pestaña ni deep-lineable -- dos
+  pestañas del mismo navegador comparten el edificio elegido, y no se
+  puede mandar un link que abra directo "Reclamos del Edificio X". Para una
+  sola persona administrando (ver CLAUDE.md > Qué es este proyecto) es un
+  costo bajo. Si más adelante hace falta compartir una vista filtrada por
+  edificio, se puede agregar un `?building=` opcional que pise la cookie
+  SOLO en esa carga puntual, sin tener que migrar el mecanismo por
+  default.
+
+**Qué significa "Todos los edificios":** una opción real y explícita del
+selector (no la ausencia de elección sin más), representada por la
+AUSENCIA de la cookie -- no un valor especial guardado. No es válida en
+las secciones de organización (Edificios, Configuración: ya muestran todo
+o nada de eso, el selector directamente no les importa); en las secciones
+por edificio es el estado por default y una vista agregada legítima (ej.
+"todos los reclamos de todos los edificios"), no un error ni un estado
+transitorio.
+
+**Qué pasa si el edificio seleccionado se da de baja o deja de existir:**
+se resuelve en lectura, sin trigger ni limpieza aparte.
+`resolveSelectedBuilding()` (`src/features/buildings/selected-building.ts`)
+cruza el id crudo de la cookie contra la lista de edificios ACTIVOS de la
+organización (`getActiveBuildings()`) recién pedida en esa misma request;
+si no aparece ahí -- borrado, de otra organización, uuid inventado --, el
+resultado es `null`, exactamente igual que "todavía no eligió nada". Nunca
+un error, nunca una pantalla rota. La próxima elección real en el selector
+sobrescribe la cookie con un valor válido; hasta entonces, queda con un
+valor obsoleto que simplemente nunca hace match -- inofensivo, no hace
+falta borrarlo de forma proactiva.
+
+**Autorización:** `setSelectedBuildingAction` (envuelta en
+`authorizedAction()`, ver CLAUDE.md > Autorización de rutas y Server
+Actions) valida que el id recibido esté en `getActiveBuildings()` de la
+organización de quien llama ANTES de guardarlo -- nunca confía en el uuid
+tal cual llega del cliente. Un id de otra organización, o de un edificio
+dado de baja, no se guarda: la Server Action no hace nada (mismo criterio
+de "cae a todos los edificios en silencio" que la lectura).
 
 ## Reglas de seguridad (no negociables)
 
