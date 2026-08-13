@@ -1,13 +1,14 @@
-import { Building2 } from "lucide-react";
+import { BuildingsList } from "@/features/buildings/components/buildings-list";
+import { getManagedBuildings } from "@/features/buildings/queries";
+import { requireUser } from "@/lib/auth";
 
-import { EmptyState } from "@/components/empty-state";
+// Listado de gestión de edificios (paso 4.1): usa getManagedBuildings(), no
+// getActiveBuildings() -- acá SÍ interesa ver los edificios pausados
+// (marcados visualmente por BuildingsList), a diferencia del selector del
+// header. Ver CLAUDE.md > Acceso a datos.
+export default async function BuildingsPage() {
+  const { organization } = await requireUser();
+  const buildings = await getManagedBuildings(organization.id);
 
-export default function BuildingsPage() {
-  return (
-    <EmptyState
-      icon={Building2}
-      title="Todavía no se pueden gestionar edificios desde acá"
-      description="Esta sección va a mostrar los edificios de tu organización, con sus datos y el link al formulario público de cada uno."
-    />
-  );
+  return <BuildingsList buildings={buildings} />;
 }

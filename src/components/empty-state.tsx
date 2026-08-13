@@ -13,6 +13,12 @@ import { Button } from "@/components/ui/button";
 // todavía un flujo real al que llevar), paso 3.5 sí -- el vacío real del
 // dashboard ("no hay ningún edificio cargado") es una invitación a actuar,
 // no solo un cartel, según CLAUDE.md > Voz y escritura.
+//
+// Dos formas de acción, no una: `href` navega (caso del dashboard, paso
+// 3.5), `onClick` dispara algo en el propio cliente (caso del listado de
+// edificios, paso 4.1 -- "crear el primero" abre el diálogo de alta ahí
+// mismo, no navega a otra ruta). Mismo botón visual en los dos casos, el
+// caller elige cuál le corresponde a su flujo.
 export function EmptyState({
   icon: Icon,
   title,
@@ -22,7 +28,7 @@ export function EmptyState({
   icon: LucideIcon;
   title: string;
   description: string;
-  action?: { label: string; href: string };
+  action?: { label: string } & ({ href: string } | { onClick: () => void });
 }) {
   return (
     <div className="border-border flex flex-col items-center gap-3 rounded-lg border border-dashed px-6 py-16 text-center">
@@ -31,9 +37,14 @@ export function EmptyState({
         <h2 className="text-ink font-display text-lg font-semibold">{title}</h2>
         <p className="text-ink-muted max-w-sm text-sm">{description}</p>
       </div>
-      {action && (
+      {action && "href" in action && (
         <Button asChild className="mt-2">
           <Link href={action.href}>{action.label}</Link>
+        </Button>
+      )}
+      {action && "onClick" in action && (
+        <Button onClick={action.onClick} className="mt-2">
+          {action.label}
         </Button>
       )}
     </div>
