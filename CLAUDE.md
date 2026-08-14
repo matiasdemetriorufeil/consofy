@@ -521,6 +521,17 @@ trabaja. Ninguna de las tres es negociable:
   variables a propósito -- la regla no distingue intención, porque el
   resultado (la credencial visible en una terminal, un log, o esta misma
   conversación) es el mismo daño en los dos casos.
+- **Nunca redirigir la salida del dev server a un archivo mientras se
+  prueba un formulario que maneja credenciales.** El dev server de Next
+  loguea la invocación de cada Server Action con sus argumentos SIN
+  redactar -- una contraseña tipeada en un formulario de login queda
+  escrita en texto plano en ese archivo apenas se manda el formulario.
+  Esto no es específico del login: aplica a cualquier Server Action que
+  reciba un argumento sensible (una contraseña, un token, una clave). Si
+  hace falta capturar la salida del dev server para depurar algo, dos
+  opciones válidas: mandarla a `/dev/null` y depurar con logs propios y
+  explícitos (un `console.log` puntual, después borrado), o filtrar la
+  salida ANTES de que toque disco, nunca después.
 
 ## Reglas de WhatsApp
 
@@ -710,6 +721,19 @@ arreglar de apuro algo que todavía no se decidió bien.
      Supabase Auth (Admin API) si nadie la va a vincular? ¿Se vincula a una
      organización a mano? Ninguna de las dos es una decisión de código --
      depende de a quién pertenece esa cuenta y qué se esperaba de ella.
+
+- **Verificar antes del deploy a producción que ningún log registra los
+  argumentos de las Server Actions de autenticación.** En desarrollo, SÍ
+  los registra -- confirmado en la práctica (paso 4.2, ver la regla nueva
+  en CLAUDE.md > Reglas de entorno): el dev server de Next imprime la
+  invocación completa de `loginAction`, contraseña incluida sin redactar,
+  apenas se envía el formulario. Para producción se ASUME que este
+  logging verboso de desarrollo no corre (Vercel no es "el dev server"),
+  pero eso es una suposición, no algo comprobado contra un deploy real
+  todavía. Falta confirmarlo explícitamente en la etapa 15 (la de
+  deploy): revisar qué queda en los logs de Vercel (o donde corra la app)
+  para un login real, y si algo sensible aparece ahí, resolverlo antes de
+  que haya usuarios reales generando esos logs.
 
 ## Qué NO hacer
 
