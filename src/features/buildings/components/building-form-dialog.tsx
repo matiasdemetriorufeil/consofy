@@ -10,7 +10,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 
-import type { ManagedBuildingOption } from "../queries";
+import type { BuildingEditableFields } from "../queries";
 import { BuildingForm } from "./building-form";
 
 // Un solo diálogo para alta y edición (paso 4.1, puntos 2 y 3): mismo
@@ -27,7 +27,7 @@ export function BuildingFormDialog({
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  building?: ManagedBuildingOption;
+  building?: BuildingEditableFields;
 }) {
   const mode = building ? "edit" : "create";
 

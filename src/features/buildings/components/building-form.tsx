@@ -36,7 +36,7 @@ import {
   suggestCodePrefix,
   type BuildingFormInput,
 } from "../building-schema";
-import type { ManagedBuildingOption } from "../queries";
+import type { BuildingEditableFields } from "../queries";
 
 // Cuánto esperar después de la última tecla antes de preguntarle al
 // servidor si el prefijo está libre (paso 4.1, punto 2): ni tan corto que
@@ -55,7 +55,7 @@ export function BuildingForm({
   building,
   onSuccess,
 }: {
-  building?: ManagedBuildingOption;
+  building?: BuildingEditableFields;
   onSuccess: () => void;
 }) {
   const mode = building ? "edit" : "create";

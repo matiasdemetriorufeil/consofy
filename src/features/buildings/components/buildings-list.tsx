@@ -1,6 +1,7 @@
 "use client";
 
 import { Building2, MoreHorizontal } from "lucide-react";
+import Link from "next/link";
 import { useState, useTransition } from "react";
 import { toast } from "sonner";
 
@@ -115,7 +116,12 @@ export function BuildingsList({
                     className={cn(!building.active && "text-muted-foreground")}
                   >
                     <TableCell className="font-medium text-inherit">
-                      {building.name}
+                      <Link
+                        href={`/panel/buildings/${building.id}`}
+                        className="outline-none hover:underline focus-visible:underline"
+                      >
+                        {building.name}
+                      </Link>
                     </TableCell>
                     <TableCell className="font-mono">
                       {building.codePrefix}
@@ -157,7 +163,12 @@ export function BuildingsList({
                 <CardHeader>
                   <div className="flex items-start justify-between gap-2">
                     <CardTitle className="text-inherit">
-                      {building.name}
+                      <Link
+                        href={`/panel/buildings/${building.id}`}
+                        className="outline-none hover:underline focus-visible:underline"
+                      >
+                        {building.name}
+                      </Link>
                     </CardTitle>
                     <BuildingRowMenu
                       building={building}

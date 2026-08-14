@@ -11,7 +11,20 @@ export type ActiveBuildingOption = {
   name: string;
 };
 
-export type ManagedBuildingOption = {
+// Paso 4.2: forma mínima para PRECARGAR el formulario de alta/edición de
+// BuildingForm (los mismos campos que acepta buildingFormSchema, más id y
+// active) -- separada de ManagedBuildingOption a propósito. Antes de este
+// paso, BuildingForm tomaba un ManagedBuildingOption completo (el tipo de
+// fila del LISTADO, con unitsCount/pendingTicketsCount incluidos) porque el
+// listado era el único lugar que abría el diálogo de edición. Ahora la
+// vista de detalle (getBuildingDetail() más abajo) también necesita poder
+// precargar el mismo formulario, y no tiene ni le hacen falta los conteos
+// del listado -- pedirlos ahí sería una consulta de más sin ningún uso.
+// ManagedBuildingOption sigue siendo estructuralmente un superset de este
+// tipo (todos sus campos más los dos conteos), así que pasar una fila de
+// getManagedBuildings() donde se espera un BuildingEditableFields sigue
+// compilando sin cambios en buildings-list.tsx.
+export type BuildingEditableFields = {
   id: string;
   name: string;
   slug: string;
@@ -21,6 +34,9 @@ export type ManagedBuildingOption = {
   adminWhatsappE164: string;
   notes: string | null;
   active: boolean;
+};
+
+export type ManagedBuildingOption = BuildingEditableFields & {
   unitsCount: number;
   pendingTicketsCount: number;
 };
@@ -167,6 +183,55 @@ export async function getManagedBuildings(
     )
     .orderBy(asc(buildings.name));
 }
+
+// Resuelve UN edificio para la vista de detalle (paso 4.2). Mismo criterio
+// de filtro que getManagedBuildings() (organización + no borrado, SIN
+// active = true): un edificio pausado sigue teniendo una vista de detalle
+// consultable -- ver CLAUDE.md > Acceso a datos sobre por qué "listados de
+// gestión/historial" no filtran por active. Devuelve `null` si el id no
+// existe, es de otra organización, o tiene deleted_at -- nunca tira: el
+// caller (el layout del segmento [buildingId]) es quien decide qué hacer
+// con `null` (notFound(), en este caso), esta función solo resuelve datos.
+//
+// NUNCA selecciona public_token: el paso 4.2 pide explícitamente no
+// mostrarlo en esta pantalla (es el paso 4.6) -- ni siquiera se lo trae de
+// la base para esta vista, así no hay ninguna posibilidad de que se filtre
+// sin querer a algún componente que reciba el objeto entero.
+//
+// cache() de React: el layout del segmento y cada page.tsx de pestaña
+// (units/people/tickets/documents/reminders) podrían llamar a esto con los
+// mismos argumentos en la misma request -- en la práctica, solo el layout
+// lo hace hoy (las páginas de pestaña resuelven su propio listado con
+// buildingId de sus propios `params`, sin necesitar el resto de los campos
+// del edificio), pero cachearlo igual evita que un futuro llamador
+// duplique el round-trip sin darse cuenta.
+export const getBuildingDetail = cache(async function getBuildingDetail(
+  organizationId: string,
+  buildingId: string,
+): Promise<BuildingEditableFields | null> {
+  const [row] = await db
+    .select({
+      id: buildings.id,
+      name: buildings.name,
+      slug: buildings.slug,
+      codePrefix: buildings.codePrefix,
+      address: buildings.address,
+      city: buildings.city,
+      adminWhatsappE164: buildings.adminWhatsappE164,
+      notes: buildings.notes,
+      active: buildings.active,
+    })
+    .from(buildings)
+    .where(
+      and(
+        eq(buildings.id, buildingId),
+        eq(buildings.organizationId, organizationId),
+        isNull(buildings.deletedAt),
+      ),
+    );
+
+  return row ?? null;
+});
 
 // Usada en dos lugares: la validación en vivo del formulario (punto 2 del
 // paso) y la traducción del error de Postgres cuando la carrera entre el

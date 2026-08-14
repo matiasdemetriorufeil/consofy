@@ -511,6 +511,16 @@ trabaja. Ninguna de las tres es negociable:
   limpieza es siempre borrado lógico en tablas de negocio (`deleted_at`,
   nunca `DELETE` físico -- ver CLAUDE.md > Convenciones): la misma regla que
   ya rige el código de la aplicación rige también cómo se prueba.
+- **Nunca imprimir en la salida de un comando el contenido de variables de
+  entorno que tengan credenciales** (`DATABASE_URL`, `MIGRATION_DATABASE_URL`,
+  las claves de Supabase). Si hace falta diagnosticar un problema con ellas,
+  se imprime la forma enmascarada -- host y puerto sí, usuario si hace
+  falta, contraseña o key NUNCA, ni completa ni parcial. Esto aplica igual
+  de fuerte a un comando de diagnóstico improvisado (un `grep`, un `cat`,
+  un `echo` de depuración mal filtrado) que a algo pensado para imprimir
+  variables a propósito -- la regla no distingue intención, porque el
+  resultado (la credencial visible en una terminal, un log, o esta misma
+  conversación) es el mismo daño en los dos casos.
 
 ## Reglas de WhatsApp
 
@@ -665,6 +675,41 @@ no por script). Pasos para crear uno:
    `SEED_ADMIN_DISPLAY_NAME="Nombre"`, default `"Administrador"`) además de
    `SEED_CONFIRM`. Sin `SEED_ADMIN_USER_ID`, el seed corre igual pero no
    crea la fila en `app_users` (lo avisa por consola, no falla).
+
+## Pendientes
+
+Problemas reales, encontrados haciendo el trabajo (no hipotéticos), que
+quedan anotados a propósito en vez de resueltos al toque -- para no
+arreglar de apuro algo que todavía no se decidió bien.
+
+- **Login silencioso para un usuario de Auth sin fila en `app_users`.**
+  `requireUser()` (`src/lib/auth.ts`) ya documenta que esto redirige a
+  `/login` -- a propósito, para no distinguir "no hay sesión" de "hay
+  sesión pero no está vinculada a una organización" (ver el comentario de
+  esa función). El problema encontrado no es que redirija: es que lo hace
+  SIN ningún mensaje. `loginAction` (`src/features/auth/actions.ts`)
+  considera exitoso el login (Supabase Auth lo autenticó, la contraseña es
+  correcta) y redirige a `/panel`; recién ahí, en el layout, `requireUser()`
+  descubre que no hay `app_users` y manda de vuelta a `/login` sin
+  parámetro `next` ni mensaje de error. Para quien lo sufre, el resultado
+  es indistinguible de un bug: escribe su email y contraseña correctos, la
+  pantalla vuelve a `/login` como si nada hubiera pasado, sin ninguna pista
+  de por qué. Encontrado en la práctica (paso 4.2): una cuenta real de
+  Supabase Auth, confirmada y con contraseña válida, sin fila en
+  `app_users`, produce exactamente este comportamiento.
+
+  Lo que falta decidir, no solo implementar:
+  1. **El mensaje.** Alguna forma de que `loginAction` (o el layout de
+     `/panel`) distinga este caso y devuelva un error explícito ("Tu cuenta
+     todavía no está vinculada a ninguna organización" o similar) en vez del
+     rebote silencioso -- sin por eso revelar de más a quien no debería
+     tener esa cuenta (ver el propio comentario de `requireUser()` sobre
+     por qué unificar los dos casos fue una decisión de seguridad, no un
+     descuido).
+  2. **Qué hacer con una cuenta huérfana ya existente.** ¿Se borra desde
+     Supabase Auth (Admin API) si nadie la va a vincular? ¿Se vincula a una
+     organización a mano? Ninguna de las dos es una decisión de código --
+     depende de a quién pertenece esa cuenta y qué se esperaba de ella.
 
 ## Qué NO hacer
 

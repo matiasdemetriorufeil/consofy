@@ -1,9 +1,9 @@
 import "server-only";
 
-import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 
 import { db } from "@/db";
-import { buildings, ticketEvents, tickets } from "@/db/schema";
+import { buildings, categories, ticketEvents, tickets } from "@/db/schema";
 
 // N = 5 días: ni tan corto que marque como "estancado" un reclamo que
 // recién entró a la cola de trabajo normal de la semana (nadie revisa cada
@@ -201,4 +201,72 @@ export async function getAttentionTickets(
       ),
     )
     .orderBy(sql`(${tickets.priority} = 'urgent') desc`, asc(lastChangeExpr));
+}
+
+export type BuildingTicketRow = {
+  id: string;
+  publicCode: string;
+  title: string;
+  status: Status;
+  priority: Priority;
+  reportedAt: Date;
+  categoryName: string;
+};
+
+// Cuánto mostrar en la pestaña "Reclamos" de la vista de detalle de un
+// edificio (paso 4.2, punto 3), sin pedir el total. Ver CLAUDE.md > Qué NO
+// hacer y el propio enunciado del paso: "un edificio real puede tener...
+// miles de reclamos" -- a diferencia de unidades/personas
+// (getUnitsForBuilding/getPeopleForBuilding en sus features), acá SÍ hace
+// falta un límite desde este mismo paso, no algo que "puede esperar":
+// unidades y personas están acotadas por el tamaño físico del edificio
+// (unas pocas centenas, como mucho), pero los reclamos se ACUMULAN
+// indefinidamente con el tiempo -- un edificio de diez años puede tener
+// miles, y no hay ningún límite natural que los mantenga chicos. Pedirlos
+// todos acá sería, tarde o temprano, traer miles de filas para una pestaña
+// que ni siquiera tiene todavía filtros ni orden propios (eso es la
+// bandeja real, etapa 5 del plan).
+//
+// No es paginación real (no hay control de "página siguiente" ni cuenta el
+// total): es un LIMIT simple, ordenado por más reciente primero, pensado
+// para dar una idea de la actividad reciente del edificio sin arriesgar
+// una consulta ni un render sin techo. Paginación de verdad le corresponde
+// a la bandeja de reclamos dedicada, que va a tener sus propios filtros
+// (estado, categoría, prioridad) -- construir esa UI acá, para una pestaña
+// que el enunciado pide explícitamente "sin acciones... todavía", sería
+// adelantarse a un paso que no es este.
+export const TICKETS_PREVIEW_LIMIT = 50;
+
+export async function getTicketsForBuilding(
+  organizationId: string,
+  buildingId: string,
+  limit: number = TICKETS_PREVIEW_LIMIT,
+): Promise<BuildingTicketRow[]> {
+  return db
+    .select({
+      id: tickets.id,
+      publicCode: tickets.publicCode,
+      title: tickets.title,
+      status: tickets.status,
+      priority: tickets.priority,
+      reportedAt: tickets.reportedAt,
+      categoryName: categories.name,
+    })
+    .from(tickets)
+    .innerJoin(
+      categories,
+      and(
+        eq(categories.id, tickets.categoryId),
+        eq(categories.organizationId, tickets.organizationId),
+      ),
+    )
+    .where(
+      and(
+        eq(tickets.organizationId, organizationId),
+        eq(tickets.buildingId, buildingId),
+        isNull(tickets.deletedAt),
+      ),
+    )
+    .orderBy(desc(tickets.reportedAt))
+    .limit(limit);
 }

@@ -65,6 +65,14 @@ export const setSelectedBuildingAction = authorizedAction(
 
 // Invalida, después de cada mutación de edificios (paso 4.1, punto 6):
 // - "/panel/buildings": el listado de gestión en sí.
+// - "/panel/buildings/[buildingId]" con type "layout": paso 4.2 -- el
+//   patrón LITERAL con corchetes revalida el layout del segmento dinámico
+//   para CUALQUIER buildingId, no uno puntual (no tenemos el id acá adentro
+//   de todas formas: createBuildingAction ni siquiera tiene uno todavía).
+//   Sin esto, editar un edificio desde su propia vista de detalle (el
+//   encabezado reutiliza este mismo BuildingFormDialog) dejaría el
+//   encabezado desactualizado hasta un reload manual -- el layout que lo
+//   renderiza no se vuelve a ejecutar solo porque el listado se revalidó.
 // - "/panel" con type "layout": revalida TODO lo que cuelga del layout de
 //   /panel, incluido el selector de edificio del header (que vive en ese
 //   layout, ver src/app/panel/layout.tsx) y el dashboard de inicio (que
@@ -72,11 +80,12 @@ export const setSelectedBuildingAction = authorizedAction(
 //   documentación de Next.js sobre revalidatePath(path, "layout").
 //
 // Se llama desde dentro de una Server Action invocada por un Client
-// Component ya montado en /panel/buildings -- Next.js re-renderiza esa
-// ruta con los datos frescos apenas la Server Action termina, sin que el
-// cliente tenga que recargar ni navegar a mano.
+// Component ya montado en /panel/buildings o en /panel/buildings/[id] --
+// Next.js re-renderiza esa ruta con los datos frescos apenas la Server
+// Action termina, sin que el cliente tenga que recargar ni navegar a mano.
 function revalidateBuildingPaths() {
   revalidatePath("/panel/buildings");
+  revalidatePath("/panel/buildings/[buildingId]", "layout");
   revalidatePath("/panel", "layout");
 }
 
