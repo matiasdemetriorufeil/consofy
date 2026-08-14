@@ -1,0 +1,2 @@
+DROP INDEX "unit_occupancies_unit_person_role_ongoing_unique";--> statement-breakpoint
+CREATE UNIQUE INDEX "unit_occupancies_unit_person_ongoing_unique" ON "unit_occupancies" USING btree ("unit_id","person_id") WHERE "unit_occupancies"."ended_on" is null and "unit_occupancies"."deleted_at" is null;

@@ -64,17 +64,28 @@ export const unitOccupancies = pgTable(
         sql`${t.isPrimary} and ${t.endedOn} is null and ${t.deletedAt} is null`,
       ),
     // Evita que la misma persona tenga dos ocupaciones VIGENTES (ended_on
-    // IS NULL) en la misma unidad con el mismo rol. Índice único parcial,
-    // no exclusion constraint con btree_gist -- ver la justificación larga
-    // en CLAUDE.md > Acceso a datos: alcanza para lo pedido ("vigentes
-    // solapadas": dos filas con ended_on NULL para la misma clave siempre
-    // se solapan, porque las dos se extienden indefinidamente), es más
-    // barato (btree normal, sin extensión nueva) y consistente con el
-    // resto del esquema. No cubre el caso más amplio de dos rangos
-    // CERRADOS que se solapan en el pasado -- si eso llega a hacer falta,
-    // ahí sí se justifica la exclusion constraint.
-    uniqueIndex("unit_occupancies_unit_person_role_ongoing_unique")
-      .on(t.unitId, t.personId, t.role)
+    // IS NULL) en la misma unidad, sin importar el rol -- CAMBIADO en el
+    // cierre del paso 4.4 (antes era por `unit_id, person_id, role`, así
+    // que la misma persona podía quedar como propietaria Y inquilina
+    // vigentes de la misma unidad al mismo tiempo). Esa versión anterior
+    // era una decisión heredada de un paso previo (2.3), no algo pedido acá
+    // -- se expuso a través de la UI recién en 4.4 (asignación de personas
+    // a unidades) y, al verse en uso real, no describe ninguna situación de
+    // negocio real: alquilarse a uno mismo la propia unidad no es un
+    // contrato que exista. Ser propietario de una unidad Y, por separado,
+    // inquilino de OTRA unidad distinta sigue permitido sin problema --
+    // el índice es por unidad, no por persona sola.
+    //
+    // Índice único parcial, no exclusion constraint con btree_gist -- ver
+    // la justificación larga en CLAUDE.md > Acceso a datos: alcanza para lo
+    // pedido ("vigentes solapadas": dos filas con ended_on NULL para la
+    // misma clave siempre se solapan, porque las dos se extienden
+    // indefinidamente), es más barato (btree normal, sin extensión nueva) y
+    // consistente con el resto del esquema. No cubre el caso más amplio de
+    // dos rangos CERRADOS que se solapan en el pasado -- si eso llega a
+    // hacer falta, ahí sí se justifica la exclusion constraint.
+    uniqueIndex("unit_occupancies_unit_person_ongoing_unique")
+      .on(t.unitId, t.personId)
       .where(sql`${t.endedOn} is null and ${t.deletedAt} is null`),
     // "Ver el historial completo de ocupantes de esta unidad" (activos +
     // finalizados): las dos parciales de arriba no sirven para esto.

@@ -50,8 +50,11 @@ const CHECK_VIOLATION = "23514";
 const PHONE_UNIQUE_CONSTRAINT = "people_organization_id_phone_e164_unique";
 const PHONE_FORMAT_CHECK = "people_phone_e164_format";
 const PRIMARY_UNIQUE_CONSTRAINT = "unit_occupancies_primary_per_unit_unique";
-const ROLE_ONGOING_UNIQUE_CONSTRAINT =
-  "unit_occupancies_unit_person_role_ongoing_unique";
+// Renombrado en el cierre de 4.4 junto con el índice mismo (antes incluía
+// `role`, ver unit-occupancies.ts): ahora es por unidad+persona sola, sin
+// importar el rol.
+const PERSON_UNIT_ONGOING_UNIQUE_CONSTRAINT =
+  "unit_occupancies_unit_person_ongoing_unique";
 
 // Dentro de db.transaction(), Drizzle envuelve el error real de Postgres en
 // un error propio (para agregarle contexto de rollback) y lo deja en
@@ -121,9 +124,10 @@ function translatePersonError(rawError: unknown): PersonFormState {
 // principal anterior DENTRO de la misma transacción (decisión del reporte
 // sobre el constraint de un solo contacto principal); esto es el backstop
 // para una carrera real (dos pestañas marcando principal a la vez). El de
-// "misma persona, misma unidad, mismo rol, las dos vigentes" SÍ es
-// alcanzable en uso normal (alguien intenta asignar de nuevo a quien ya es
-// propietario/inquilino vigente de esa unidad).
+// "misma persona, misma unidad, las dos vigentes" (sin importar el rol,
+// desde el cierre de 4.4) SÍ es alcanzable en uso normal (alguien intenta
+// asignar de nuevo a quien ya es propietario o inquilino vigente de esa
+// unidad, con cualquier rol).
 function translateOccupancyError(rawError: unknown): PersonFormState {
   const error = unwrapPostgresError(rawError);
   if (error && error.code === UNIQUE_VIOLATION) {
@@ -135,12 +139,12 @@ function translateOccupancyError(rawError: unknown): PersonFormState {
         fieldErrors: {},
       };
     }
-    if (error.constraint_name === ROLE_ONGOING_UNIQUE_CONSTRAINT) {
+    if (error.constraint_name === PERSON_UNIT_ONGOING_UNIQUE_CONSTRAINT) {
       return {
         ok: false,
         formError: null,
         fieldErrors: {
-          role: "Esta persona ya tiene una ocupación vigente con ese rol en esta unidad.",
+          unitId: "Esta persona ya tiene una ocupación vigente en esta unidad.",
         },
       };
     }
@@ -272,7 +276,7 @@ export const createPersonWithOccupancyAction = authorizedAction(
       }
       if (
         pgError?.constraint_name === PRIMARY_UNIQUE_CONSTRAINT ||
-        pgError?.constraint_name === ROLE_ONGOING_UNIQUE_CONSTRAINT
+        pgError?.constraint_name === PERSON_UNIT_ONGOING_UNIQUE_CONSTRAINT
       ) {
         return translateOccupancyError(pgError);
       }

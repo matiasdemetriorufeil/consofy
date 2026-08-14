@@ -127,6 +127,13 @@
       "when": 1786571456567,
       "tag": "0017_last_fallen_one",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1786724702722,
+      "tag": "0018_goofy_lucky_pierre",
+      "breakpoints": true
     }
   ]
 }

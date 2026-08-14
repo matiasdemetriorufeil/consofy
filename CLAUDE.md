@@ -763,6 +763,34 @@ arreglar de apuro algo que todavía no se decidió bien.
   cargado, con un link directo para completarlo -- no alcanza con que la
   columna "Teléfono" del listado muestre "—" fila por fila.
 
+- **Qué hacer cuando un vecino dado de baja carga un reclamo nuevo con el
+  mismo teléfono (a decidir en el paso 5.5, no ahora).**
+  `findPersonByPhone()` (`src/features/people/queries.ts`) filtra
+  `deleted_at IS NULL` -- una persona dada de baja es invisible para esa
+  búsqueda. El índice único de teléfono
+  (`people_organization_id_phone_e164_unique`) es parcial por el mismo
+  motivo, y a propósito: permite reusar el teléfono de alguien dado de baja
+  para una persona nueva, en vez de bloquear ese alta para siempre (ver
+  CLAUDE.md > Acceso a datos, verificado en la práctica en el paso 4.4 con
+  filas reales, sin superposición de vigencia). El problema es que, si la
+  etapa 5 reusa esta misma función para "buscar o crear" al cargar un
+  reclamo desde el formulario público, un vecino dado de baja que vuelve a
+  aparecer con su mismo número genera una persona nueva, desconectada de su
+  historial anterior (reclamos y ocupaciones viejas quedan colgados de la
+  ficha dada de baja, no de la nueva). Tres salidas posibles, ninguna
+  elegida todavía:
+  1. Crear una persona nueva y aceptar la desconexión -- lo que pasa hoy si
+     no se hace nada especial, más simple, pero pierde historial visible.
+  2. Revivir la ficha anterior (limpiar su `deleted_at`) -- mantiene el
+     historial, pero hay que decidir qué pasa si esa ficha se dio de baja a
+     propósito por algún motivo que seguiría vigente.
+  3. Vincular ambas -- la ficha vieja queda dada de baja, pero algo asocia
+     la persona nueva con su historial anterior. Más completo, pero es la
+     opción con más superficie nueva (¿cómo se navega esa relación desde el
+     panel?).
+
+  La decisión se toma al escribir el paso 5.5, no acá.
+
 ## Qué NO hacer
 
 - No instalar dependencias nuevas sin avisar y justificar.
