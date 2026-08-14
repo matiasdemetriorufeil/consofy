@@ -1,5 +1,11 @@
 import { z } from "zod";
 
+import {
+  AR_WHATSAPP_E164_REGEX,
+  AR_WHATSAPP_HELP,
+  normalizePhoneInput,
+} from "@/lib/phone";
+
 // Compartido entre cliente (BuildingForm, vía zodResolver) y servidor
 // (actions.ts) -- mismo patrón que login-schema.ts. Ver CLAUDE.md > Reglas
 // de seguridad: toda entrada se valida con Zod en el servidor aunque ya se
@@ -18,25 +24,13 @@ export const CODE_PREFIX_REGEX = /^[A-Z]{2,4}$/;
 export const CODE_PREFIX_HELP =
   "Usá de 2 a 4 letras mayúsculas, por ejemplo TC.";
 
-// Argentina, no E.164 genérico: la base acepta cualquier E.164 válido
-// (buildings_admin_whatsapp_e164_format, más permisivo), pero el WhatsApp
-// del administrador de un edificio argentino siempre es un celular
-// argentino -- +54 9, código de área, número, sin espacios. Validarlo acá
-// más estricto que la base es a propósito: un E.164 de otro país pasaría el
-// CHECK de la base pero el link wa.me que se arma con este número (ver
-// CLAUDE.md > Reglas de WhatsApp) dejaría de tener sentido para el flujo
-// real de la app.
-const AR_WHATSAPP_E164_REGEX = /^\+549\d{10}$/;
-export const AR_WHATSAPP_HELP =
-  "Escribilo con código de país y de área, sin el 0 ni el 15, por ejemplo +5493515551234 para un celular de Córdoba (351) 555-1234.";
-
-// Espacios, guiones, puntos y paréntesis son ruido habitual al tipear un
-// teléfono a mano ("351 555-1234", "(351) 555.1234") -- se descartan antes
-// de validar el formato, para no rebotar por puntuación en vez de por el
-// número en sí.
-function normalizePhoneInput(value: string): string {
-  return value.replace(/[\s().-]/g, "");
-}
+// AR_WHATSAPP_E164_REGEX/AR_WHATSAPP_HELP/normalizePhoneInput viven en
+// src/lib/phone.ts (paso 4.4): people/person-schema.ts es el segundo
+// consumidor de la misma validación (el teléfono de un vecino), y el
+// enunciado de ese paso pide explícitamente reutilizarla en vez de escribir
+// una segunda validación distinta -- ver el comentario largo de ese archivo
+// para el razonamiento completo (por qué AR y no E.164 genérico).
+export { AR_WHATSAPP_HELP };
 
 export const buildingFormSchema = z.object({
   name: z

@@ -1,41 +1,53 @@
 import "server-only";
 
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 
 import { db } from "@/db";
-import { people, unitOccupancies, units } from "@/db/schema";
+import { people, tickets, unitOccupancies, units } from "@/db/schema";
 
-export type BuildingPersonRow = {
+export type BuildingOccupancyRow = {
   occupancyId: string;
   personId: string;
   firstName: string;
   lastName: string | null;
   phoneE164: string | null;
   email: string | null;
+  notes: string | null;
   role: (typeof unitOccupancies.$inferSelect)["role"];
   isPrimary: boolean;
+  startedOn: string;
+  endedOn: string | null;
+  unitId: string;
   unitTower: string | null;
   unitFloor: string;
   unitNumber: string;
 };
 
-// Listado de solo lectura de la pestaña "Personas" (paso 4.2, punto 3):
-// quiénes viven HOY en el edificio, no el historial completo de ocupantes
-// que alguna vez tuvo -- por eso filtra `unit_occupancies.ended_on IS
-// NULL` (ocupación vigente, ver el comentario de esa columna en
-// unit-occupancies.ts). El historial de ocupantes pasados de una unidad es
-// una pantalla distinta, no pedida en este paso.
+// ABM de personas (paso 4.4), sobre el listado de solo lectura del paso
+// 4.2. A diferencia de getPeopleForBuilding() (versión anterior, solo
+// vigentes), esta trae TODAS las ocupaciones del edificio -- vigentes Y
+// finalizadas (decisión 3 del reporte, "cómo se muestra el historial"): sin
+// filtrar por `ended_on`, cada fila ya trae `startedOn`/`endedOn` para que
+// la UI distinga una de otra (badge "Vigente" vs. "Finalizada"), en vez de
+// tener dos consultas separadas para el mismo listado.
 //
 // `unit_occupancies.organization_id` es la columna denormalizada que hace
 // posible filtrar por organización sin depender de que los JOIN hayan
-// llegado bien a `units`/`people` -- mismo patrón que unit_occupancies.ts
+// llegado bien a `units`/`people` -- mismo patrón que unit-occupancies.ts
 // documenta para sus FK compuestas. `buildingId` se resuelve vía
 // `units.building_id` porque la ocupación en sí no sabe de qué edificio es
 // (solo sabe de qué unidad).
-export async function getPeopleForBuilding(
+//
+// Sin filtrar `isNull(units.deletedAt)`: una unidad dada de baja (paso 4.3)
+// puede seguir teniendo ocupaciones históricas reales -- ocultarlas acá
+// borraría historial real de la vista, no solo "lo que ya no está activo".
+// `isNull(people.deletedAt)` SÍ filtra (ver la decisión 2 del reporte: una
+// persona dada de baja deja de aparecer en cualquier listado normal, sin
+// importar qué ocupaciones tenga).
+export async function getOccupancyRowsForBuilding(
   organizationId: string,
   buildingId: string,
-): Promise<BuildingPersonRow[]> {
+): Promise<BuildingOccupancyRow[]> {
   return db
     .select({
       occupancyId: unitOccupancies.id,
@@ -44,8 +56,12 @@ export async function getPeopleForBuilding(
       lastName: people.lastName,
       phoneE164: people.phoneE164,
       email: people.email,
+      notes: people.notes,
       role: unitOccupancies.role,
       isPrimary: unitOccupancies.isPrimary,
+      startedOn: unitOccupancies.startedOn,
+      endedOn: unitOccupancies.endedOn,
+      unitId: units.id,
       unitTower: units.tower,
       unitFloor: units.floor,
       unitNumber: units.number,
@@ -69,11 +85,126 @@ export async function getPeopleForBuilding(
       and(
         eq(unitOccupancies.organizationId, organizationId),
         eq(units.buildingId, buildingId),
-        isNull(unitOccupancies.endedOn),
         isNull(unitOccupancies.deletedAt),
-        isNull(units.deletedAt),
         isNull(people.deletedAt),
       ),
     )
-    .orderBy(asc(units.tower), asc(units.floor), asc(units.number));
+    .orderBy(
+      // Vigentes primero (ended_on IS NULL ordena antes que cualquier
+      // fecha en NULLS FIRST... pero el default de Postgres para DESC ya es
+      // NULLS FIRST, así que alcanza con desc(endedOn)), después la más
+      // reciente finalizada primero.
+      desc(unitOccupancies.endedOn),
+      desc(unitOccupancies.startedOn),
+    );
+}
+
+export type PersonPhoneMatch = {
+  id: string;
+  firstName: string;
+  lastName: string | null;
+  email: string | null;
+};
+
+// Búsqueda por teléfono dentro de la organización (decisión 1 del reporte,
+// "cómo evitar cargar a la misma persona dos veces"): usa exactamente el
+// índice único parcial que ya define la unicidad real
+// (people_organization_id_phone_e164_unique, ver people.ts) --
+// `organization_id` como columna líder lo sirve directo, sin escanear de
+// más. `phoneE164` ya llega normalizado (mismo formato que se guarda) desde
+// el caller.
+export async function findPersonByPhone(
+  organizationId: string,
+  phoneE164: string,
+): Promise<PersonPhoneMatch | null> {
+  const [row] = await db
+    .select({
+      id: people.id,
+      firstName: people.firstName,
+      lastName: people.lastName,
+      email: people.email,
+    })
+    .from(people)
+    .where(
+      and(
+        eq(people.organizationId, organizationId),
+        eq(people.phoneE164, phoneE164),
+        isNull(people.deletedAt),
+      ),
+    );
+
+  return row ?? null;
+}
+
+// Defensa en profundidad para la asignación a unidad (paso 4.4): igual que
+// `buildingId` en el WHERE de softDeleteUnitAction (units/actions.ts), no
+// cambia qué filas puede tocar alguien de otra organización
+// (`organizationId` ya alcanza para eso), pero evita que un estado de
+// cliente desactualizado (una unidad que ya no es de este edificio, o que
+// se dio de baja) termine asignando un vecino a una unidad donde no
+// corresponde.
+export async function unitBelongsToBuilding(
+  organizationId: string,
+  buildingId: string,
+  unitId: string,
+): Promise<boolean> {
+  const [row] = await db
+    .select({ id: units.id })
+    .from(units)
+    .where(
+      and(
+        eq(units.id, unitId),
+        eq(units.organizationId, organizationId),
+        eq(units.buildingId, buildingId),
+        isNull(units.deletedAt),
+      ),
+    );
+
+  return !!row;
+}
+
+export type PersonDependencyCounts = {
+  activeOccupanciesCount: number;
+  pendingTicketsCount: number;
+};
+
+// Para el diálogo de baja de una PERSONA (paso 4.4, decisión 2): a
+// diferencia de getUnitDependencyCounts() (units/queries.ts, acotado a UNA
+// unidad), acá se cuenta en TODA la organización -- dar de baja a una
+// persona la saca de todo listado normal sin importar en qué edificio esté,
+// así que lo que hay que advertir es su situación completa, no solo la de
+// este edificio. Ocupaciones VIGENTES (ended_on IS NULL) y reclamos
+// pendientes (new/in_progress), mismo criterio que unidades.
+export async function getPersonDependencyCounts(
+  organizationId: string,
+  personId: string,
+): Promise<PersonDependencyCounts> {
+  const [occupancies] = await db
+    .select({ count: sql<number>`count(*)`.mapWith(Number) })
+    .from(unitOccupancies)
+    .where(
+      and(
+        eq(unitOccupancies.organizationId, organizationId),
+        eq(unitOccupancies.personId, personId),
+        isNull(unitOccupancies.endedOn),
+        isNull(unitOccupancies.deletedAt),
+      ),
+    );
+
+  const [pendingTickets] = await db
+    .select({ count: sql<number>`count(*)`.mapWith(Number) })
+    .from(tickets)
+    .where(
+      and(
+        eq(tickets.organizationId, organizationId),
+        eq(tickets.personId, personId),
+        inArray(tickets.status, ["new", "in_progress"]),
+        isNull(tickets.deletedAt),
+      ),
+    );
+
+  return {
+    activeOccupanciesCount: occupancies?.count ?? 0,
+    pendingTicketsCount: pendingTickets?.count ?? 0,
+  };
 }

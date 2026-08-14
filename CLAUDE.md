@@ -180,6 +180,23 @@ Regla clave: la lógica de dominio vive en `src/features/<dominio>/`;
   cubriría además el caso más amplio de dos rangos ya CERRADOS que se
   solapan en el pasado, pero eso no está pedido hoy — si hace falta más
   adelante (ej. auditoría de historial de ocupantes), ahí se justifica.
+- **Dentro de `db.transaction()`, el error real de Postgres no llega
+  directo al `catch` -- Drizzle lo envuelve en un error propio y lo deja en
+  `.cause`.** Fuera de una transacción (el resto de las Server Actions del
+  proyecto hasta el paso 4.4: `translateBuildingError()`,
+  `translateUnitError()`), el driver `postgres` tira el `PostgresError`
+  directo, así que `error instanceof postgres.PostgresError` alcanza.
+  Encontrado en la práctica (paso 4.4, `createPersonWithOccupancyAction` en
+  `src/features/people/actions.ts` -- la única action de este proyecto que
+  usa `db.transaction()`, para que el alta de la persona y su ocupación
+  sean atómicas): con ese chequeo directo, un `UNIQUE`/`CHECK` real
+  disparado adentro de la transacción caía siempre en el mensaje genérico,
+  nunca en el mensaje traducido de campo. Solución:
+  `unwrapPostgresError()` en ese mismo archivo revisa primero la instancia
+  directa y, si no matchea, `error.cause` -- cualquier código nuevo que
+  traduzca errores de Postgres desde ADENTRO de un `db.transaction()` tiene
+  que usar ese mismo desenvolvimiento, no el chequeo directo de los
+  ejemplos previos a este paso.
 
 ## Integridad entre organizaciones
 
@@ -734,6 +751,17 @@ arreglar de apuro algo que todavía no se decidió bien.
   deploy): revisar qué queda en los logs de Vercel (o donde corra la app)
   para un login real, y si algo sensible aparece ahí, resolverlo antes de
   que haya usuarios reales generando esos logs.
+
+- **Una persona sin teléfono no puede recibir comunicados en la etapa 8.**
+  `people.phone_e164` es nullable a propósito (ver CLAUDE.md > Acceso a
+  datos) -- el administrador puede cargar a un vecino del que todavía no
+  tiene el dato (paso 4.4). Pero en la etapa 8, ese vecino queda excluido
+  de cualquier aviso por WhatsApp sin ninguna señal previa: nada en el
+  panel de hoy distingue "vecino sin teléfono" de cualquier otro vecino
+  hasta el momento de intentar notificarlo. Falta, en esa etapa, una forma
+  de que el administrador vea de un vistazo qué vecinos no tienen teléfono
+  cargado, con un link directo para completarlo -- no alcanza con que la
+  columna "Teléfono" del listado muestre "—" fila por fila.
 
 ## Qué NO hacer
 
