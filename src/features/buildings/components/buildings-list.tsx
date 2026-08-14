@@ -116,8 +116,17 @@ export function BuildingsList({
                     className={cn(!building.active && "text-muted-foreground")}
                   >
                     <TableCell className="font-medium text-inherit">
+                      {/* Directo a /units, no a /panel/buildings/[id] a
+                          secas (paso 4.2): esa ruta bare existe para quien
+                          entra por una URL vieja o escrita a mano, pero es
+                          un redirect() de servidor -- un ida y vuelta HTTP
+                          real que hace correr el layout del edificio DOS
+                          veces (confirmado con pg_stat_statements: duplica
+                          getBuildingDetail y demás). El punto de entrada
+                          normal (este link) va directo al destino final,
+                          sin ese salto. */}
                       <Link
-                        href={`/panel/buildings/${building.id}`}
+                        href={`/panel/buildings/${building.id}/units`}
                         className="outline-none hover:underline focus-visible:underline"
                       >
                         {building.name}
@@ -164,7 +173,7 @@ export function BuildingsList({
                   <div className="flex items-start justify-between gap-2">
                     <CardTitle className="text-inherit">
                       <Link
-                        href={`/panel/buildings/${building.id}`}
+                        href={`/panel/buildings/${building.id}/units`}
                         className="outline-none hover:underline focus-visible:underline"
                       >
                         {building.name}
