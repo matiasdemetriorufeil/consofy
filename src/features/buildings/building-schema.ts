@@ -5,6 +5,7 @@ import {
   AR_WHATSAPP_HELP,
   normalizePhoneInput,
 } from "@/lib/phone";
+import { stripDiacritics } from "@/lib/text";
 
 // Compartido entre cliente (BuildingForm, vía zodResolver) y servidor
 // (actions.ts) -- mismo patrón que login-schema.ts. Ver CLAUDE.md > Reglas
@@ -104,13 +105,6 @@ export const initialBuildingFormState: BuildingFormState = {
   formError: null,
   fieldErrors: {},
 };
-
-// Quita tildes/diacríticos para que "Córdoba" -> "cordoba", no "c-rdoba" --
-// normalize("NFD") separa la letra de su acento (combining diacritical
-// mark, U+0300-U+036F) para poder descartarlo con un replace simple.
-function stripDiacritics(value: string): string {
-  return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-}
 
 // Sugerencia de slug a partir del nombre (paso 4.1, punto 2): editable
 // después, esto solo precarga el campo la primera vez y cada vez que el

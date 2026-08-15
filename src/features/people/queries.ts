@@ -136,6 +136,100 @@ export async function findPersonByPhone(
   return row ?? null;
 }
 
+// Versión en lote de findPersonByPhone() (paso 4.5, importación CSV): un
+// archivo de hasta IMPORT_MAX_ROWS filas puede traer cientos de teléfonos
+// distintos para buscar -- llamar a findPersonByPhone() una vez por fila
+// sería exactamente el N+1 que el proyecto evita en todo lado (ver el
+// comentario de getExistingUnitKeys() en units/queries.ts para el mismo
+// razonamiento aplicado a unidades). Una sola consulta con `inArray` para
+// el archivo entero. `phones` ya llega normalizado (mismo formato que se
+// guarda) desde el caller.
+export async function findPeopleByPhones(
+  organizationId: string,
+  phones: string[],
+): Promise<Map<string, PersonPhoneMatch>> {
+  if (phones.length === 0) {
+    return new Map();
+  }
+
+  const rows = await db
+    .select({
+      id: people.id,
+      firstName: people.firstName,
+      lastName: people.lastName,
+      email: people.email,
+      phoneE164: people.phoneE164,
+    })
+    .from(people)
+    .where(
+      and(
+        eq(people.organizationId, organizationId),
+        inArray(people.phoneE164, phones),
+        isNull(people.deletedAt),
+      ),
+    );
+
+  return new Map(
+    rows
+      .filter(
+        (row): row is typeof row & { phoneE164: string } => !!row.phoneE164,
+      )
+      .map((row) => [
+        row.phoneE164,
+        {
+          id: row.id,
+          firstName: row.firstName,
+          lastName: row.lastName,
+          email: row.email,
+        },
+      ]),
+  );
+}
+
+export type BuildingOngoingOccupancy = {
+  unitId: string;
+  personId: string;
+  isPrimary: boolean;
+};
+
+// Para la importación CSV (paso 4.5): trae, en UNA consulta, todas las
+// ocupaciones VIGENTES del edificio -- lo que hace falta para chequear,
+// fila por fila y sin ir a la base de nuevo por cada una, si "esta persona
+// ya tiene una ocupación vigente en esta unidad" (el constraint que se
+// endureció al cierre del paso 4.4,
+// unit_occupancies_unit_person_ongoing_unique) y si "esta unidad ya tiene
+// un contacto principal vigente" (para avisar en la previsualización que
+// importar una fila marcada como principal va a reemplazarlo, no para
+// bloquearla -- el alta real, en la segunda entrega de este paso, hace el
+// mismo desmarcado atómico que ya hace createPersonWithOccupancyAction).
+export async function getBuildingOngoingOccupancies(
+  organizationId: string,
+  buildingId: string,
+): Promise<BuildingOngoingOccupancy[]> {
+  return db
+    .select({
+      unitId: unitOccupancies.unitId,
+      personId: unitOccupancies.personId,
+      isPrimary: unitOccupancies.isPrimary,
+    })
+    .from(unitOccupancies)
+    .innerJoin(
+      units,
+      and(
+        eq(units.id, unitOccupancies.unitId),
+        eq(units.organizationId, unitOccupancies.organizationId),
+      ),
+    )
+    .where(
+      and(
+        eq(unitOccupancies.organizationId, organizationId),
+        eq(units.buildingId, buildingId),
+        isNull(unitOccupancies.endedOn),
+        isNull(unitOccupancies.deletedAt),
+      ),
+    );
+}
+
 // Defensa en profundidad para la asignación a unidad (paso 4.4): igual que
 // `buildingId` en el WHERE de softDeleteUnitAction (units/actions.ts), no
 // cambia qué filas puede tocar alguien de otra organización

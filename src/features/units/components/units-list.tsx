@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/table";
 import { UnitTag } from "@/features/buildings/components/unit-tag";
 import { UNIT_TYPE_LABEL } from "@/features/buildings/unit-type";
+import { ImportDialog } from "@/features/imports/components/import-dialog";
 
 import type { BuildingUnitRow } from "../queries";
 import { BulkUnitsDialog } from "./bulk-units-dialog";
@@ -32,6 +33,7 @@ type DialogState =
   | { type: "closed" }
   | { type: "create" }
   | { type: "bulk" }
+  | { type: "import" }
   | { type: "edit"; unit: BuildingUnitRow }
   | { type: "delete"; unit: BuildingUnitRow };
 
@@ -91,6 +93,12 @@ export function UnitsList({
           />
         </div>
         <div className="flex gap-2">
+          <Button
+            variant="outline"
+            onClick={() => setDialog({ type: "import" })}
+          >
+            Importar CSV
+          </Button>
           <Button variant="outline" onClick={() => setDialog({ type: "bulk" })}>
             Crear varias
           </Button>
@@ -179,6 +187,16 @@ export function UnitsList({
 
       <BulkUnitsDialog
         open={dialog.type === "bulk"}
+        onOpenChange={(open) => {
+          if (!open) {
+            setDialog({ type: "closed" });
+          }
+        }}
+        buildingId={buildingId}
+      />
+
+      <ImportDialog
+        open={dialog.type === "import"}
         onOpenChange={(open) => {
           if (!open) {
             setDialog({ type: "closed" });

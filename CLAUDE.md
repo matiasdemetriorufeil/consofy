@@ -527,7 +527,12 @@ trabaja. Ninguna de las tres es negociable:
   limpieza posterior borre por error un dato real con un nombre parecido. La
   limpieza es siempre borrado lógico en tablas de negocio (`deleted_at`,
   nunca `DELETE` físico -- ver CLAUDE.md > Convenciones): la misma regla que
-  ya rige el código de la aplicación rige también cómo se prueba.
+  ya rige el código de la aplicación rige también cómo se prueba. Esto
+  aplica también a cualquier script suelto de diagnóstico o medición contra
+  la base real (ej. un spike para probar un mecanismo de Drizzle/Postgres),
+  no solo a datos creados probando una pantalla del panel -- son la misma
+  base compartida, y "esto es solo para verificar algo técnico" no es una
+  excepción.
 - **Nunca imprimir en la salida de un comando el contenido de variables de
   entorno que tengan credenciales** (`DATABASE_URL`, `MIGRATION_DATABASE_URL`,
   las claves de Supabase). Si hace falta diagnosticar un problema con ellas,
@@ -790,6 +795,40 @@ arreglar de apuro algo que todavía no se decidió bien.
      panel?).
 
   La decisión se toma al escribir el paso 5.5, no acá.
+
+- **La latencia medida desde desarrollo (~170ms por round-trip contra
+  Supabase us-east-1) afecta a TODA la app, no solo a la importación CSV.**
+  Medido en el paso 4.5 (entrega 3) contra la conexión real de desarrollo
+  (pooler de sesión, puerto 5432): un `SELECT 1` sin ningún trabajo real
+  tarda ~172ms de ida y vuelta; un `INSERT` real, ~350ms -- prácticamente
+  todo es latencia de red Córdoba↔us-east-1, no trabajo de Postgres (ver el
+  detalle completo en el historial de esa entrega). Esto no es un problema
+  exclusivo de la importación: CUALQUIER pantalla del panel que haga varias
+  consultas secuenciales paga el mismo costo por round-trip. La primera
+  medición real contra producción (Vercel iad1, pooler de TRANSACCIONES
+  puerto 6543 -- ver CLAUDE.md > Acceso a datos, "la primera verificación
+  real contra el puerto 6543 va a ser el primer deploy en Vercel") tiene
+  que incluir una comparación explícita contra estos números de hoy, no
+  solo confirmar que la app funciona.
+  Números medidos para contrastar: `SELECT 1` ~172ms (p50), `INSERT` real
+  ~350ms (p50), 500 filas de importación (20 tandas de 25, escritura
+  paralela) ~169s.
+
+- **Propuesta A de la importación CSV (INSERT en lote con `ON CONFLICT DO
+NOTHING`) queda disponible, no implementada, para archivos mucho más
+  grandes que los ~200 filas reales esperadas.** Evaluada y descartada en
+  el paso 4.5 (entrega 3) a favor de paralelizar filas independientes
+  (`IMPORT_WRITE_POOL_MAX`, `src/features/imports/db.ts`): un `INSERT` en
+  lote reduce los round-trips por tanda a un puñado fijo sin importar
+  cuántas filas tenga (en vez de crecer con la cantidad de filas), pero un
+  error inesperado que NO sea de unicidad (algo que hoy debería ser
+  prácticamente inalcanzable, dado que `resolveCsvRow` ya valida con Zod
+  antes de llegar a la base) se lleva puesta TODA la tanda del `INSERT` en
+  vez de una sola fila -- justo la garantía ("una fila mala no frena a las
+  demás") que se decidió no arriesgar por la diferencia entre segundos y
+  minutos para el tamaño de archivo real de este proyecto. Si algún día
+  hace falta importar archivos de miles de filas, ahí se justifica
+  revisitar esta opción -- con esa garantía en mente, no como algo gratis.
 
 ## Qué NO hacer
 

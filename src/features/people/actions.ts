@@ -2,14 +2,25 @@
 
 import { and, eq, isNull } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
-import postgres from "postgres";
 import { z } from "zod";
 
 import { db } from "@/db";
 import { people, unitOccupancies } from "@/db/schema";
 import { authorizedAction } from "@/lib/auth";
 import { AR_WHATSAPP_E164_REGEX, normalizePhoneInput } from "@/lib/phone";
+import {
+  CHECK_VIOLATION,
+  UNIQUE_VIOLATION,
+  unwrapPostgresError,
+} from "@/lib/postgres-errors";
 
+import {
+  OCCUPANCY_ENDED_ON_CHECK,
+  PERSON_UNIT_ONGOING_UNIQUE_CONSTRAINT,
+  PHONE_FORMAT_CHECK,
+  PHONE_UNIQUE_CONSTRAINT,
+  PRIMARY_UNIQUE_CONSTRAINT,
+} from "./constraints";
 import {
   closeOccupancyFormSchema,
   createPersonWithOccupancyFormSchema,
@@ -42,38 +53,6 @@ function zodIssuesToFieldErrors(error: z.ZodError): PersonFieldErrors {
     }
   }
   return fieldErrors;
-}
-
-const UNIQUE_VIOLATION = "23505";
-const CHECK_VIOLATION = "23514";
-
-const PHONE_UNIQUE_CONSTRAINT = "people_organization_id_phone_e164_unique";
-const PHONE_FORMAT_CHECK = "people_phone_e164_format";
-const PRIMARY_UNIQUE_CONSTRAINT = "unit_occupancies_primary_per_unit_unique";
-// Renombrado en el cierre de 4.4 junto con el índice mismo (antes incluía
-// `role`, ver unit-occupancies.ts): ahora es por unidad+persona sola, sin
-// importar el rol.
-const PERSON_UNIT_ONGOING_UNIQUE_CONSTRAINT =
-  "unit_occupancies_unit_person_ongoing_unique";
-
-// Dentro de db.transaction(), Drizzle envuelve el error real de Postgres en
-// un error propio (para agregarle contexto de rollback) y lo deja en
-// `.cause` -- fuera de una transacción (el resto de las Server Actions de
-// este proyecto, ej. translateUnitError en units/actions.ts) el driver
-// `postgres` tira el PostgresError directo, sin envoltorio. Encontrado en
-// la práctica (paso 4.4, verificado con una escritura real que debía
-// rechazarse): sin desenvolver `.cause` acá, translateOccupancyError()
-// nunca reconocía el constraint y todo caía en el mensaje genérico. Esta
-// es la única acción de todo el proyecto que usa db.transaction(), por eso
-// el caso no había aparecido antes.
-function unwrapPostgresError(error: unknown): postgres.PostgresError | null {
-  if (error instanceof postgres.PostgresError) {
-    return error;
-  }
-  if (error instanceof Error && error.cause instanceof postgres.PostgresError) {
-    return error.cause;
-  }
-  return null;
 }
 
 // Traduce el error de Postgres cuando el INSERT/UPDATE de una persona
@@ -379,8 +358,6 @@ export const softDeletePersonAction = authorizedAction(
     return { ok: true };
   },
 );
-
-const OCCUPANCY_ENDED_ON_CHECK = "unit_occupancies_ended_on_after_started_on";
 
 // Cierre de una ocupación (paso 4.4 -- decisión 3 del reporte, "cómo se
 // distingue vigente de pasada"): setea `ended_on`, nunca borra la fila --

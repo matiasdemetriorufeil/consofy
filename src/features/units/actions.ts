@@ -2,13 +2,14 @@
 
 import { and, eq, isNull } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
-import postgres from "postgres";
 import { z } from "zod";
 
 import { db } from "@/db";
 import { units } from "@/db/schema";
 import { authorizedAction } from "@/lib/auth";
+import { UNIQUE_VIOLATION, unwrapPostgresError } from "@/lib/postgres-errors";
 
+import { UNIT_KEY_CONSTRAINT } from "./constraints";
 import {
   bulkUnitCandidatesSchema,
   bulkUnitsFormSchema,
@@ -52,9 +53,6 @@ function zodIssuesToFieldErrors(error: z.ZodError): UnitFieldErrors {
   return fieldErrors;
 }
 
-const UNIQUE_VIOLATION = "23505";
-const UNIT_KEY_CONSTRAINT = "units_building_tower_floor_number_unique";
-
 // Traduce el error de Postgres cuando el índice único parcial
 // (units_building_tower_floor_number_unique, ver units.ts) rechaza un
 // INSERT/UPDATE -- nunca se devuelve el error crudo de la base (mismo
@@ -62,15 +60,21 @@ const UNIT_KEY_CONSTRAINT = "units_building_tower_floor_number_unique";
 // 4.1). A diferencia del prefijo de edificio, acá no hace falta buscar
 // "quién ya lo usa": el valor que chocó es el mismo que se acaba de
 // enviar, así que el mensaje se arma directo con esos datos, sin una
-// consulta extra.
+// consulta extra. `unwrapPostgresError()`/`UNIQUE_VIOLATION` y
+// `UNIT_KEY_CONSTRAINT` viven en módulos compartidos (lib/postgres-errors.ts,
+// ./constraints.ts) desde que apareció un segundo consumidor del mismo
+// constraint: la escritura de la importación CSV (paso 4.5), que corre
+// DENTRO de una transacción y necesita el desenvuelto de `.cause` -- ver el
+// comentario largo en lib/postgres-errors.ts.
 function translateUnitError(
-  error: unknown,
+  rawError: unknown,
   tower: string | null,
   floor: string,
   number: string,
 ): UnitFormState {
+  const error = unwrapPostgresError(rawError);
   if (
-    error instanceof postgres.PostgresError &&
+    error &&
     error.code === UNIQUE_VIOLATION &&
     error.constraint_name === UNIT_KEY_CONSTRAINT
   ) {
