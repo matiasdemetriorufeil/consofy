@@ -554,6 +554,22 @@ trabaja. Ninguna de las tres es negociable:
   opciones válidas: mandarla a `/dev/null` y depurar con logs propios y
   explícitos (un `console.log` puntual, después borrado), o filtrar la
   salida ANTES de que toque disco, nunca después.
+- **En los reportes, nunca atribuir al usuario una aprobación, autorización
+  o instrucción que no haya dado explícitamente en el pedido de esa
+  tarea.** Si una acción se tomó por criterio propio -- incluida una
+  elegida en respuesta a una pregunta de opción múltiple armada por quien
+  reporta, no pedida de entrada por el usuario -- se reporta como criterio
+  propio, sin dorarla como si fuera una instrucción que ya venía dada. Esto
+  vale con más fuerza todavía para las acciones que esta misma sección
+  restringe (la service-role key, tocar cuentas, instalar dependencias
+  nuevas): reportarlas como autorizadas cuando no lo estaban -- o sin
+  aclarar bien qué tipo de intercambio hubo realmente -- las vuelve
+  invisibles a la revisión, que es exactamente lo que estas reglas existen
+  para evitar. Encontrado en la práctica (paso 4.6): un reporte que decía
+  "con tu aprobación explícita" sobre un uso de la service-role key sin
+  distinguir que esa aprobación había salido de una pregunta en pantalla
+  armada bajo presión de estar bloqueado, no de un pedido espontáneo del
+  usuario.
 
 ## Reglas de WhatsApp
 
@@ -829,6 +845,24 @@ NOTHING`) queda disponible, no implementada, para archivos mucho más
   minutos para el tamaño de archivo real de este proyecto. Si algún día
   hace falta importar archivos de miles de filas, ahí se justifica
   revisitar esta opción -- con esa garantía en mente, no como algo gratis.
+
+- **Regenerar `public_token` (invalidar un QR impreso que se filtró) queda
+  sin implementar, a propósito, hasta que exista tráfico real por ese
+  token.** Evaluado en el paso 4.6 (pantalla de enlace público): hoy
+  `/r/[token]` ni siquiera existe (lo crea el paso 5.1), así que no hay
+  ninguna exposición real todavía -- regenerar el token de un edificio no
+  protege nada que esté en riesgo hoy. Cuando la ruta pública exista, sí es
+  una necesidad real: un QR pegado en un hall es física, no digital -- se
+  puede fotografiar, y una vez fotografiado no hay forma de "despegarlo"
+  del lado de la app. Implementarlo ahí (no antes) porque para entonces
+  además hace falta pensar la UX completa, no solo la escritura en la
+  base: un botón "Regenerar" sin más invalidaría el QR ya impreso sin que
+  el administrador se dé cuenta del todo -- necesita un diálogo de
+  confirmación explícito que deje claro que el enlace y el QR actuales
+  dejan de funcionar de inmediato, y probablemente un recordatorio de
+  "tenés que reimprimir el cartel". Ninguna de esas dos cosas (el diálogo,
+  el recordatorio) tiene sentido diseñarla antes de que la ruta pública
+  exista y se pueda probar el flujo completo de punta a punta.
 
 ## Qué NO hacer
 

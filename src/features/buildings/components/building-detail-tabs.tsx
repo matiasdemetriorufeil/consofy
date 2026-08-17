@@ -11,6 +11,7 @@ const TABS = [
   { segment: "tickets", label: "Reclamos" },
   { segment: "documents", label: "Documentos" },
   { segment: "reminders", label: "Recordatorios" },
+  { segment: "public-link", label: "Enlace público" },
 ] as const;
 
 // Navegación por pestañas de la vista de detalle (paso 4.2, punto 3): cada
@@ -26,13 +27,21 @@ const TABS = [
 // significado pelear con su manejo de foco/selección pensado para el otro
 // caso.
 //
-// Mobile (punto 4 del paso): cinco etiquetas no entran en una fila a
-// 375px. En vez de un selector aparte para mobile (una interacción
-// distinta a mantener), la tira de pestañas scrollea horizontal
-// (overflow-x-auto + w-max en la lista para que no se compriman) -- mismo
-// patrón que usan GitHub/Twitter en mobile para tabs de navegación: se
-// mantiene la misma interacción (tocar la pestaña) en los dos tamaños,
-// solo cambia si entran todas a la vista o hay que deslizar.
+// Mobile (punto 4 del paso): las seis etiquetas (agregada "Enlace público"
+// en el paso 4.6) no entran en una fila a 375px. En vez de un selector
+// aparte para mobile (una interacción distinta a mantener), la tira de
+// pestañas scrollea horizontal (overflow-x-auto + w-max en la lista para
+// que no se compriman) -- mismo patrón que usan GitHub/Twitter en mobile
+// para tabs de navegación: se mantiene la misma interacción (tocar la
+// pestaña) en los dos tamaños, solo cambia si entran todas a la vista o
+// hay que deslizar.
+//
+// "Enlace público" al final, no reordenado por frecuencia de uso: el
+// administrador la visita una sola vez por edificio (al arrancar, para
+// imprimir el QR), a diferencia de las demás pestañas que se revisan todo
+// el tiempo -- ponerla última la saca del camino sin esconderla ni
+// obligar a un mecanismo de descubrimiento aparte (ver el comentario de
+// public-link/page.tsx sobre por qué es una pestaña y no un diálogo).
 export function BuildingDetailTabs({ buildingId }: { buildingId: string }) {
   const pathname = usePathname();
 

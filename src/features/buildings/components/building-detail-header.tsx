@@ -14,10 +14,12 @@ import { BuildingFormDialog } from "./building-form-dialog";
 // buildings-list.tsx para toda la fila; acá solo hace falta para este botón
 // "Editar edificio").
 //
-// Nunca muestra `public_token` ni el link público -- ni siquiera podría:
-// `building` es un BuildingEditableFields, y getBuildingDetail() (que lo
-// resuelve) directamente no selecciona esa columna. Mostrarlo es el paso
-// 4.6.
+// No muestra `public_token` ni el link público -- eso vive en su propia
+// pestaña ("Enlace público", paso 4.6), no en este encabezado. Desde el
+// paso 4.6, el layout le pasa acá un BuildingDetailFields (superset de
+// BuildingEditableFields con publicToken agregado, ver
+// src/features/buildings/queries.ts) -- este componente sigue tipado
+// contra BuildingEditableFields y simplemente no usa el campo de más.
 export function BuildingDetailHeader({
   building,
 }: {

@@ -41,6 +41,20 @@ export type ManagedBuildingOption = BuildingEditableFields & {
   pendingTicketsCount: number;
 };
 
+// Superset de BuildingEditableFields, no un reemplazo: agrega publicToken
+// (paso 4.6) solo para quien realmente lo necesita (la pestaña de enlace
+// público). BuildingEditableFields se queda como está a propósito -- si
+// publicToken se agregara ahí directamente, ManagedBuildingOption (que
+// extiende BuildingEditableFields) también lo heredaría, y eso obligaría a
+// getManagedBuildings() a seleccionar una columna que buildings-list.tsx
+// nunca usa. Un valor de este tipo sigue siendo asignable donde se pide un
+// BuildingEditableFields sin ningún cambio (BuildingDetailHeader,
+// BuildingFormDialog, BuildingForm) -- es tipado estructural de TS, no una
+// jerarquía nueva que haya que propagar.
+export type BuildingDetailFields = BuildingEditableFields & {
+  publicToken: string;
+};
+
 // Mismo criterio que PENDING_STATUSES en src/features/tickets/queries.ts
 // (no exportado desde ahí -- ver el comentario de getManagedBuildings más
 // abajo sobre por qué este archivo no importa ese módulo).
@@ -193,22 +207,26 @@ export async function getManagedBuildings(
 // caller (el layout del segmento [buildingId]) es quien decide qué hacer
 // con `null` (notFound(), en este caso), esta función solo resuelve datos.
 //
-// NUNCA selecciona public_token: el paso 4.2 pide explícitamente no
-// mostrarlo en esta pantalla (es el paso 4.6) -- ni siquiera se lo trae de
-// la base para esta vista, así no hay ninguna posibilidad de que se filtre
-// sin querer a algún componente que reciba el objeto entero.
+// Selecciona public_token desde el paso 4.6 (antes, deliberadamente no --
+// el paso 4.2 pedía no mostrarlo todavía en esta pantalla). El tipo de
+// retorno pasa a ser BuildingDetailFields (definido arriba, superset de
+// BuildingEditableFields) en vez de BuildingEditableFields directo -- así
+// el campo nuevo no se propaga a ManagedBuildingOption/getManagedBuildings,
+// que no lo necesitan. BuildingDetailHeader/BuildingFormDialog/BuildingForm
+// siguen aceptando el valor sin cambios (asignación estructural: un
+// BuildingDetailFields ya tiene todo lo que un BuildingEditableFields
+// pide).
 //
 // cache() de React: el layout del segmento y cada page.tsx de pestaña
-// (units/people/tickets/documents/reminders) podrían llamar a esto con los
-// mismos argumentos en la misma request -- en la práctica, solo el layout
-// lo hace hoy (las páginas de pestaña resuelven su propio listado con
-// buildingId de sus propios `params`, sin necesitar el resto de los campos
-// del edificio), pero cachearlo igual evita que un futuro llamador
-// duplique el round-trip sin darse cuenta.
+// (units/people/tickets/documents/reminders/public-link) podrían llamar a
+// esto con los mismos argumentos en la misma request -- en la práctica, el
+// layout siempre lo hace, y ahora también la pestaña de enlace público
+// (necesita publicToken, active y name); cachearlo evita que esas dos
+// llamadas repitan el round-trip.
 export const getBuildingDetail = cache(async function getBuildingDetail(
   organizationId: string,
   buildingId: string,
-): Promise<BuildingEditableFields | null> {
+): Promise<BuildingDetailFields | null> {
   const [row] = await db
     .select({
       id: buildings.id,
@@ -220,6 +238,7 @@ export const getBuildingDetail = cache(async function getBuildingDetail(
       adminWhatsappE164: buildings.adminWhatsappE164,
       notes: buildings.notes,
       active: buildings.active,
+      publicToken: buildings.publicToken,
     })
     .from(buildings)
     .where(
