@@ -25,9 +25,18 @@ import * as schema from "@/db/schema";
 // beneficio disponible (8→12 solo ganaba ~31% más velocidad por 50% más
 // conexiones, contra un techo compartido con el resto de la app). 8 deja
 // 7 conexiones de margen bajo ese límite de 15 para todo lo demás que la
-// app pueda estar sirviendo al mismo tiempo. El límite real en producción
-// (pooler de TRANSACCIONES, puerto 6543) es OTRO número, sin verificar
-// todavía -- ver CLAUDE.md > Pendientes.
+// app pueda estar sirviendo al mismo tiempo.
+//
+// El límite real en producción (pooler de TRANSACCIONES, puerto 6543) SÍ
+// se midió después (medición contra producción): rampa de conexiones
+// concurrentes de 1 a 80 contra 6543, sin un solo error ni señal de cola
+// -- no se encontró el techo, solo se confirmó que está en ≥80 (5x el de
+// sesión). Con ese margen, y con el import de 500 filas ya corriendo en
+// 9.7s en producción (contra el criterio de aceptación de 5 minutos), NO
+// se subió este número: el paralelismo actual ya no es el cuello de
+// botella, y subirlo solo gastaría margen de un techo que sigue sin
+// medirse con exactitud a cambio de unos segundos menos en un import que
+// ya sobra de rápido.
 const IMPORT_WRITE_POOL_MAX = 8;
 
 const globalForImportsDb = globalThis as unknown as {

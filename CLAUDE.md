@@ -117,8 +117,19 @@ Regla clave: la lógica de dominio vive en `src/features/<dominio>/`;
   persistente, no muchas instancias efímeras — el caso para el que Supabase
   recomienda sesión o conexión directa. `{ prepare: false }` en
   `src/db/index.ts` es compatible con los dos, así que el código no cambia
-  entre entornos. La primera verificación real contra el puerto 6543 va a ser
-  el primer deploy en Vercel.
+  entre entornos. Desde la separación dev/producción (ver esa sección más
+  abajo), además apuntan a PROYECTOS de Supabase distintos, no solo a
+  puertos distintos del mismo proyecto.
+
+  **Medido contra producción real** (Vercel iad1 → pooler de transacciones
+  6543), comparado contra desarrollo (Córdoba → pooler de sesión 5432):
+  `SELECT 1` suelto 3ms p50 en prod vs. 172ms p50 en dev (~57x); `INSERT`
+  real 8ms p50 en prod vs. 350ms p50 en dev (~44x); import de 500 filas,
+  9.7s en prod vs. 168.7s en dev (~17x). Confirma que el costo medido en
+  desarrollo era casi todo latencia de red Córdoba↔us-east-1, no trabajo de
+  Postgres — con Vercel co-ubicado en la misma región, ese costo
+  prácticamente desaparece.
+
 - Borrado lógico + unicidad: los índices únicos que compiten con
   `deleted_at` son parciales (`WHERE deleted_at IS NULL`), para que un slug o
   una unidad dados de baja no bloqueen reutilizar ese valor. `public_token`
@@ -570,6 +581,23 @@ trabaja. Ninguna de las tres es negociable:
   distinguir que esa aprobación había salido de una pregunta en pantalla
   armada bajo presión de estar bloqueado, no de un pedido espontáneo del
   usuario.
+- **Todo reporte que declare cambios de archivo (código, CLAUDE.md,
+  configuración) tiene que incluir la salida literal de `git diff --stat`
+  y `git status` de ese momento, no una lista de memoria de lo que se
+  planeó cambiar.** El resto de las afirmaciones de un reporte ya vienen
+  con evidencia pegada -- el SQL de limpieza con su verificación antes/
+  después, la salida real de una prueba, el resultado de `lint`/`build` --
+  los cambios de archivo eran la única categoría que se afirmaba sin nada
+  que la respalde, solo la palabra de quien reporta. Encontrado en la
+  práctica (medición contra producción): un reporte declaró tres cambios
+  (una nota de "Acceso a datos", una entrada de Pendientes, un comentario
+  de `src/features/imports/db.ts`) que se habían decidido y redactado
+  mentalmente pero nunca se habían escrito de verdad -- la única acción de
+  ese turno sin una verificación propia, a diferencia de las mediciones y
+  la limpieza de datos, que si se hubiesen quedado a mitad de camino se
+  habrían notado solas. `git diff --stat`/`git status` no dependen de
+  acordarse: si el archivo no cambió, no aparecen, sin importar qué tan
+  claro esté el cambio en la cabeza de quien reporta.
 
 ## Reglas de WhatsApp
 
@@ -639,15 +667,71 @@ se contaminen entre sí:
 - `npm run format:check` — verifica formato sin escribir cambios.
 - `npm run db:generate` — genera un archivo de migración SQL a partir de los
   cambios en `src/db/schema/`. Usar siempre que cambia el esquema.
-- `npm run db:migrate` — aplica las migraciones pendientes contra la base.
-  Usar siempre después de `db:generate`, tanto en local como en deploy.
+- `npm run db:migrate` — aplica las migraciones pendientes contra la base de
+  **desarrollo** (`.env.local`). Usar siempre después de `db:generate`.
+- `npm run db:migrate:prod` — igual, pero contra **producción**
+  (`.env.production.local`). Comando aparte a propósito, ver "Separación
+  dev/producción" más abajo -- nunca usar `db:migrate` a secas pensando que
+  toca producción.
 - `npm run db:push` — sincroniza el esquema directo contra la base, sin
   generar migración. **Nunca en este proyecto**: se pierde el historial de
   cambios que da `generate` + `migrate`. Existe solo por si hace falta
   prototipar algo descartable en una base personal, nunca contra Supabase.
-- `npm run db:studio` — abre Drizzle Studio para inspeccionar la base.
+- `npm run db:studio` — abre Drizzle Studio para inspeccionar la base de
+  desarrollo. `npm run db:studio:prod` — igual, contra producción (mismo
+  criterio que `db:migrate:prod`).
 - `npm run db:seed` — borra y recrea datos de desarrollo realistas. Ver
-  "Datos de prueba (seed)" más abajo antes de correrlo.
+  "Datos de prueba (seed)" más abajo antes de correrlo. Solo puede correr
+  contra el proyecto de desarrollo -- ver "Separación dev/producción".
+
+## Separación dev/producción
+
+Hasta el 18/08/2026, desarrollo y producción compartían el MISMO proyecto
+de Supabase -- la única diferencia era el puerto del pooler (5432 en local,
+6543 en Vercel). Se separaron en dos proyectos distintos después de
+confirmar, midiendo (no adivinando), que esa base compartida ya tenía
+~1900 filas de prueba dadas de baja por tabla (`units`, `people`,
+`unit_occupancies`) -- borrado lógico nunca borra de verdad, y compartir
+una base entre dev y producción significa que TODO lo que se prueba en dev
+queda ahí para siempre.
+
+- **Desarrollo**: project ref `ytvhanvwkmvyqjeoysab`. `.env.local` apunta
+  acá -- pooler de SESIÓN, puerto 5432 (la conexión DIRECTA que Supabase
+  muestra por default, `db.<ref>.supabase.co`, no resuelve desde esta red
+  sin salida IPv6 -- confirmado con `ENOTFOUND`; el pooler de sesión, mismo
+  host regional que el de transacciones pero puerto 5432, sí conecta).
+- **Producción**: project ref `qjruajnstgrklzbljcob` (el proyecto
+  original). Las variables de entorno de Vercel siguen apuntando acá sin
+  cambios -- pooler de TRANSACCIONES, puerto 6543. `.env.production.local`
+  (gitignorado, igual que `.env.local`) tiene las credenciales de este
+  proyecto para uso LOCAL puntual y deliberado (migraciones, Drizzle
+  Studio) -- la app en runtime nunca lee este archivo, solo Vercel.
+
+**Qué comando toca qué base:**
+
+| Comando                                    | Base                                                                                                      | Protección                                                                                                                                                                                                                                                                                         |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run dev`                              | Desarrollo (`.env.local`)                                                                                 | --                                                                                                                                                                                                                                                                                                 |
+| `npm run db:seed`                          | Desarrollo, y SOLO desarrollo                                                                             | Candado de project ref hardcodeado en `seed.ts` (`ALLOWED_DEV_PROJECT_REF`) -- aborta si `DATABASE_URL` no es del proyecto de desarrollo, sin excepción, ni con `--yes`. Probado en la práctica forzándolo contra producción con las demás salvaguardas satisfechas: abortó solo por este candado. |
+| `db:generate` / `db:migrate` / `db:studio` | Desarrollo (`.env.local`, vía `drizzle.config.ts`)                                                        | --                                                                                                                                                                                                                                                                                                 |
+| `db:migrate:prod` / `db:studio:prod`       | Producción (`.env.production.local`, vía `drizzle.config.production.ts`, pasado con `--config` explícito) | El NOMBRE del comando -- tocar producción exige escribir algo distinto y más largo a propósito, nunca el comando de todos los días con un archivo distinto cargado en silencio.                                                                                                                    |
+| Deploy de Vercel                           | Producción (env vars propias del dashboard de Vercel, no lee ningún `.env*` local)                        | --                                                                                                                                                                                                                                                                                                 |
+
+**Por qué el seed tiene un candado duro y las migraciones no:** el seed
+borra y recarga TODO -- no hay ningún escenario legítimo en el que deba
+tocar producción, así que el bloqueo es absoluto e incondicional. Una
+migración sí necesita llegar a producción cada vez que se despliega un
+cambio de schema -- ahí la protección es de fricción deliberada (comando
+distinto), no de bloqueo total, porque bloquear del todo rompería un flujo
+de trabajo real y legítimo.
+
+**Usuarios de Auth**: viven en el esquema `auth` de CADA proyecto por
+separado -- Drizzle no los migra (no son parte de `src/db/schema/`). El
+usuario de prueba de desarrollo (`prueba-consofy-panel@example.com`) se
+recreó en el proyecto nuevo desde cero, vía Admin API con la service-role
+key de ESE proyecto -- es una cuenta distinta de la de producción, aunque
+comparta el mail, con un `id` distinto vinculado en el `app_users` de la
+base de desarrollo.
 
 ## Datos de prueba (seed)
 
@@ -812,24 +896,6 @@ arreglar de apuro algo que todavía no se decidió bien.
 
   La decisión se toma al escribir el paso 5.5, no acá.
 
-- **La latencia medida desde desarrollo (~170ms por round-trip contra
-  Supabase us-east-1) afecta a TODA la app, no solo a la importación CSV.**
-  Medido en el paso 4.5 (entrega 3) contra la conexión real de desarrollo
-  (pooler de sesión, puerto 5432): un `SELECT 1` sin ningún trabajo real
-  tarda ~172ms de ida y vuelta; un `INSERT` real, ~350ms -- prácticamente
-  todo es latencia de red Córdoba↔us-east-1, no trabajo de Postgres (ver el
-  detalle completo en el historial de esa entrega). Esto no es un problema
-  exclusivo de la importación: CUALQUIER pantalla del panel que haga varias
-  consultas secuenciales paga el mismo costo por round-trip. La primera
-  medición real contra producción (Vercel iad1, pooler de TRANSACCIONES
-  puerto 6543 -- ver CLAUDE.md > Acceso a datos, "la primera verificación
-  real contra el puerto 6543 va a ser el primer deploy en Vercel") tiene
-  que incluir una comparación explícita contra estos números de hoy, no
-  solo confirmar que la app funciona.
-  Números medidos para contrastar: `SELECT 1` ~172ms (p50), `INSERT` real
-  ~350ms (p50), 500 filas de importación (20 tandas de 25, escritura
-  paralela) ~169s.
-
 - **Propuesta A de la importación CSV (INSERT en lote con `ON CONFLICT DO
 NOTHING`) queda disponible, no implementada, para archivos mucho más
   grandes que los ~200 filas reales esperadas.** Evaluada y descartada en
@@ -863,6 +929,60 @@ NOTHING`) queda disponible, no implementada, para archivos mucho más
   "tenés que reimprimir el cartel". Ninguna de esas dos cosas (el diálogo,
   el recordatorio) tiene sentido diseñarla antes de que la ruta pública
   exista y se pueda probar el flujo completo de punta a punta.
+
+- **No existe ninguna ruta de callback de Supabase Auth -- bloqueante para
+  producción.** Encontrado en la práctica: el administrador real
+  (matiasdemetriorufeil@gmail.com) perdió su contraseña en producción, y ni
+  el mail de recuperación ni el magic link de Supabase sirvieron para
+  recuperarla -- los dos le llegan al mail y arrancan el flujo, pero
+  depositan al navegador en la home, porque la app no tiene ninguna ruta
+  (`/auth/callback` o como se decida llamarla) que reciba el código/token
+  que Supabase manda en la URL de vuelta y lo intercambie por una sesión.
+  Sin esa ruta, los dos flujos oficiales de autoservicio para recuperar
+  acceso están rotos de punta a punta.
+
+  Esto deja al administrador SIN NINGUNA forma de recuperar su propio
+  acceso: hoy la única salida es que alguien con acceso al dashboard de
+  Supabase (o a la service-role key) le resetee la contraseña a mano por
+  Admin API -- lo que se hizo puntualmente para este incidente, pero no es
+  una solución, es un parche de una sola vez. Ningún administrador real
+  puede depender de que alguien le toque la base para poder volver a
+  entrar -- esto tiene que resolverse antes de que haya usuarios reales
+  dependiendo del panel. Falta decidir en qué etapa se construye (la ruta
+  de callback + la pantalla de "olvidé mi contraseña" que la dispara).
+
+  **Dato adicional, encontrado auditando este mismo incidente, que vale la
+  pena dejar anotado porque hace perder tiempo si no se sabe:** Supabase
+  registra el `verify` del magic link/recuperación como un login válido
+  del lado de Auth (actualiza `last_sign_in_at`) aunque la app nunca
+  complete la sesión -- ese primer paso (validar el token y redirigir de
+  vuelta a la app) ya cuenta como "inició sesión" para Supabase, sin
+  importar qué pase después en el redirect. Consecuencia práctica: el
+  campo "último login" del dashboard de Supabase puede mostrar un ingreso
+  reciente para una cuenta que en los hechos nunca logró entrar a la
+  app -- no sirve como señal de "esta cuenta puede acceder", y mirarlo
+  para diagnosticar un problema de acceso lleva a una conclusión
+  equivocada. Confirmado en este incidente: `last_sign_in_at` mostraba un
+  login de ese mismo día, con el administrador todavía sin poder entrar.
+
+- **El bucket de Supabase Storage de la etapa 5 tiene que crearse como
+  migración de Drizzle, no a mano desde el dashboard.** Anotado en la
+  separación dev/producción, antes de que la etapa 5 exista, para que
+  arranque con este criterio ya decidido en vez de descubrirlo a mitad de
+  camino. Motivo: un bucket (y sus policies de RLS) son, igual que los
+  usuarios de Auth, específicos de CADA proyecto de Supabase -- el que se
+  cree a mano en producción no existe en desarrollo, ni en cualquier
+  proyecto nuevo que se cree más adelante (justo el problema que la
+  separación dev/producción acaba de exponer para Auth). Si la creación del
+  bucket queda capturada en una migración SQL (Supabase expone
+  `storage.buckets` y sus policies como tablas normales, manipulables por
+  SQL), `db:migrate`/`db:migrate:prod` dejan Storage listo en cualquier
+  proyecto sin un paso manual más que recordar -- mismo criterio que ya se
+  sigue con todo el resto del schema. `documents.storage_path` y
+  `ticket_attachments.storage_path` ya existen en el schema desde antes,
+  documentando la intención (ver esas tablas), pero hoy nada crea un bucket
+  real ni sube ni sirve un archivo -- confirmado (paso de separación
+  dev/producción): cero uso del SDK de Storage en `src/`.
 
 ## Qué NO hacer
 

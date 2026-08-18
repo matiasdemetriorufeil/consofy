@@ -10,31 +10,80 @@ import * as schema from "./schema";
 // SALVAGUARDAS
 // =============================================================================
 // Este script borra TODO el contenido de las tablas de negocio y lo recrea.
-// Tres capas independientes, ninguna salteable salvo la explícitamente
+// Cuatro capas independientes, ninguna salteable salvo la explícitamente
 // marcada como tal:
 //
 // 1. Aborta si NODE_ENV=production. No hay forma de saltear esto -- si algún
 //    día existe un entorno de producción real, este chequeo por sí solo ya
 //    lo protege sin depender de que nadie recuerde nada más.
-// 2. Exige SEED_CONFIRM con un valor EXACTO y específico (no "true"/"1", que
+// 2. Aborta si el project ref de DATABASE_URL no es el del proyecto de
+//    DESARROLLO (ver ALLOWED_DEV_PROJECT_REF más abajo). Agregada en la
+//    separación de bases dev/producción: hasta esa separación, dev y
+//    producción compartían un único proyecto de Supabase, así que esta
+//    capa no podía existir -- no había ningún project ref "de producción"
+//    del que distinguirse. Con dos proyectos separados sí hay una señal
+//    confiable, y esta es la única capa de las cuatro que no depende de
+//    que nadie haya seteado nada a mano en ese momento: es correcta por
+//    default, sin acción humana.
+// 3. Exige SEED_CONFIRM con un valor EXACTO y específico (no "true"/"1", que
 //    alguien podría dejar seteado en el shell por otro motivo y disparar el
 //    seed sin querer). Tiene que ser una decisión consciente en el momento.
-// 3. Muestra a qué host y base se va a conectar y pide confirmación
+// 4. Muestra a qué host y base se va a conectar y pide confirmación
 //    interactiva escrita a mano -- salteable con --yes, para uso en scripts
-//    o CI, pero la nº2 (la variable de entorno) NUNCA se saltea: --yes solo
-//    saltea el "prompt", no la necesidad de haber seteado SEED_CONFIRM antes.
-//
-// No hay detección heurística de "esto parece producción" por el hostname:
-// los poolers de Supabase tienen el mismo formato de host
-// (*.pooler.supabase.com) para cualquier proyecto, así que no hay señal
-// confiable ahí -- inventar una daría falsa confianza. Las tres capas de
-// arriba son las que realmente importan.
+//    o CI, pero ni la nº2 ni la nº3 se saltean NUNCA: --yes solo saltea el
+//    "prompt", no las dos capas de arriba.
 const SEED_CONFIRM_VALUE = "si-quiero-borrar-y-recrear-los-datos-de-desarrollo";
+
+// Único proyecto de Supabase contra el que este script puede correr. Un
+// valor hardcodeado a propósito, no una variable de entorno más: si viviera
+// en una env var, un `.env.local` mal armado (ej. con las credenciales de
+// producción pegadas por error) podría traer también un
+// "SEED_ALLOWED_PROJECT_REF" que combine con esas credenciales y el chequeo
+// nunca dispararía. Hardcodeado en el código, el único forma de que este
+// script alguna vez apunte a otro proyecto es cambiar esta línea a mano y
+// commitear el cambio -- una acción deliberada y visible en el diff, no
+// algo que un archivo de entorno pueda alterar en silencio.
+const ALLOWED_DEV_PROJECT_REF = "ytvhanvwkmvyqjeoysab";
+
+// El project ref de Supabase aparece en DOS lugares posibles de una
+// connection string, según el tipo de conexión (ver .env.example):
+// - Conexión directa: en el HOSTNAME, "db.<ref>.supabase.co".
+// - Pooler (sesión o transacciones): en el USUARIO, "postgres.<ref>".
+// Si no matchea ninguno de los dos patrones, se trata como "no se pudo
+// determinar" -- NUNCA como "entonces debe ser dev": fallar cerrado (abortar
+// cuando hay duda) es la opción segura acá, fallar abierto no.
+function extractSupabaseProjectRef(databaseUrl: string): string | null {
+  const url = new URL(databaseUrl);
+
+  const directMatch = url.hostname.match(/^db\.([a-z0-9]+)\.supabase\.co$/);
+  if (directMatch) {
+    return directMatch[1] ?? null;
+  }
+
+  const poolerMatch = url.username.match(/^postgres\.([a-z0-9]+)$/);
+  if (poolerMatch) {
+    return poolerMatch[1] ?? null;
+  }
+
+  return null;
+}
 
 async function runSafetyChecks(databaseUrl: string) {
   if (process.env.NODE_ENV === "production") {
     console.error(
       "ABORTADO: NODE_ENV=production. Este script nunca corre contra producción.",
+    );
+    process.exit(1);
+  }
+
+  const projectRef = extractSupabaseProjectRef(databaseUrl);
+  if (projectRef !== ALLOWED_DEV_PROJECT_REF) {
+    console.error(
+      `ABORTADO: DATABASE_URL apunta al proyecto de Supabase ` +
+        `"${projectRef ?? "no se pudo determinar"}", y este script SOLO ` +
+        `puede correr contra el proyecto de desarrollo ` +
+        `("${ALLOWED_DEV_PROJECT_REF}"). Revisá qué DATABASE_URL está ` +
+        `cargado -- si es el de producción, ni se te ocurra forzar esto.`,
     );
     process.exit(1);
   }

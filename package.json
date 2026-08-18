@@ -14,8 +14,10 @@
     "format:check": "prettier --check .",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
+    "db:migrate:prod": "drizzle-kit migrate --config=drizzle.config.production.ts",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
+    "db:studio:prod": "drizzle-kit studio --config=drizzle.config.production.ts",
     "db:seed": "tsx --env-file=.env.local src/db/seed.ts"
   },
   "dependencies": {
