@@ -109,23 +109,67 @@ export const PROBLEM_STEP_FIELDS = [
 ] as const satisfies readonly (keyof PublicTicketFormInput)[];
 
 // -----------------------------------------------------------------------
-// Fotos (paso 5.2, punto "estructura mínima")
+// Fotos y adjuntos (paso 5.2 definió la estructura mínima; paso 5.4 la
+// completa con subida real a Supabase Storage -- ver
+// src/features/public-form/upload-attachment.ts y compress-image.ts)
 // -----------------------------------------------------------------------
-// Sin subida real todavía (eso es el paso 5.4): acá solo se capturan
-// File[] en memoria del lado del cliente y se valida tipo/tamaño antes de
-// aceptarlas, para que el paso 5.4 herede estas mismas constantes en vez
-// de inventarlas de nuevo. No forman parte de publicTicketFormSchema
-// porque un File no es serializable de la misma forma que el resto del
-// formulario (no hay nada del lado del servidor todavía que las reciba).
+// No forman parte de publicTicketFormSchema: lo que viaja por ese schema
+// son los datos REALES del reclamo (texto), mientras que un adjunto ya
+// subido se identifica por su storage_path (un string, pero con un ciclo
+// de vida propio -- subir, poder fallar, poder reintentarse -- que no
+// encaja en la validación de un formulario de texto plano).
 export const MAX_TICKET_PHOTOS = 5;
-export const MAX_PHOTO_SIZE_BYTES = 8 * 1024 * 1024;
+export const MAX_PHOTO_SIZE_BYTES = 5 * 1024 * 1024;
 
-export function validatePhotoFile(file: File): string | null {
-  if (!file.type.startsWith("image/")) {
-    return "Ese archivo no es una foto.";
+// Nombre del bucket creado en la migración 0019 -- una sola constante para
+// no repetir el string en el módulo de subida, el de borrado y cualquier
+// lectura futura (etapa del panel que muestre estos adjuntos).
+export const TICKET_ATTACHMENTS_BUCKET = "ticket-attachments";
+
+// Fotos (se comprimen y reencodan siempre a JPEG antes de subir, ver
+// compress-image.ts) o PDF (pasan tal cual, sin comprimir -- ver el
+// criterio completo en el reporte del paso 5.4: "¿sirve de algo permitir
+// PDF si un vecino en un pasillo saca fotos?" -- sí, pero es el caso raro,
+// no el que se optimiza).
+export const ACCEPTED_IMAGE_MIME_TYPES = [
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+];
+export const ACCEPTED_DOCUMENT_MIME_TYPES = ["application/pdf"];
+export const ACCEPTED_ATTACHMENT_MIME_TYPES = [
+  ...ACCEPTED_IMAGE_MIME_TYPES,
+  ...ACCEPTED_DOCUMENT_MIME_TYPES,
+];
+
+export function isAcceptedImageFile(file: File): boolean {
+  return (ACCEPTED_IMAGE_MIME_TYPES as readonly string[]).includes(file.type);
+}
+
+export function isAcceptedDocumentFile(file: File): boolean {
+  return (ACCEPTED_DOCUMENT_MIME_TYPES as readonly string[]).includes(
+    file.type,
+  );
+}
+
+// Solo tipo, NO tamaño -- a propósito. Los 5 MB del enunciado son el tope
+// del archivo que efectivamente sube, no el que el vecino selecciona: una
+// foto de celular real pesa "entre 3 y 8 MB" (dato del propio enunciado),
+// así que rechazarla acá, ANTES de comprimir, tiraría abajo la mayoría de
+// las fotos reales -- exactamente lo que la compresión existe para evitar.
+// El tamaño se valida DESPUÉS: para un PDF (que no se comprime) es
+// inmediato, para una foto es sobre el resultado ya comprimido -- ver
+// validateAttachmentSize() y upload-attachment.ts.
+export function validateAttachmentType(file: File): string | null {
+  if (!isAcceptedImageFile(file) && !isAcceptedDocumentFile(file)) {
+    return "Ese archivo tiene que ser una foto o un PDF.";
   }
-  if (file.size > MAX_PHOTO_SIZE_BYTES) {
-    return "Esa foto pesa demasiado (máximo 8 MB).";
+  return null;
+}
+
+export function validateAttachmentSize(sizeBytes: number): string | null {
+  if (sizeBytes > MAX_PHOTO_SIZE_BYTES) {
+    return "Ese archivo pesa demasiado (máximo 5 MB), incluso después de comprimirlo.";
   }
   return null;
 }

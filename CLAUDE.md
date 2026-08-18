@@ -490,6 +490,49 @@ internamente (también cacheada), así que pedirla aparte en la misma
 request no duplica el round-trip, pero tampoco hace falta si lo único que
 se necesita es el edificio elegido.
 
+## Fotos y adjuntos del formulario público (Supabase Storage)
+
+Paso 5.4: cómo el formulario público (`/r/[token]`) sube fotos/PDF de un
+reclamo que TODAVÍA no existe en la base (el `ticket_id` real recién se
+crea en el paso 5.5).
+
+- **Bucket `ticket-attachments`** (migración `0019`): privado, 5 MB por
+  archivo, solo `image/jpeg`/`image/png`/`image/webp`/`application/pdf`.
+  Se sirve siempre con URLs firmadas -- ver CLAUDE.md > Reglas de
+  seguridad.
+- **Se sube EN EL MOMENTO en que el vecino elige el archivo** (paso 3 del
+  formulario), no recién al confirmar el reclamo -- decisión justificada
+  en el reporte del paso 5.4: subir de a uno, apenas se elige, hace que la
+  confirmación final (paso 5.5) no dependa de subir archivos pesados en el
+  peor momento posible (con el vecino ya esperando terminar); el costo es
+  que un formulario abandonado deja archivos huérfanos (ver el Pendiente
+  sobre su limpieza).
+- **Prefijo `pending/<formSessionId>/<índice>-<uuid>.<ext>`**:
+  `formSessionId` es un uuid que el cliente genera una vez por carga del
+  formulario (no por reclamo). Un archivo pasa a "pertenecer" a un reclamo
+  en cuanto una fila de `ticket_attachments` lo referencia (paso 5.5) --
+  **nunca se mueve ni se renombra** el objeto en Storage, el paso 5.5
+  inserta el `storage_path` tal cual quedó bajo `pending/`.
+- **Compresión del lado del cliente ANTES de subir** (crítico: el free
+  tier de Storage son 1 GB en total -- ver
+  `src/features/public-form/compress-image.ts`): toda imagen se
+  redimensiona a 1600px de lado más largo y se reencoda a JPEG calidad
+  0.75, sin librería nueva (`createImageBitmap` + `<canvas>` + `toBlob`).
+  Un PDF sube tal cual, sin comprimir. Procesa un archivo a la vez, nunca
+  en paralelo (`ImageBitmap.close()` explícito apenas se usa) -- importa
+  en un celular con poca memoria, ver el reporte del paso 5.4 para la
+  prueba real con CPU limitada.
+- **Políticas del bucket, mismo criterio que las tablas** (ver CLAUDE.md >
+  Políticas RLS -- "el rol de la app evade RLS, la defensa real es la
+  aplicación"): `anon` tiene INSERT y DELETE, acotados a `pending/%`
+  únicamente -- nada de SELECT para `anon` NI para `authenticated`. Una
+  futura pantalla de administrador que muestre estos adjuntos va a pedir
+  una URL firmada generada del lado del servidor con la service-role key
+  (que evade estas policies igual que el rol `postgres` evade RLS en las
+  tablas), con el `organization_id`/`building_id` chequeado en código de
+  aplicación antes de generarla -- no una policy de `storage.objects` con
+  un `EXISTS` contra tablas de negocio.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
@@ -965,24 +1008,33 @@ NOTHING`) queda disponible, no implementada, para archivos mucho más
   equivocada. Confirmado en este incidente: `last_sign_in_at` mostraba un
   login de ese mismo día, con el administrador todavía sin poder entrar.
 
-- **El bucket de Supabase Storage de la etapa 5 tiene que crearse como
-  migración de Drizzle, no a mano desde el dashboard.** Anotado en la
-  separación dev/producción, antes de que la etapa 5 exista, para que
-  arranque con este criterio ya decidido en vez de descubrirlo a mitad de
-  camino. Motivo: un bucket (y sus policies de RLS) son, igual que los
-  usuarios de Auth, específicos de CADA proyecto de Supabase -- el que se
-  cree a mano en producción no existe en desarrollo, ni en cualquier
-  proyecto nuevo que se cree más adelante (justo el problema que la
-  separación dev/producción acaba de exponer para Auth). Si la creación del
-  bucket queda capturada en una migración SQL (Supabase expone
-  `storage.buckets` y sus policies como tablas normales, manipulables por
-  SQL), `db:migrate`/`db:migrate:prod` dejan Storage listo en cualquier
-  proyecto sin un paso manual más que recordar -- mismo criterio que ya se
-  sigue con todo el resto del schema. `documents.storage_path` y
-  `ticket_attachments.storage_path` ya existen en el schema desde antes,
-  documentando la intención (ver esas tablas), pero hoy nada crea un bucket
-  real ni sube ni sirve un archivo -- confirmado (paso de separación
-  dev/producción): cero uso del SDK de Storage en `src/`.
+- ~~El bucket de Supabase Storage de la etapa 5 tiene que crearse como
+  migración de Drizzle, no a mano desde el dashboard.~~ **Resuelto en el
+  paso 5.4** -- migración `0019_storage_ticket_attachments_bucket.sql`:
+  bucket `ticket-attachments` (privado, 5 MB por archivo, solo imagen/PDF)
+  más policies de `anon` acotadas a `pending/%` (INSERT y DELETE, sin
+  SELECT). Ver esa migración para el razonamiento completo, incluida la
+  decisión de NO copiarle a `storage.objects` el mismo `REVOKE ALL` que la
+  migración 0013 aplicó a nuestras propias tablas (esa es una tabla que
+  administra el motor de Storage de Supabase, no nosotros).
+
+- **Los archivos subidos bajo `pending/` que nunca se reclaman (el vecino
+  abandona el formulario antes de llegar al paso 5.5) quedan huérfanos en
+  Storage sin ningún mecanismo de limpieza automática.** Decisión del paso
+  5.4: las fotos/PDF se suben EN EL MOMENTO en que el vecino las elige (no
+  recién al confirmar el reclamo), bajo `pending/<sesión>/...`, porque el
+  ticket_id real no existe hasta el paso 5.5 -- ver
+  `src/features/public-form/upload-attachment.ts` para el razonamiento
+  completo. Un archivo pasa a "pertenecer" a un reclamo en cuanto una fila
+  de `ticket_attachments` lo referencia (paso 5.5); hasta entonces, es
+  huérfano por diseño si el formulario se abandona. El riesgo es acotado
+  (cada foto comprimida pesa unos cientos de KB, no varios MB -- ver el
+  reporte del paso 5.4), pero no es cero: con suficiente tráfico abandonado
+  con el tiempo, sí puede sumar contra el 1 GB del free tier de Storage.
+  Falta, en una etapa posterior (no hay infraestructura de jobs
+  programados en el proyecto todavía): un barrido periódico que borre
+  objetos bajo `pending/` más viejos que un umbral razonable (ej. 48hs) sin
+  ninguna fila de `ticket_attachments` que los referencie.
 
 - **`Checkbox` (`src/components/ui/checkbox.tsx`, sobre Radix) tira un
   error de hidratación cuando forma parte del HTML servido en la carga

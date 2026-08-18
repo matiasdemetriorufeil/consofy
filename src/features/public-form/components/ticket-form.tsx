@@ -1,9 +1,9 @@
 "use client";
 
 import { zodResolver } from "@hookform/resolvers/zod";
-import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type ChangeEvent, useEffect, useRef, useState } from "react";
 import { Controller, useForm } from "react-hook-form";
-import { X } from "lucide-react";
+import { File as FileIcon, RotateCw, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { AR_WHATSAPP_HELP } from "@/lib/phone";
+import { cn } from "@/lib/utils";
 
 import type { PublicFormCategory } from "../queries";
 import {
@@ -33,9 +34,15 @@ import {
   PUBLIC_TICKET_STEPS,
   TOTAL_STEPS,
   publicTicketFormSchema,
-  validatePhotoFile,
+  validateAttachmentType,
   type PublicTicketFormInput,
 } from "../ticket-schema";
+import {
+  AttachmentUploadError,
+  formatBytes,
+  uploadFormAttachment,
+  deleteFormAttachment,
+} from "../upload-attachment";
 import {
   formatUnitLabel,
   UnitCombobox,
@@ -61,9 +68,55 @@ function draftKey(token: string): string {
   return `consofy:reclamo-borrador:${token}`;
 }
 
+// Estado de cada adjunto (paso 5.4): "queued" -> "processing" (comprimiendo
+// o subiendo) -> "uploaded" | "error". `file` SOLO existe mientras dura
+// esta misma sesión de pestaña -- no se persiste (ver el borrador más
+// abajo), así que un item restaurado después de recargar la página nunca
+// puede volver a "processing": si no llegó a "uploaded" antes de cerrar el
+// navegador, se pierde -- mismo trade-off que el paso 5.2 ya documentó para
+// fotos, ahora acotado solo al tiempo real de subida (segundos), no a todo
+// el formulario.
+type AttachmentStatus = "queued" | "processing" | "uploaded" | "error";
+
+type AttachmentItem = {
+  id: string;
+  file: File | null;
+  status: AttachmentStatus;
+  path: string | null;
+  originalFilename: string;
+  sizeBytes: number;
+  mimeType: string;
+  errorMessage: string | null;
+};
+
+type PersistedAttachment = Omit<AttachmentItem, "file">;
+
+function stripFile(item: AttachmentItem): PersistedAttachment {
+  const {
+    id,
+    status,
+    path,
+    originalFilename,
+    sizeBytes,
+    mimeType,
+    errorMessage,
+  } = item;
+  return {
+    id,
+    status,
+    path,
+    originalFilename,
+    sizeBytes,
+    mimeType,
+    errorMessage,
+  };
+}
+
 type Draft = {
   step: number;
   values: PublicTicketFormInput;
+  formSessionId: string;
+  attachments: PersistedAttachment[];
 };
 
 // Barra de progreso mínima (sin depender de un componente ui/progress
@@ -112,9 +165,15 @@ export function TicketForm({
 }) {
   const [step, setStep] = useState(1);
   const [hydrated, setHydrated] = useState(false);
-  const [photos, setPhotos] = useState<File[]>([]);
-  const [photoError, setPhotoError] = useState<string | null>(null);
-  const photoInputRef = useRef<HTMLInputElement>(null);
+  // Un id por CARGA del formulario, no por reclamo -- ver
+  // upload-attachment.ts para el porqué completo. Se genera acá mismo
+  // (lazy initializer de useState, corre una sola vez) y el efecto de
+  // hidratación de abajo lo pisa si había uno guardado en el borrador.
+  const [formSessionId] = useState(() => crypto.randomUUID());
+  const [attachments, setAttachments] = useState<AttachmentItem[]>([]);
+  const [attachmentsBusy, setAttachmentsBusy] = useState(false);
+  const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const attachmentInputRef = useRef<HTMLInputElement>(null);
 
   const {
     register,
@@ -147,12 +206,13 @@ export function TicketForm({
   // (ver draftKey), en localStorage (no sessionStorage: tiene que sobrevivir
   // a cerrar y reabrir el navegador, no solo a recargar la pestaña).
   //
-  // Las FOTOS quedan afuera a propósito: un File no sobrevive
-  // JSON.stringify, y guardarlas como base64 arriesgaría llenar la cuota de
-  // localStorage con apenas un par de fotos de celular actuales (varios MB
-  // cada una). Si el navegador se cierra en el paso 3, el vecino recupera
-  // sus datos y su problema descripto, pero tiene que volver a elegir las
-  // fotos -- trade-off aceptado, documentado también en el reporte.
+  // Los ADJUNTOS sí se recuperan ahora (revisión del paso 5.4 sobre la
+  // decisión del 5.2): un `File` no sobrevive JSON.stringify, pero desde
+  // que las fotos se suben EN EL MOMENTO (ver más abajo), lo que hay que
+  // recordar no es el archivo sino su `storage_path` -- un string, que sí
+  // sobrevive. Solo se restauran los que llegaron a "uploaded": uno que
+  // estaba a mitad de subir cuando se cerró el navegador no tiene forma de
+  // reanudarse (el File en sí sí se pierde), así que se descarta sin más.
   useEffect(() => {
     const raw = window.localStorage.getItem(draftKey(token));
     if (raw) {
@@ -160,6 +220,11 @@ export function TicketForm({
         const draft = JSON.parse(raw) as Draft;
         reset(draft.values);
         setStep(draft.step);
+        setAttachments(
+          draft.attachments
+            .filter((a) => a.status === "uploaded")
+            .map((a) => ({ ...a, file: null })),
+        );
       } catch {
         window.localStorage.removeItem(draftKey(token));
       }
@@ -176,19 +241,70 @@ export function TicketForm({
     if (!hydrated) {
       return;
     }
-    const draft: Draft = { step, values };
-    window.localStorage.setItem(draftKey(token), JSON.stringify(draft));
-  }, [hydrated, step, values, token]);
-
-  const photoPreviews = useMemo(
-    () => photos.map((file) => URL.createObjectURL(file)),
-    [photos],
-  );
-  useEffect(() => {
-    return () => {
-      photoPreviews.forEach((url) => URL.revokeObjectURL(url));
+    const draft: Draft = {
+      step,
+      values,
+      formSessionId,
+      attachments: attachments.map((item) => stripFile(item)),
     };
-  }, [photoPreviews]);
+    window.localStorage.setItem(draftKey(token), JSON.stringify(draft));
+  }, [hydrated, step, values, token, formSessionId, attachments]);
+
+  // Cola de subida: procesa UN adjunto a la vez, nunca en paralelo -- ver
+  // compress-image.ts para el motivo (memoria en un celular viejo). Este
+  // efecto se dispara solo, en cadena: termina un item -> cambia
+  // `attachments` -> vuelve a correr -> busca el siguiente "queued".
+  useEffect(() => {
+    if (attachmentsBusy) {
+      return;
+    }
+    const next = attachments.find((a) => a.status === "queued");
+    if (!next || !next.file) {
+      return;
+    }
+
+    setAttachmentsBusy(true);
+    setAttachments((current) =>
+      current.map((a) =>
+        a.id === next.id ? { ...a, status: "processing" } : a,
+      ),
+    );
+
+    const index = attachments.length;
+    uploadFormAttachment(next.file, formSessionId, index)
+      .then((uploaded) => {
+        setAttachments((current) =>
+          current.map((a) =>
+            a.id === next.id
+              ? {
+                  ...a,
+                  status: "uploaded",
+                  path: uploaded.path,
+                  sizeBytes: uploaded.sizeBytes,
+                  mimeType: uploaded.mimeType,
+                  errorMessage: null,
+                }
+              : a,
+          ),
+        );
+      })
+      .catch((err: unknown) => {
+        const message =
+          err instanceof AttachmentUploadError
+            ? err.message
+            : "No pudimos subir este archivo. Revisá tu conexión y probá de nuevo.";
+        setAttachments((current) =>
+          current.map((a) =>
+            a.id === next.id
+              ? { ...a, status: "error", errorMessage: message }
+              : a,
+          ),
+        );
+      })
+      .finally(() => {
+        setAttachmentsBusy(false);
+      });
+  }, [attachments, attachmentsBusy, formSessionId]);
 
   async function goNext() {
     const fieldsToValidate =
@@ -203,7 +319,7 @@ export function TicketForm({
     setStep((current) => Math.max(1, current - 1));
   }
 
-  function handlePhotoChange(event: ChangeEvent<HTMLInputElement>) {
+  function handleAttachmentChange(event: ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.target.files ?? []);
     // Permite volver a elegir el mismo archivo más adelante (ej. después de
     // sacarlo de la lista) -- sin esto, el navegador no dispara onChange de
@@ -212,24 +328,59 @@ export function TicketForm({
     if (files.length === 0) {
       return;
     }
-    if (photos.length + files.length > MAX_TICKET_PHOTOS) {
-      setPhotoError(`Como máximo ${MAX_TICKET_PHOTOS} fotos.`);
+    if (attachments.length + files.length > MAX_TICKET_PHOTOS) {
+      setAttachmentError(`Como máximo ${MAX_TICKET_PHOTOS} archivos.`);
       return;
     }
     for (const file of files) {
-      const error = validatePhotoFile(file);
+      const error = validateAttachmentType(file);
       if (error) {
-        setPhotoError(error);
+        setAttachmentError(error);
         return;
       }
     }
-    setPhotoError(null);
-    setPhotos((current) => [...current, ...files]);
+    setAttachmentError(null);
+    setAttachments((current) => [
+      ...current,
+      ...files.map((file): AttachmentItem => ({
+        id: crypto.randomUUID(),
+        file,
+        status: "queued",
+        path: null,
+        originalFilename: file.name,
+        sizeBytes: file.size,
+        mimeType: file.type,
+        errorMessage: null,
+      })),
+    ]);
   }
 
-  function removePhoto(index: number) {
-    setPhotos((current) => current.filter((_, i) => i !== index));
+  function retryAttachment(id: string) {
+    setAttachments((current) =>
+      current.map((a) =>
+        a.id === id ? { ...a, status: "queued", errorMessage: null } : a,
+      ),
+    );
   }
+
+  function removeAttachment(id: string) {
+    const item = attachments.find((a) => a.id === id);
+    setAttachments((current) => current.filter((a) => a.id !== id));
+    // No bloquea la UI ni se reintenta si falla -- en el peor caso, el
+    // archivo queda huérfano bajo pending/, el mismo destino que ya tiene
+    // cualquier adjunto de un formulario que se abandona sin confirmar (ver
+    // el Pendiente anotado en CLAUDE.md sobre su limpieza periódica).
+    if (item?.path) {
+      void deleteFormAttachment(item.path);
+    }
+  }
+
+  const uploadedAttachments = attachments.filter(
+    (a) => a.status === "uploaded",
+  );
+  const attachmentsInFlight = attachments.some(
+    (a) => a.status === "queued" || a.status === "processing",
+  );
 
   const selectedCategory = categories.find((c) => c.id === values.categoryId);
   const matchedUnit = units.find((u) => u.id === values.unitId);
@@ -394,61 +545,50 @@ export function TicketForm({
                     Sumá fotos si tenés
                   </FieldLabel>
                   <FieldDescription>
-                    Ayudan a entender el problema más rápido. Podés seguir sin
-                    sacar ninguna.
+                    Ayudan a entender el problema más rápido. También podés
+                    sumar un PDF. Podés seguir sin adjuntar nada.
                   </FieldDescription>
                   {/* El input nativo queda oculto: sin estilos propios, el
                       botón/texto que arma el navegador ("Choose Files", en
                       inglés y sin poder tocarse desde HTML) no se puede
                       traducir ni alinear con el resto del formulario --
-                      encontrado en la práctica probando este mismo paso.
-                      Se dispara con un botón propio en español. */}
+                      encontrado en la práctica probando el paso 5.2. Se
+                      dispara con un botón propio en español. */}
                   <input
-                    ref={photoInputRef}
+                    ref={attachmentInputRef}
                     id="ticket-photos"
                     type="file"
-                    accept="image/*"
+                    accept="image/*,application/pdf"
                     capture="environment"
                     multiple
-                    onChange={handlePhotoChange}
+                    onChange={handleAttachmentChange}
                     className="sr-only"
                   />
                   <Button
                     type="button"
                     variant="outline"
-                    onClick={() => photoInputRef.current?.click()}
+                    onClick={() => attachmentInputRef.current?.click()}
                   >
                     Agregar foto
                   </Button>
-                  {photoError && (
-                    <p className="text-destructive text-sm">{photoError}</p>
+                  {attachmentError && (
+                    <p className="text-destructive text-sm">
+                      {attachmentError}
+                    </p>
                   )}
                 </Field>
 
-                {photos.length > 0 && (
-                  <div className="grid grid-cols-3 gap-2">
-                    {photos.map((photo, index) => (
-                      <div
-                        key={`${photo.name}-${photo.lastModified}-${index}`}
-                        className="group relative aspect-square"
-                      >
-                        {/* eslint-disable-next-line @next/next/no-img-element -- preview local de un File, no un asset servido por Next */}
-                        <img
-                          src={photoPreviews[index]}
-                          alt={`Foto ${index + 1}`}
-                          className="h-full w-full rounded-lg object-cover"
-                        />
-                        <button
-                          type="button"
-                          aria-label={`Sacar foto ${index + 1}`}
-                          onClick={() => removePhoto(index)}
-                          className="bg-card ring-foreground/10 absolute top-1 right-1 flex size-6 items-center justify-center rounded-full ring-1"
-                        >
-                          <X className="size-3.5" />
-                        </button>
-                      </div>
+                {attachments.length > 0 && (
+                  <ul className="flex flex-col gap-2">
+                    {attachments.map((item) => (
+                      <AttachmentRow
+                        key={item.id}
+                        item={item}
+                        onRetry={() => retryAttachment(item.id)}
+                        onRemove={() => removeAttachment(item.id)}
+                      />
                     ))}
-                  </div>
+                  </ul>
                 )}
 
                 <div className="flex gap-2">
@@ -463,11 +603,17 @@ export function TicketForm({
                   <Button
                     type="button"
                     className="flex-1"
+                    disabled={attachmentsInFlight}
                     onClick={() => setStep(4)}
                   >
                     Continuar
                   </Button>
                 </div>
+                {attachmentsInFlight && (
+                  <p className="text-ink-muted text-sm">
+                    Esperá a que terminen de subirse los archivos.
+                  </p>
+                )}
               </>
             )}
 
@@ -501,9 +647,11 @@ export function TicketForm({
                     </dd>
                   </div>
                   <div className="flex justify-between gap-4 py-2">
-                    <dt className="text-ink-muted">Fotos</dt>
+                    <dt className="text-ink-muted">Adjuntos</dt>
                     <dd className="text-ink text-right">
-                      {photos.length === 0 ? "Ninguna" : photos.length}
+                      {uploadedAttachments.length === 0
+                        ? "Ninguno"
+                        : uploadedAttachments.length}
                     </dd>
                   </div>
                 </dl>
@@ -533,5 +681,106 @@ export function TicketForm({
         </form>
       </CardContent>
     </Card>
+  );
+}
+
+// Una fila por adjunto (paso 5.4): reemplaza la grilla de miniaturas del
+// paso 5.2 -- con PDF en la mezcla, no todos los adjuntos son una imagen
+// que se pueda previsualizar como thumbnail, y ahora cada uno tiene un
+// estado real (subiendo, subido, con error) que hay que mostrar.
+function AttachmentRow({
+  item,
+  onRetry,
+  onRemove,
+}: {
+  item: AttachmentItem;
+  onRetry: () => void;
+  onRemove: () => void;
+}) {
+  const isImage = item.mimeType.startsWith("image/");
+  const hasPreview = !!item.file && isImage;
+  // Preview local desde el propio File en memoria -- nunca se vuelve a leer
+  // desde Storage (el bucket no le da SELECT a nadie sin sesión, ver la
+  // migración 0019): un item restaurado después de recargar la página
+  // (file === null) no tiene preview, se muestra con un ícono genérico.
+  //
+  // El <img> lo maneja el efecto DIRECTO sobre el DOM (via ref), no un
+  // setState -- encontrado en la práctica (paso 5.4), dos problemas
+  // distintos con las alternativas:
+  // 1) createObjectURL en useMemo + revokeObjectURL en un useEffect
+  //    aparte: React Strict Mode (desarrollo) monta/desmonta/vuelve a
+  //    montar cada componente una vez para detectar cleanups faltantes --
+  //    ese ciclo fantasma revocaba la URL real que el render "de verdad"
+  //    seguía usando, la miniatura quedaba rota (`ERR_FILE_NOT_FOUND`,
+  //    `naturalWidth: 0`), reproducido y confirmado.
+  // 2) Crear Y revocar en el mismo efecto, pero guardando la url en
+  //    useState: soluciona lo anterior, pero dispara la regla de React
+  //    Compiler "Calling setState synchronously within an effect can
+  //    trigger cascading renders" (error, no warning, en este proyecto).
+  // Setear `imgRef.current.src` a mano evita las dos: el efecto sincroniza
+  // con el DOM (el caso que React documenta como el uso correcto de
+  // useEffect), no con el estado de React.
+  const imgRef = useRef<HTMLImageElement>(null);
+  useEffect(() => {
+    if (!item.file || !isImage || !imgRef.current) {
+      return;
+    }
+    const url = URL.createObjectURL(item.file);
+    imgRef.current.src = url;
+    return () => {
+      URL.revokeObjectURL(url);
+    };
+  }, [item.file, isImage]);
+
+  return (
+    <li className="border-border flex items-center gap-3 rounded-lg border p-2">
+      <div className="bg-muted flex size-12 shrink-0 items-center justify-center overflow-hidden rounded-md">
+        {hasPreview ? (
+          // eslint-disable-next-line @next/next/no-img-element -- preview local de un File, no un asset servido por Next
+          <img
+            ref={imgRef}
+            alt={item.originalFilename}
+            className="h-full w-full object-cover"
+          />
+        ) : (
+          <FileIcon className="text-muted-foreground size-5" />
+        )}
+      </div>
+      <div className="flex min-w-0 flex-1 flex-col">
+        <span className="text-ink truncate text-sm">
+          {item.originalFilename}
+        </span>
+        <span
+          className={cn(
+            "text-xs",
+            item.status === "error" ? "text-destructive" : "text-ink-muted",
+          )}
+        >
+          {item.status === "queued" && "En espera…"}
+          {item.status === "processing" && "Subiendo…"}
+          {item.status === "uploaded" && formatBytes(item.sizeBytes)}
+          {item.status === "error" &&
+            (item.errorMessage ?? "No se pudo subir.")}
+        </span>
+      </div>
+      {item.status === "error" && (
+        <button
+          type="button"
+          aria-label={`Reintentar ${item.originalFilename}`}
+          onClick={onRetry}
+          className="hover:bg-accent flex size-8 shrink-0 items-center justify-center rounded-full"
+        >
+          <RotateCw className="size-4" />
+        </button>
+      )}
+      <button
+        type="button"
+        aria-label={`Sacar ${item.originalFilename}`}
+        onClick={onRemove}
+        className="hover:bg-accent flex size-8 shrink-0 items-center justify-center rounded-full"
+      >
+        <X className="size-4" />
+      </button>
+    </li>
   );
 }
