@@ -984,6 +984,33 @@ NOTHING`) queda disponible, no implementada, para archivos mucho más
   real ni sube ni sirve un archivo -- confirmado (paso de separación
   dev/producción): cero uso del SDK de Storage en `src/`.
 
+- **`Checkbox` (`src/components/ui/checkbox.tsx`, sobre Radix) tira un
+  error de hidratación cuando forma parte del HTML servido en la carga
+  inicial de la página -- no cuando vive dentro de un Dialog que recién
+  monta al abrirse.** Encontrado en la práctica (paso 5.2, checkbox "No
+  encuentro mi unidad en la lista" de `TicketForm`, la primera vez que este
+  proyecto usa `Checkbox` FUERA de un Dialog): el input nativo oculto que
+  Radix arma para compatibilidad con `<form>` (`CheckboxBubbleInput`)
+  serializa su `style` distinto en el servidor que en el cliente
+  (`pointer-events` vs `pointerEvents`, `opacity: "0"` vs `opacity: 0`,
+  etc.), y React lo marca como mismatch de hidratación en la consola --
+  reproducido de forma consistente contra un dev server recién reiniciado,
+  no es un artefacto de Fast Refresh. Verificado que NO afecta lo
+  funcional: tildar/destildar, `checked` reflejado en el estado del
+  formulario y la persistencia del borrador funcionan bien en los tres
+  casos probados (ver el reporte del paso 5.2) -- React explícitamente no
+  "repara" ese nodo (`This won't be patched up`), pero tampoco rompe nada
+  visible. `PersonOccupancyForm`/`BulkUnitsDialog` (los otros dos usos de
+  `Checkbox` del proyecto) nunca lo mostraron porque los dos viven dentro
+  de un `Dialog` que solo monta después de que el usuario lo abre -- nunca
+  forman parte del HTML que arma el servidor. Confirmado con `radix-ui` ya
+  en su última versión (`1.6.7`, sin actualización disponible) -- no es un
+  fix de una línea; falta decidir si vale la pena investigar un workaround
+  (renderizar un checkbox nativo en el primer paint y reemplazarlo por el
+  de Radix después de montar) o convivir con el warning mientras sea
+  cosmético. Relevante para cualquier pantalla futura que server-renderice
+  un `Checkbox` fuera de un Dialog, no solo para este formulario.
+
 ## Qué NO hacer
 
 - No instalar dependencias nuevas sin avisar y justificar.

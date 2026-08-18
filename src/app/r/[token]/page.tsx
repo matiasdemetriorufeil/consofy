@@ -7,7 +7,12 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { getBuildingByPublicToken } from "@/features/public-form/queries";
+import { TicketForm } from "@/features/public-form/components/ticket-form";
+import {
+  getActiveCategoriesForBuilding,
+  getBuildingByPublicToken,
+} from "@/features/public-form/queries";
+import { getUnitsForBuilding } from "@/features/units/queries";
 
 // Ruta pública, sin sesión (paso 5.1) -- la única superficie de la app
 // abierta a internet sin autenticación (ver CLAUDE.md > Qué es este
@@ -28,8 +33,11 @@ import { getBuildingByPublicToken } from "@/features/public-form/queries";
 //    ya tiene un token real y vigente (no adivinado -- ver el análisis de
 //    seguridad), así que confirmarle que está en el edificio correcto es
 //    útil, no un riesgo nuevo.
-// 3. Edificio activo -> confirmación mínima. El formulario en sí es el
-//    paso 5.2.
+// 3. Edificio activo -> el formulario de reclamos en pasos (paso 5.2).
+//    Categorías y unidades se piden acá (Server Component) y bajan como
+//    props al Client Component -- TicketForm no hace ningún fetch propio,
+//    mismo criterio de "el server resuelve, el cliente solo interactúa"
+//    que el resto del panel.
 export default async function PublicBuildingPage({
   params,
 }: PageProps<"/r/[token]">) {
@@ -59,15 +67,26 @@ export default async function PublicBuildingPage({
     );
   }
 
+  const [categories, units] = await Promise.all([
+    getActiveCategoriesForBuilding(building.organizationId),
+    getUnitsForBuilding(building.organizationId, building.id),
+  ]);
+
   return (
-    <Card className="w-full max-w-sm">
-      <CardHeader>
-        <CardTitle className="text-center text-xl">{building.name}</CardTitle>
-        <CardDescription className="text-center">
-          Encontramos tu edificio. En un toque vas a poder cargar tu reclamo
-          desde acá.
-        </CardDescription>
-      </CardHeader>
-    </Card>
+    <div className="flex w-full max-w-md flex-col gap-4">
+      <div className="text-center">
+        <h1 className="text-ink font-display text-xl font-semibold">
+          {building.name}
+        </h1>
+        <p className="text-ink-muted text-sm">
+          Contanos qué pasó y se lo pasamos a tu administración.
+        </p>
+      </div>
+      <TicketForm
+        token={parsedToken.data}
+        categories={categories}
+        units={units}
+      />
+    </div>
   );
 }

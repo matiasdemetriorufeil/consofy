@@ -1,13 +1,14 @@
 import "server-only";
 
-import { and, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, isNull } from "drizzle-orm";
 import { cache } from "react";
 
 import { db } from "@/db";
-import { buildings } from "@/db/schema";
+import { buildings, categories } from "@/db/schema";
 
 export type PublicBuilding = {
   id: string;
+  organizationId: string;
   name: string;
   active: boolean;
 };
@@ -42,6 +43,7 @@ export const getBuildingByPublicToken = cache(
     const [row] = await db
       .select({
         id: buildings.id,
+        organizationId: buildings.organizationId,
         name: buildings.name,
         active: buildings.active,
       })
@@ -51,5 +53,37 @@ export const getBuildingByPublicToken = cache(
       );
 
     return row ?? null;
+  },
+);
+
+export type PublicFormCategory = {
+  id: string;
+  name: string;
+};
+
+// Categorías del paso 2 del formulario (paso 5.2). Mismo criterio que
+// getActiveBuildings() (CLAUDE.md > Acceso a datos, "selectores que
+// alimentan una carga NUEVA"): active = true AND deleted_at IS NULL -- una
+// categoría oculta u ordenada por el administrador no debe ofrecerse acá,
+// aunque reclamos viejos sigan referenciándola.
+//
+// organizationId, no buildingId: categories es de organización, no de
+// edificio (ver src/db/schema/categories.ts) -- todos los edificios de una
+// misma organización comparten el mismo set de categorías.
+export const getActiveCategoriesForBuilding = cache(
+  async function getActiveCategoriesForBuilding(
+    organizationId: string,
+  ): Promise<PublicFormCategory[]> {
+    return db
+      .select({ id: categories.id, name: categories.name })
+      .from(categories)
+      .where(
+        and(
+          eq(categories.organizationId, organizationId),
+          eq(categories.active, true),
+          isNull(categories.deletedAt),
+        ),
+      )
+      .orderBy(asc(categories.sortOrder), asc(categories.name));
   },
 );
