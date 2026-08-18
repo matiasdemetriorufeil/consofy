@@ -7,7 +7,6 @@ import { X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Field,
   FieldDescription,
@@ -37,18 +36,11 @@ import {
   validatePhotoFile,
   type PublicTicketFormInput,
 } from "../ticket-schema";
-
-export type PublicFormUnit = {
-  id: string;
-  tower: string | null;
-  floor: string;
-  number: string;
-};
-
-function formatUnitLabel(unit: PublicFormUnit): string {
-  const base = `${unit.floor}°${unit.number}`;
-  return unit.tower ? `${unit.tower} - ${base}` : base;
-}
+import {
+  formatUnitLabel,
+  UnitCombobox,
+  type PublicFormUnit,
+} from "./unit-combobox";
 
 const DEFAULT_VALUES: PublicTicketFormInput = {
   firstName: "",
@@ -239,7 +231,6 @@ export function TicketForm({
     setPhotos((current) => current.filter((_, i) => i !== index));
   }
 
-  const unitNotListed = watch("unitNotListed");
   const selectedCategory = categories.find((c) => c.id === values.categoryId);
   const matchedUnit = units.find((u) => u.id === values.unitId);
   const selectedUnitLabel = values.unitNotListed
@@ -302,74 +293,31 @@ export function TicketForm({
                   <FieldError errors={[errors.phoneE164]} />
                 </Field>
 
-                {!unitNotListed && (
-                  <Field data-invalid={!!errors.unitId}>
-                    <FieldLabel htmlFor="ticket-unit">Tu unidad</FieldLabel>
-                    <Controller
+                <Field>
+                  <FieldLabel htmlFor="ticket-unit">Tu unidad</FieldLabel>
+                  {units.length > 0 ? (
+                    <UnitCombobox
+                      id="ticket-unit"
                       control={control}
-                      name="unitId"
-                      render={({ field }) => (
-                        <Select
-                          value={field.value ?? ""}
-                          onValueChange={field.onChange}
-                        >
-                          <SelectTrigger
-                            id="ticket-unit"
-                            aria-invalid={!!errors.unitId}
-                            className="w-full"
-                          >
-                            <SelectValue placeholder="Elegí tu departamento" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {units.map((unit) => (
-                              <SelectItem key={unit.id} value={unit.id}>
-                                {formatUnitLabel(unit)}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      )}
+                      units={units}
                     />
-                    <FieldError errors={[errors.unitId]} />
-                  </Field>
-                )}
-
-                <Field orientation="horizontal">
-                  <Controller
-                    control={control}
-                    name="unitNotListed"
-                    render={({ field }) => (
-                      <Checkbox
-                        id="ticket-unit-not-listed"
-                        checked={field.value}
-                        onCheckedChange={(checked) =>
-                          field.onChange(checked === true)
-                        }
-                      />
-                    )}
-                  />
-                  <FieldLabel
-                    htmlFor="ticket-unit-not-listed"
-                    className="font-normal"
-                  >
-                    No encuentro mi unidad en la lista
-                  </FieldLabel>
-                </Field>
-
-                {unitNotListed && (
-                  <Field data-invalid={!!errors.unitLabelRaw}>
-                    <FieldLabel htmlFor="ticket-unit-raw">
-                      Contanos dónde vivís
-                    </FieldLabel>
+                  ) : (
+                    // Sin unidades cargadas todavía para este edificio: no
+                    // hay nada que buscar, así que directamente pide el
+                    // texto libre en vez de mostrar un combo vacío -- ver
+                    // el useEffect de arriba, que ya fuerza
+                    // unitNotListed=true en este caso.
                     <Input
-                      id="ticket-unit-raw"
-                      placeholder="Ej: 3er piso, la puerta del fondo"
+                      id="ticket-unit"
+                      placeholder="Contanos dónde vivís"
                       aria-invalid={!!errors.unitLabelRaw}
                       {...register("unitLabelRaw")}
                     />
+                  )}
+                  {units.length === 0 && (
                     <FieldError errors={[errors.unitLabelRaw]} />
-                  </Field>
-                )}
+                  )}
+                </Field>
 
                 <Button type="button" className="w-full" onClick={goNext}>
                   Continuar
