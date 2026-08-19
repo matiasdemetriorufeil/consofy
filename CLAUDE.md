@@ -16,7 +16,8 @@ cuenta.
 
 Next.js 16 (App Router), React 19, TypeScript estricto, Tailwind CSS v4,
 shadcn/ui, Drizzle ORM, Supabase (Postgres + Auth + Storage), Zod,
-React Hook Form.
+React Hook Form, Vitest (tests unitarios de funciones puras -- ver
+CLAUDE.md > Mensaje al administrador, paso 5.6, el primero que los pidió).
 
 ## Estructura de carpetas
 
@@ -581,6 +582,25 @@ guardar -- ni persona huérfana, ni reclamo sin persona -- el índice único
 parcial de `people` la agarra dentro de la transacción y la revierte
 entera.
 
+**La transacción perdedora reintenta una vez (regla central: "el ticket
+se guarda siempre"):** la primera versión de este paso, al perder la
+carrera de teléfono, devolvía un error sin guardar el reclamo -- justo el
+caso donde el vecino ya escribió todo y cree que terminó. `actions.ts`
+separa la búsqueda de persona + transacción en `attemptCreateTicket()` y,
+si el intento falla específicamente por `UNIQUE_VIOLATION` sobre
+`PHONE_UNIQUE_CONSTRAINT` (`isPhoneRaceError()`), la llama exactamente una
+vez más -- sin loop, sin reintentar ningún otro error (en particular, NO
+se extiende a `PERSON_REVIVE_RACE`: ahí no hay ninguna fila "ganadora"
+garantizada que un reintento pueda reusar, ver el comentario de esa rama
+en `actions.ts`). Un solo reintento alcanza matemáticamente, no solo en la
+práctica: Postgres recién le informa la violación de unicidad a la
+transacción perdedora DESPUÉS de que la ganadora hizo commit (el insert
+perdedor queda bloqueado en el lock de la fila hasta ese momento), así que
+la búsqueda fresca del reintento encuentra la fila ganadora sí o sí, y la
+reusa sin volver a insertar (sin poder volver a chocar). Confirmado con la
+misma carrera real de dos sesiones: ambas terminan con su propio ticket
+(`TC-2026-0025` y `TC-2026-0026` sobre la misma persona, sin duplicarla).
+
 **Doble envío:** un `useRef` (no `useState`) bloquea reintentos --
 encontrado en la práctica probando un doble click real (dos eventos
 `click` nativos en el mismo tick de JS): los updates de `useState` se
@@ -613,6 +633,80 @@ el formulario desde el paso 5.2, sin agregar nada nuevo en este paso (ni
 IP, ni user-agent, ni ningún dato de tracking). El teléfono es la
 identidad del vecino en todo el proyecto (ver CLAUDE.md > Acceso a
 datos), no un dato adicional que este paso decida guardar.
+
+## Mensaje al administrador (paso 5.6)
+
+`formatTicketMessage` (`src/features/tickets/format-ticket-message.ts`) es
+la función pura que arma el bloque de texto de CLAUDE.md > Formato del
+mensaje al administrador a partir de un ticket. Solo texto: no arma el
+link `wa.me` ni abre WhatsApp (eso depende de `MessagingProvider`, que
+todavía no existe como código -- mismo scope que dejó afuera el paso 5.5).
+Primera función del proyecto con tests unitarios pedidos explícitamente
+por el plan (paso 12.1) -- no había infraestructura de tests todavía;
+se sumó **Vitest** (rápido, nativo en TS/ESM, sin necesidad de DOM/jsdom
+para probar una función de texto puro) con `npm run test` /
+`npm run test:watch`.
+
+**Orden y campos:** exactamente el formato ya acordado en CLAUDE.md
+(edificio, vecino, departamento, categoría, prioridad, problema,
+adjuntos, código) -- no se inventó un orden nuevo. La única línea
+condicional es `📷 Adjuntos`: desaparece del todo sin adjuntos (no
+"Adjuntos: ninguno") -- cada línea de más se lee peor en un celular.
+`unitLabel` es siempre un string no nulo: el CHECK
+`tickets_unit_id_or_label_present` (`src/db/schema/tickets.ts`) garantiza
+que todo ticket tiene unidad real o texto libre, nunca ninguna de las dos
+-- no existe la rama "sin unidad". Sin apellido, el nombre no deja un
+espacio colgando (`[firstName, lastName].filter(Boolean).join(" ")`,
+mismo patrón que `actorLabel` en `ticket_events`, paso 5.5).
+
+**Límite seguro, medido, no estimado:** WhatsApp documenta 4096
+caracteres para un mensaje de texto, pero ese no es el límite que rige
+acá -- el mensaje viaja codificado en la query string de un link `wa.me`/
+`api.whatsapp.com`, y el límite práctico de un link cross-browser/SO es
+mucho más chico: ~2000 caracteres (Chrome), 2048 citado como tope
+"seguro". Medido en este mismo paso (no estimado):
+`encodeURIComponent("a").length === 1`,
+`encodeURIComponent("á").length === 6`,
+`encodeURIComponent("🏢").length === 12` -- un emoji puede pesar, ya
+codificado, 12 veces lo que pesa como texto. Por eso el presupuesto se
+mide siempre sobre `encodeURIComponent(mensaje).length`, nunca sobre
+`.length` del string crudo. `DEFAULT_MAX_ENCODED_MESSAGE_LENGTH` = 2000
+(límite de URL) − 100 (reserva para el prefijo `api.whatsapp.com/send?
+phone=`+teléfono E.164 de 15 dígitos+`&text=`, medido en 58, redondeado
+con margen) = 1900, configurable por parámetro (`maxEncodedLength`).
+
+**Emojis en el encoding, la fuente habitual de errores:** un emoji fuera
+del plano básico (como 🏢) es un par subrogado en UTF-16
+(`"🏢".length === 2`) -- truncar con `.slice()` por índice puede partir el
+par a la mitad, y `encodeURIComponent()` de un subrogado suelto **tira una
+excepción** ("URI malformed"), no produce silenciosamente un mensaje raro.
+`formatTicketMessage` trunca con `Intl.Segmenter(..., { granularity:
+"grapheme" })`, que corta por caracter visual real -- incluso secuencias
+compuestas (familias con ZWJ como 👨‍👩‍👧‍👦) quedan enteras o no quedan,
+nunca partidas a la mitad. Probado con ambos casos (ver
+`format-ticket-message.test.ts`).
+
+**Descripción larguísima:** se trunca con "…" por búsqueda binaria sobre
+grafemas (no hay relación lineal entre "cantidad de grafemas" y "largo
+codificado" -- un texto con tildes/emojis gasta presupuesto más rápido
+que uno en ASCII puro). Caso límite documentado: si `maxEncodedLength` es
+menor que lo que ya cuestan los campos FIJOS del mensaje, no queda
+presupuesto ni para la elipsis -- la descripción queda vacía en vez de
+romper el resto del formato (no debería pasar en la práctica: significaría
+un edificio/categoría con nombres desproporcionados).
+
+**Link de adjuntos, forma que va a tener (paso 5.10, todavía no existe):**
+`{baseUrl}/s/{publicCode}` -- "s" de "seguimiento", mismo patrón corto que
+`/r/[token]` del formulario público (paso 5.1). Un solo link para todo el
+reclamo (no uno aparte solo para fotos): esa página va a mostrar estado +
+adjuntos juntos, y separarlos gastaría caracteres sin sumarle nada al
+administrador.
+
+**Fuera de alcance de este paso, a propósito:** construir el link `wa.me`
+real y el botón que abre WhatsApp -- mismo criterio de scope que el paso
+5.5 con este mismo tema. `formatTicketMessage` no se conectó todavía a
+`TicketForm` (la pantalla de confirmación del paso 5.5 solo muestra el
+`public_code`); esa integración es del paso que arme el botón real.
 
 ## Reglas de seguridad (no negociables)
 

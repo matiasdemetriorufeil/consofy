@@ -12,10 +12,12 @@ import {
 import { PHONE_UNIQUE_CONSTRAINT } from "@/features/people/constraints";
 import { UNIQUE_VIOLATION, unwrapPostgresError } from "@/lib/postgres-errors";
 
+import type { PublicBuilding, TicketCategory } from "./queries";
 import { getBuildingByPublicToken, getCategoryForTicket } from "./queries";
 import { getExistingAttachmentPaths } from "./storage-objects";
 import {
   createTicketInputSchema,
+  type CreateTicketOutput,
   type CreateTicketState,
 } from "./ticket-schema";
 
@@ -49,6 +51,174 @@ function deriveTicketTitle(description: string): string {
   const lastSpace = cut.lastIndexOf(" ");
   const base = lastSpace > 40 ? cut.slice(0, lastSpace) : cut;
   return `${base.trimEnd()}…`;
+}
+
+type AttachmentToInsert = CreateTicketOutput["attachments"][number];
+
+// Persona + ticket + adjuntos + evento, todo en una sola transacción. Se
+// separó de createTicketAction para poder invocarla dos veces (intento
+// original + el reintento acotado de más abajo) sin duplicar la lógica.
+// Hace SIEMPRE su propia búsqueda de persona fresca -- no recibe
+// activeMatch/deletedMatch por parámetro -- porque el reintento depende
+// exactamente de eso: en la segunda vuelta, la persona que antes no existía
+// ya fue creada por la transacción que ganó la carrera.
+async function attemptCreateTicket(
+  building: PublicBuilding,
+  category: TicketCategory,
+  attachmentsToInsert: AttachmentToInsert[],
+  data: CreateTicketOutput,
+): Promise<{ id: string; publicCode: string }> {
+  const activeMatch = await findPersonByPhone(
+    building.organizationId,
+    data.phoneE164,
+  );
+  const deletedMatch = activeMatch
+    ? null
+    : await findDeletedPersonByPhone(building.organizationId, data.phoneE164);
+
+  return db.transaction(async (tx) => {
+    let personId: string;
+
+    if (activeMatch) {
+      // Vecino ya conocido y activo: se reusa tal cual está guardado, sin
+      // pisar su nombre con lo que haya tipeado esta vez -- cualquiera
+      // que conozca (o adivine) un teléfono ajeno no puede reescribir el
+      // nombre de otra persona con solo cargar un reclamo (ver el
+      // análisis de seguridad del reporte, punto "datos inventados"). Esta
+      // es también la rama que resuelve el reintento: la persona que la
+      // otra transacción acaba de crear aparece acá como activeMatch.
+      personId = activeMatch.id;
+    } else if (deletedMatch) {
+      // Resuelve el Pendiente anotado desde el paso 4.4 (ver CLAUDE.md >
+      // Pendientes): opción 2, revivir la ficha anterior. Mismo criterio
+      // que "no pisar el nombre" de arriba -- revivir NO actualiza
+      // firstName/lastName con lo tipeado ahora, mantiene lo que ya
+      // estaba guardado.
+      const [revived] = await tx
+        .update(people)
+        .set({ deletedAt: null })
+        .where(
+          and(
+            eq(people.id, deletedMatch.id),
+            eq(people.organizationId, building.organizationId),
+            isNotNull(people.deletedAt),
+          ),
+        )
+        .returning({ id: people.id });
+      if (!revived) {
+        // Carrera extremadamente angosta: alguien más reactivó o
+        // reemplazó esta ficha entre el chequeo de arriba y acá. No se
+        // improvisa una resolución -- se aborta la transacción entera y
+        // se le pide al vecino reintentar (mismo criterio que cualquier
+        // otra carrera de este proyecto). A propósito NO tiene el mismo
+        // reintento automático que PHONE_UNIQUE_CONSTRAINT: acá no hay
+        // ninguna fila "ganadora" garantizada que un reintento pueda
+        // reusar (quien reactivó pudo, en cambio, haber vuelto a borrar),
+        // así que reintentar solo no alcanzaría -- ver el reporte.
+        throw new Error("PERSON_REVIVE_RACE");
+      }
+      personId = revived.id;
+    } else {
+      const [inserted] = await tx
+        .insert(people)
+        .values({
+          organizationId: building.organizationId,
+          firstName: data.firstName,
+          lastName: data.lastName,
+          phoneE164: data.phoneE164,
+        })
+        .returning({ id: people.id });
+      if (!inserted) {
+        throw new Error("PERSON_CREATE_FAILED");
+      }
+      personId = inserted.id;
+    }
+
+    const [ticket] = await tx
+      .insert(tickets)
+      .values({
+        organizationId: building.organizationId,
+        buildingId: building.id,
+        unitId: data.unitNotListed ? null : data.unitId,
+        unitLabelRaw: data.unitNotListed ? data.unitLabelRaw : null,
+        personId,
+        categoryId: category.id,
+        title: deriveTicketTitle(data.description),
+        description: data.description,
+        // Sale de la categoría, no de un campo del formulario -- ver
+        // CLAUDE.md > Fotos y adjuntos... no, ver el paso 5.2: "sin
+        // prioridad en el formulario público".
+        priority: category.defaultPriority,
+        source: "public_form",
+      })
+      // El trigger set_ticket_public_code (migración 0007/0009) ya pone
+      // public_code SIEMPRE, sin que esta acción tenga que calcular nada
+      // -- .returning() lo trae de vuelta para poder mostrárselo al
+      // vecino.
+      .returning({ id: tickets.id, publicCode: tickets.publicCode });
+    if (!ticket) {
+      throw new Error("TICKET_CREATE_FAILED");
+    }
+
+    if (attachmentsToInsert.length > 0) {
+      await tx.insert(ticketAttachments).values(
+        attachmentsToInsert.map((a) => ({
+          organizationId: building.organizationId,
+          ticketId: ticket.id,
+          storagePath: a.path,
+          mimeType: a.mimeType,
+          sizeBytes: a.sizeBytes,
+          originalFilename: a.originalFilename,
+        })),
+      );
+    }
+
+    await tx.insert(ticketEvents).values({
+      organizationId: building.organizationId,
+      ticketId: ticket.id,
+      type: "created",
+      actorType: "neighbor",
+      actorLabel: [data.firstName, data.lastName].filter(Boolean).join(" "),
+      payload: { source: "public_form" },
+    });
+
+    return ticket;
+  });
+}
+
+// true si el error es EXACTAMENTE la carrera de teléfono (dos envíos casi
+// simultáneos con el mismo teléfono nuevo, agarrados por el índice único
+// parcial de people). Acotado a propósito a este único caso -- no a
+// PERSON_REVIVE_RACE ni a ningún otro error -- porque es el único donde un
+// reintento está matemáticamente garantizado de resolverse: Postgres recién
+// le informa la violación de unicidad a la transacción perdedora DESPUÉS de
+// que la transacción ganadora haya hecho commit (el insert perdedor queda
+// bloqueado en el lock de la fila/índice hasta ese momento), así que para
+// cuando este catch corre, la fila ganadora ya está commiteada y visible --
+// el reintento la va a encontrar sí o sí vía findPersonByPhone().
+function isPhoneRaceError(error: unknown): boolean {
+  const pgError = unwrapPostgresError(error);
+  return (
+    pgError?.code === UNIQUE_VIOLATION &&
+    pgError.constraint_name === PHONE_UNIQUE_CONSTRAINT
+  );
+}
+
+function translateCreateTicketError(error: unknown): CreateTicketState {
+  if (
+    isPhoneRaceError(error) ||
+    (error instanceof Error && error.message === "PERSON_REVIVE_RACE")
+  ) {
+    return {
+      status: "error",
+      message:
+        "Hubo un problema al identificarte. Volvé a intentar en un momento.",
+    };
+  }
+  return {
+    status: "error",
+    message: "No pudimos registrar tu reclamo. Probá de nuevo en un momento.",
+  };
 }
 
 // El registro real de un reclamo (paso 5.5) -- el paso más importante del
@@ -141,149 +311,39 @@ export async function createTicketAction(
     (a) => a.path.startsWith(sessionPrefix) && existingPaths.has(a.path),
   );
 
-  // Búsquedas de persona ANTES de la transacción -- mismo patrón ya
-  // establecido en createPersonWithOccupancyAction (people/actions.ts):
-  // esto es feedback/resolución temprana, no la defensa real contra una
-  // carrera (esa es el índice único parcial de people, con
-  // translatePersonError() como backstop más abajo).
-  const activeMatch = await findPersonByPhone(
-    building.organizationId,
-    data.phoneE164,
-  );
-  const deletedMatch = activeMatch
-    ? null
-    : await findDeletedPersonByPhone(building.organizationId, data.phoneE164);
-
   try {
-    const created = await db.transaction(async (tx) => {
-      let personId: string;
-
-      if (activeMatch) {
-        // Vecino ya conocido y activo: se reusa tal cual está guardado, sin
-        // pisar su nombre con lo que haya tipeado esta vez -- cualquiera
-        // que conozca (o adivine) un teléfono ajeno no puede reescribir el
-        // nombre de otra persona con solo cargar un reclamo (ver el
-        // análisis de seguridad del reporte, punto "datos inventados").
-        personId = activeMatch.id;
-      } else if (deletedMatch) {
-        // Resuelve el Pendiente anotado desde el paso 4.4 (ver CLAUDE.md >
-        // Pendientes): opción 2, revivir la ficha anterior. Mismo criterio
-        // que "no pisar el nombre" de arriba -- revivir NO actualiza
-        // firstName/lastName con lo tipeado ahora, mantiene lo que ya
-        // estaba guardado.
-        const [revived] = await tx
-          .update(people)
-          .set({ deletedAt: null })
-          .where(
-            and(
-              eq(people.id, deletedMatch.id),
-              eq(people.organizationId, building.organizationId),
-              isNotNull(people.deletedAt),
-            ),
-          )
-          .returning({ id: people.id });
-        if (!revived) {
-          // Carrera extremadamente angosta: alguien más reactivó o
-          // reemplazó esta ficha entre el chequeo de arriba y acá. No se
-          // improvisa una resolución -- se aborta la transacción entera y
-          // se le pide al vecino reintentar (mismo criterio que cualquier
-          // otra carrera de este proyecto).
-          throw new Error("PERSON_REVIVE_RACE");
-        }
-        personId = revived.id;
-      } else {
-        const [inserted] = await tx
-          .insert(people)
-          .values({
-            organizationId: building.organizationId,
-            firstName: data.firstName,
-            lastName: data.lastName,
-            phoneE164: data.phoneE164,
-          })
-          .returning({ id: people.id });
-        if (!inserted) {
-          throw new Error("PERSON_CREATE_FAILED");
-        }
-        personId = inserted.id;
-      }
-
-      const [ticket] = await tx
-        .insert(tickets)
-        .values({
-          organizationId: building.organizationId,
-          buildingId: building.id,
-          unitId: data.unitNotListed ? null : data.unitId,
-          unitLabelRaw: data.unitNotListed ? data.unitLabelRaw : null,
-          personId,
-          categoryId: category.id,
-          title: deriveTicketTitle(data.description),
-          description: data.description,
-          // Sale de la categoría, no de un campo del formulario -- ver
-          // CLAUDE.md > Fotos y adjuntos... no, ver el paso 5.2: "sin
-          // prioridad en el formulario público".
-          priority: category.defaultPriority,
-          source: "public_form",
-        })
-        // El trigger set_ticket_public_code (migración 0007/0009) ya pone
-        // public_code SIEMPRE, sin que esta acción tenga que calcular nada
-        // -- .returning() lo trae de vuelta para poder mostrárselo al
-        // vecino.
-        .returning({ id: tickets.id, publicCode: tickets.publicCode });
-      if (!ticket) {
-        throw new Error("TICKET_CREATE_FAILED");
-      }
-
-      if (attachmentsToInsert.length > 0) {
-        await tx.insert(ticketAttachments).values(
-          attachmentsToInsert.map((a) => ({
-            organizationId: building.organizationId,
-            ticketId: ticket.id,
-            storagePath: a.path,
-            mimeType: a.mimeType,
-            sizeBytes: a.sizeBytes,
-            originalFilename: a.originalFilename,
-          })),
-        );
-      }
-
-      await tx.insert(ticketEvents).values({
-        organizationId: building.organizationId,
-        ticketId: ticket.id,
-        type: "created",
-        actorType: "neighbor",
-        actorLabel: [data.firstName, data.lastName].filter(Boolean).join(" "),
-        payload: { source: "public_form" },
-      });
-
-      return ticket;
-    });
-
+    const created = await attemptCreateTicket(
+      building,
+      category,
+      attachmentsToInsert,
+      data,
+    );
     return { status: "success", publicCode: created.publicCode };
   } catch (error) {
-    const pgError = unwrapPostgresError(error);
-    if (
-      pgError?.code === UNIQUE_VIOLATION &&
-      pgError.constraint_name === PHONE_UNIQUE_CONSTRAINT
-    ) {
-      // Carrera real (dos envíos casi simultáneos con el mismo teléfono
-      // nuevo): el índice único parcial de people la agarra donde el
-      // chequeo previo a la transacción no llegó a verla.
-      return {
-        status: "error",
-        message:
-          "Hubo un problema al identificarte. Volvé a intentar en un momento.",
-      };
+    if (!isPhoneRaceError(error)) {
+      return translateCreateTicketError(error);
     }
-    if (error instanceof Error && error.message === "PERSON_REVIVE_RACE") {
-      return {
-        status: "error",
-        message:
-          "Hubo un problema al identificarte. Volvé a intentar en un momento.",
-      };
+
+    // Reintento único, acotado a la carrera de teléfono (ver
+    // isPhoneRaceError arriba para la garantía de por qué alcanza con una
+    // sola vuelta): attemptCreateTicket vuelve a buscar la persona desde
+    // cero, y esta vez la va a encontrar como activeMatch -- la rama que
+    // reusa sin insertar, así que no puede volver a chocar contra el mismo
+    // índice. Si este segundo intento falla por CUALQUIER otro motivo (o,
+    // en teoría, por la misma carrera otra vez, lo cual no debería pasar
+    // según la garantía de arriba), no hay un tercer intento: se traduce
+    // el error y se le pide al vecino reintentar a mano, igual que
+    // cualquier otro fallo real.
+    try {
+      const created = await attemptCreateTicket(
+        building,
+        category,
+        attachmentsToInsert,
+        data,
+      );
+      return { status: "success", publicCode: created.publicCode };
+    } catch (retryError) {
+      return translateCreateTicketError(retryError);
     }
-    return {
-      status: "error",
-      message: "No pudimos registrar tu reclamo. Probá de nuevo en un momento.",
-    };
   }
 }
