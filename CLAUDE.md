@@ -533,6 +533,87 @@ crea en el paso 5.5).
   aplicación antes de generarla -- no una policy de `storage.objects` con
   un `EXISTS` contra tablas de negocio.
 
+## Registro del reclamo (paso 5.5)
+
+`createTicketAction` (`src/features/public-form/actions.ts`) es el punto
+donde el vecino pasa de "estuvo llenando un formulario" a "tiene un
+reclamo registrado de verdad" -- el flujo central del producto (ver
+CLAUDE.md > Qué es este proyecto).
+
+**Pública a propósito, sin `authorizedAction()`** -- misma excepción
+documentada para `loginAction` (ver CLAUDE.md > Autorización de rutas y
+Server Actions): no hay sesión que exigir. La "autorización" de esta
+acción es el `token` de la URL -- se re-resuelve el edificio/organización
+DESDE el token en cada invocación (`getBuildingByPublicToken`), nunca se
+confía en nada que el cliente mande sobre a qué organización pertenece.
+
+**Defensas contra un payload forjado a mano** (probadas en la práctica
+contra la acción real, sin pasar por el formulario -- ver el reporte del
+paso 5.5 para el método y la salida literal de cada caso):
+
+- `unit_id` de otro edificio (o inventado): rechazado --
+  `unitBelongsToBuilding()` (reusada de `people/queries.ts`, paso 4.4)
+  exige organización Y edificio Y no dado de baja.
+- `category_id` de otra organización (o inventado): rechazado --
+  `getCategoryForTicket()` filtra por organización; de ahí también sale la
+  prioridad real (`categories.default_priority`), nunca de un campo del
+  formulario.
+- `storage_path` que el llamante no subió: descartado EN SILENCIO, no
+  rechaza el reclamo entero -- tiene que (a) existir de verdad en
+  `storage.objects` (`getExistingAttachmentPaths()`, una SELECT directa,
+  sin necesitar la service-role key: la conexión de la app ya evade RLS
+  igual que en cualquier tabla propia) y (b) vivir bajo el prefijo
+  `pending/<formSessionId>/` que ESE MISMO envío declara. La defensa real
+  contra adivinar el path de OTRA sesión es la misma que ya protege
+  `public_token` (paso 5.1): el uuid del archivo y el de la sesión son
+  aleatorios e independientes, adivinar los dos a la vez no es viable.
+- Teléfono que ya pertenece a otra persona (activa o dada de baja):
+  nunca se pisa el nombre guardado con lo que haya tipeado el formulario
+  -- ver la resolución del Pendiente de reactivación más abajo.
+- Token inválido / edificio dado de baja: mismo criterio de ambigüedad que
+  el paso 5.1 (un mensaje, sin distinguir los casos).
+
+**Atomicidad:** persona (crear/revivir/reusar) + reclamo + adjuntos +
+evento inicial corren dentro de un único `db.transaction()`. Probado con
+una carrera real (dos sesiones de navegador distintas, mismo teléfono
+nuevo, enviando al mismo tiempo): la que pierde no deja NADA a medio
+guardar -- ni persona huérfana, ni reclamo sin persona -- el índice único
+parcial de `people` la agarra dentro de la transacción y la revierte
+entera.
+
+**Doble envío:** un `useRef` (no `useState`) bloquea reintentos --
+encontrado en la práctica probando un doble click real (dos eventos
+`click` nativos en el mismo tick de JS): los updates de `useState` se
+procesan en batch, así que un chequeo `if (submitting)` contra estado de
+React todavía lee el valor viejo en la segunda ejecución del handler y
+deja pasar las dos. Un ref se lee/escribe sincrónicamente, sin esperar
+ningún render -- confirmado con dos tickets reales creados antes del fix,
+uno solo después.
+
+**Falla de red real** (la conexión se corta a mitad de la confirmación):
+`TicketForm` NO usa `useActionState` para este botón en particular
+(a diferencia del resto de los formularios del proyecto) -- `useActionState`
+solo captura lo que la Server Action DEVUELVE, nunca una falla de red
+ANTES de que la acción llegue a correr. Un `try/catch` propio alrededor de
+la llamada permite distinguir "el servidor respondió con un error"
+(mensaje específico) de "no sabemos qué pasó" (mensaje honesto sobre la
+incertidumbre real -- no se afirma que se guardó, tampoco que no).
+
+**Fuera de alcance de este paso, a propósito:** armar el mensaje de
+WhatsApp y abrir `wa.me` -- el enunciado de 5.5 pide garantizar que el
+reclamo se guarda ANTES e independientemente de WhatsApp, no construir
+ese flujo; `MessagingProvider` (ver CLAUDE.md > Reglas de WhatsApp)
+todavía no existe como código. La acción devuelve el `public_code` real
+al vecino (pantalla de confirmación), suficiente para una etapa
+posterior.
+
+**Qué datos se guardan del vecino (Ley 25.326, riesgo R7 del plan):** solo
+nombre, apellido (opcional) y teléfono -- los mismos campos que ya pedía
+el formulario desde el paso 5.2, sin agregar nada nuevo en este paso (ni
+IP, ni user-agent, ni ningún dato de tracking). El teléfono es la
+identidad del vecino en todo el proyecto (ver CLAUDE.md > Acceso a
+datos), no un dato adicional que este paso decida guardar.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
@@ -911,33 +992,36 @@ arreglar de apuro algo que todavía no se decidió bien.
   cargado, con un link directo para completarlo -- no alcanza con que la
   columna "Teléfono" del listado muestre "—" fila por fila.
 
-- **Qué hacer cuando un vecino dado de baja carga un reclamo nuevo con el
-  mismo teléfono (a decidir en el paso 5.5, no ahora).**
-  `findPersonByPhone()` (`src/features/people/queries.ts`) filtra
-  `deleted_at IS NULL` -- una persona dada de baja es invisible para esa
-  búsqueda. El índice único de teléfono
-  (`people_organization_id_phone_e164_unique`) es parcial por el mismo
-  motivo, y a propósito: permite reusar el teléfono de alguien dado de baja
-  para una persona nueva, en vez de bloquear ese alta para siempre (ver
-  CLAUDE.md > Acceso a datos, verificado en la práctica en el paso 4.4 con
-  filas reales, sin superposición de vigencia). El problema es que, si la
-  etapa 5 reusa esta misma función para "buscar o crear" al cargar un
-  reclamo desde el formulario público, un vecino dado de baja que vuelve a
-  aparecer con su mismo número genera una persona nueva, desconectada de su
-  historial anterior (reclamos y ocupaciones viejas quedan colgados de la
-  ficha dada de baja, no de la nueva). Tres salidas posibles, ninguna
-  elegida todavía:
-  1. Crear una persona nueva y aceptar la desconexión -- lo que pasa hoy si
-     no se hace nada especial, más simple, pero pierde historial visible.
-  2. Revivir la ficha anterior (limpiar su `deleted_at`) -- mantiene el
-     historial, pero hay que decidir qué pasa si esa ficha se dio de baja a
-     propósito por algún motivo que seguiría vigente.
-  3. Vincular ambas -- la ficha vieja queda dada de baja, pero algo asocia
-     la persona nueva con su historial anterior. Más completo, pero es la
-     opción con más superficie nueva (¿cómo se navega esa relación desde el
-     panel?).
+- ~~Qué hacer cuando un vecino dado de baja carga un reclamo nuevo con el
+  mismo teléfono~~ **Resuelto en el paso 5.5: opción 2, revivir la ficha
+  anterior.** De las tres salidas que este Pendiente dejó anotadas desde el
+  paso 4.4 (crear una persona nueva y aceptar la desconexión; revivir la
+  ficha anterior; vincular ambas), se eligió revivir
+  (`createTicketAction`, `src/features/public-form/actions.ts`, vía la
+  nueva `findDeletedPersonByPhone()` en `people/queries.ts`):
+  `deleted_at` se limpia dentro de la misma transacción que crea el
+  reclamo, sin crear una fila nueva. Se descartó "vincular ambas" por ser
+  la opción con más superficie nueva sin un beneficio claro para este
+  caso -- no hay hoy ninguna pantalla que necesite navegar "esta persona
+  fue dos fichas distintas alguna vez". Se descartó "crear nueva y aceptar
+  la desconexión" porque pierde justo lo que un administrador esperaría
+  encontrar: el historial de reclamos de un vecino que vuelve a aparecer.
 
-  La decisión se toma al escribir el paso 5.5, no acá.
+  El riesgo que este Pendiente señalaba ("¿y si se dio de baja a propósito
+  por un motivo que seguiría vigente?") se evaluó y se consideró bajo:
+  `people.deleted_at` en este proyecto no tiene una semántica de "vecino
+  baneado" (no existe ese concepto ni esa columna) -- las bajas reales son
+  "dejó de vivir ahí" o una limpieza administrativa, ninguna de las dos
+  hace que revivir la ficha ante un reclamo nuevo sea incorrecto. Si el
+  proyecto agrega alguna vez un concepto real de "bloquear a esta
+  persona", ese es motivo para revisar esta decisión, no antes.
+
+  Revivir NO actualiza `first_name`/`last_name` con lo que haya tipeado el
+  formulario esta vez -- mantiene el nombre que ya estaba guardado. Mismo
+  criterio que un teléfono que YA coincide con una persona activa (ver el
+  análisis de seguridad del paso 5.5): cualquiera que escriba (o adivine)
+  un teléfono ajeno no puede reescribir el nombre de otra persona con solo
+  cargar un reclamo.
 
 - **Propuesta A de la importación CSV (INSERT en lote con `ON CONFLICT DO
 NOTHING`) queda disponible, no implementada, para archivos mucho más
@@ -1062,6 +1146,25 @@ NOTHING`) queda disponible, no implementada, para archivos mucho más
   de Radix después de montar) o convivir con el warning mientras sea
   cosmético. Relevante para cualquier pantalla futura que server-renderice
   un `Checkbox` fuera de un Dialog, no solo para este formulario.
+
+- **Un vecino que carga un reclamo por el formulario público (sin
+  ocupación en ninguna unidad) no aparece en ninguna pantalla del panel
+  hoy, ni hay forma de darlo de baja desde ahí.** Encontrado en la
+  práctica probando el paso 5.5: `getOccupancyRowsForBuilding()`
+  (`people/queries.ts`, la consulta detrás de la pestaña "Personas" del
+  panel) hace un INNER JOIN contra `unit_occupancies` -- una persona sin
+  ninguna ocupación es estructuralmente invisible ahí. `createTicketAction`
+  nunca crea una ocupación (el reclamo público solo necesita
+  `tickets.person_id`/`unit_id`, no una `unit_occupancy` -- ver el
+  reporte del paso 5.5, "qué es realmente necesario"), así que TODO
+  vecino que llega por este flujo queda en esta situación por diseño, no
+  por accidente. Para limpiar los datos de prueba de este paso hubo que
+  dar de baja las personas directo por SQL, no había otro camino. Falta
+  decidir, en una etapa posterior (probablemente la que construya la
+  bandeja de reclamos del panel): ¿la ficha de un reclamo tiene que poder
+  abrir la ficha de la persona aunque no tenga ocupación? ¿"Personas" del
+  panel necesita un listado aparte (o el mismo, sin el INNER JOIN) para
+  estos casos?
 
 ## Qué NO hacer
 

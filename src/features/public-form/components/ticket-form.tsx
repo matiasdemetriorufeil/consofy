@@ -5,6 +5,7 @@ import { type ChangeEvent, useEffect, useRef, useState } from "react";
 import { Controller, useForm } from "react-hook-form";
 import { File as FileIcon, RotateCw, X } from "lucide-react";
 
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import {
@@ -26,10 +27,13 @@ import { Textarea } from "@/components/ui/textarea";
 import { AR_WHATSAPP_HELP } from "@/lib/phone";
 import { cn } from "@/lib/utils";
 
+import { createTicketAction } from "../actions";
 import type { PublicFormCategory } from "../queries";
 import {
   IDENTIFICATION_STEP_FIELDS,
   MAX_TICKET_PHOTOS,
+  initialCreateTicketState,
+  type CreateTicketState,
   PROBLEM_STEP_FIELDS,
   PUBLIC_TICKET_STEPS,
   TOTAL_STEPS,
@@ -382,6 +386,73 @@ export function TicketForm({
     (a) => a.status === "queued" || a.status === "processing",
   );
 
+  // Confirmación real (paso 5.5). NO usa useActionState (a diferencia del
+  // resto de los formularios del proyecto) a propósito: useActionState solo
+  // captura lo que la Server Action DEVUELVE, no una falla de RED antes de
+  // que la acción llegue a correr (la conexión se corta a mitad de camino)
+  // -- un caso que el enunciado de este paso pide tratar explícitamente
+  // ("no puede quedarse sin saber si su reclamo se registró o no"). Un
+  // try/catch propio alrededor de la llamada es la única forma de
+  // distinguir "el servidor respondió con un error" (mensaje específico,
+  // ver actions.ts) de "no sabemos qué pasó" (mensaje honesto, distinto).
+  const [submitState, setSubmitState] = useState<CreateTicketState>(
+    initialCreateTicketState,
+  );
+  const [submitting, setSubmitting] = useState(false);
+  // Guarda la MISMA condición que `submitting`, pero en un ref, no en
+  // estado -- encontrado en la práctica (paso 5.5, probando un doble toque
+  // real): dos eventos "click" nativos disparados en el mismo tick de JS
+  // corren los dos handlers ANTES de que React llegue a aplicar el primer
+  // setSubmitting(true) (los updates de estado se procesan en batch, no
+  // sincrónicamente dentro del handler que las dispara) -- el chequeo `if
+  // (submitting) return` leía el mismo valor viejo (false) en las dos
+  // ejecuciones y las dos llegaban a mandar la Server Action, confirmado
+  // con dos tickets reales creados en la base para un solo doble click. Un
+  // ref se lee/escribe sincrónicamente, sin esperar ningún render -- cierra
+  // la ventana de carrera que el estado de React no podía cerrar.
+  const submittingRef = useRef(false);
+
+  async function handleSubmit() {
+    if (submittingRef.current) {
+      return;
+    }
+    submittingRef.current = true;
+    setSubmitting(true);
+    try {
+      const result = await createTicketAction(initialCreateTicketState, {
+        ...values,
+        token,
+        formSessionId,
+        attachments: uploadedAttachments.map((a) => ({
+          path: a.path!,
+          originalFilename: a.originalFilename,
+          mimeType: a.mimeType,
+          sizeBytes: a.sizeBytes,
+        })),
+      });
+      setSubmitState(result);
+      if (result.status === "success") {
+        // El borrador ya cumplió su función -- si el vecino vuelve a este
+        // mismo link más tarde, no tiene sentido reabrirlo a mitad de un
+        // reclamo que ya quedó registrado.
+        window.localStorage.removeItem(draftKey(token));
+      }
+    } catch {
+      // Corte de conexión real (o cualquier falla que no llegó a producir
+      // una respuesta del servidor) -- honesto sobre la incertidumbre real:
+      // no podemos saber si el reclamo se guardó o no, así que no se afirma
+      // ninguna de las dos cosas.
+      setSubmitState({
+        status: "error",
+        message:
+          "No pudimos confirmar si tu reclamo se guardó. Revisá tu conexión -- si no ves un código de reclamo, esperá un momento y volvé a intentar.",
+      });
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
+    }
+  }
+
   const selectedCategory = categories.find((c) => c.id === values.categoryId);
   const matchedUnit = units.find((u) => u.id === values.unitId);
   const selectedUnitLabel = values.unitNotListed
@@ -617,7 +688,22 @@ export function TicketForm({
               </>
             )}
 
-            {step === 4 && (
+            {step === 4 && submitState.status === "success" && (
+              <div className="flex flex-col items-center gap-3 py-6 text-center">
+                <h3 className="text-ink font-display text-lg font-semibold">
+                  Listo, tu reclamo quedó registrado
+                </h3>
+                <p className="text-ink-muted text-sm">
+                  Guardá este código para hacer el seguimiento con tu
+                  administración:
+                </p>
+                <p className="text-ink font-mono text-2xl font-semibold">
+                  {submitState.publicCode}
+                </p>
+              </div>
+            )}
+
+            {step === 4 && submitState.status !== "success" && (
               <>
                 <dl className="text-sm">
                   <div className="border-border flex justify-between gap-4 border-b py-2">
@@ -656,21 +742,26 @@ export function TicketForm({
                   </div>
                 </dl>
 
-                <Field>
-                  <Button type="button" className="w-full" disabled>
-                    Enviar reclamo
-                  </Button>
-                  <FieldDescription>
-                    Todavía estamos conectando este último paso. Probá de nuevo
-                    en los próximos días, o comunicate directo con tu
-                    administración mientras tanto.
-                  </FieldDescription>
-                </Field>
+                {submitState.status === "error" && (
+                  <Alert variant="destructive">
+                    <AlertDescription>{submitState.message}</AlertDescription>
+                  </Alert>
+                )}
+
+                <Button
+                  type="button"
+                  className="w-full"
+                  disabled={submitting}
+                  onClick={handleSubmit}
+                >
+                  {submitting ? "Enviando…" : "Enviar reclamo"}
+                </Button>
 
                 <Button
                   type="button"
                   variant="outline"
                   className="w-full"
+                  disabled={submitting}
                   onClick={goBack}
                 >
                   Volver

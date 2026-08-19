@@ -173,3 +173,53 @@ export function validateAttachmentSize(sizeBytes: number): string | null {
   }
   return null;
 }
+
+// -----------------------------------------------------------------------
+// Confirmación del reclamo (paso 5.5)
+// -----------------------------------------------------------------------
+// Lo que createTicketAction recibe del cliente: los mismos datos REALES de
+// publicTicketFormSchema (identificación + problema, con sus mismos
+// refine()) MÁS lo que hace falta para ubicar el reclamo y sus adjuntos --
+// `token` (para resolver el edificio/organización del lado del servidor,
+// nunca confiando en nada que el cliente diga sobre a qué organización
+// pertenece), `formSessionId` (para acotar qué archivos de `pending/` puede
+// reclamar esta confirmación puntual, ver el análisis de seguridad del
+// reporte) y la lista de adjuntos ya subidos en el paso 3/4.
+//
+// `.and()`, no `.extend()`: publicTicketFormSchema ya es un schema con
+// refine() encadenados (no un ZodObject plano), así que no tiene
+// `.extend()` -- `.and()` arma una intersección, que sigue validando los
+// dos refine() originales Y los campos nuevos, sin reescribir nada.
+const createTicketExtraFieldsSchema = z.object({
+  token: z.uuid(),
+  formSessionId: z.uuid(),
+  attachments: z
+    .array(
+      z.object({
+        path: z.string().min(1),
+        originalFilename: z.string().min(1),
+        mimeType: z.string().min(1),
+        sizeBytes: z.number().int().positive(),
+      }),
+    )
+    .max(MAX_TICKET_PHOTOS),
+});
+
+export const createTicketInputSchema = publicTicketFormSchema.and(
+  createTicketExtraFieldsSchema,
+);
+
+export type CreateTicketInput = z.input<typeof createTicketInputSchema>;
+export type CreateTicketOutput = z.output<typeof createTicketInputSchema>;
+
+// Vive acá y no en actions.ts: un archivo "use server" solo puede exportar
+// funciones async -- mismo motivo que separó BulkPreviewState/
+// initialBulkPreviewState de units/actions.ts hacia unit-schema.ts en el
+// paso 4.3 (ver el comentario de ese archivo), aplicado acá al resultado de
+// createTicketAction.
+export type CreateTicketState =
+  | { status: "idle" }
+  | { status: "error"; message: string }
+  | { status: "success"; publicCode: string };
+
+export const initialCreateTicketState: CreateTicketState = { status: "idle" };

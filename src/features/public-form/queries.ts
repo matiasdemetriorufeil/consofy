@@ -87,3 +87,36 @@ export const getActiveCategoriesForBuilding = cache(
       .orderBy(asc(categories.sortOrder), asc(categories.name));
   },
 );
+
+export type TicketCategory = {
+  id: string;
+  defaultPriority: (typeof categories.$inferSelect)["defaultPriority"];
+};
+
+// Validación server-side de la categoría al confirmar un reclamo (paso
+// 5.5): a diferencia de getActiveCategoriesForBuilding() (que alimenta el
+// PICKER), acá NO se filtra por `active` -- el vecino pudo haber elegido la
+// categoría un rato antes de que un administrador la ocultara del picker;
+// eso no debería tirar abajo un reclamo ya en curso. `deleted_at IS NULL`
+// SÍ se exige: una categoría borrada de verdad no es un destino válido para
+// un reclamo NUEVO, sin importar qué haya elegido el cliente. También trae
+// `defaultPriority`, que es de donde sale la prioridad real del reclamo
+// (paso 5.2: "sin campo de prioridad en el formulario, sale de la
+// categoría").
+export async function getCategoryForTicket(
+  organizationId: string,
+  categoryId: string,
+): Promise<TicketCategory | null> {
+  const [row] = await db
+    .select({ id: categories.id, defaultPriority: categories.defaultPriority })
+    .from(categories)
+    .where(
+      and(
+        eq(categories.id, categoryId),
+        eq(categories.organizationId, organizationId),
+        isNull(categories.deletedAt),
+      ),
+    );
+
+  return row ?? null;
+}

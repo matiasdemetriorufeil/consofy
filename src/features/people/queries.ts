@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 
 import { db } from "@/db";
 import { people, tickets, unitOccupancies, units } from "@/db/schema";
@@ -132,6 +132,35 @@ export async function findPersonByPhone(
         isNull(people.deletedAt),
       ),
     );
+
+  return row ?? null;
+}
+
+// Contraparte de findPersonByPhone() para la reactivación del paso 5.5: si
+// nadie ACTIVO tiene este teléfono, ¿hay una ficha DADA DE BAJA con el
+// mismo? (ver CLAUDE.md > Pendientes, resuelto en el paso 5.5 -- opción 2,
+// "revivir la ficha anterior"). `orderBy(desc(deletedAt)).limit(1)`: puede
+// haber más de una ficha borrada con el mismo teléfono a lo largo del
+// tiempo (el índice único parcial solo exige unicidad entre las ACTIVAS,
+// nunca entre borradas) -- la más recientemente dada de baja es la mejor
+// candidata a ser "la misma persona volviendo", no cualquiera del
+// historial.
+export async function findDeletedPersonByPhone(
+  organizationId: string,
+  phoneE164: string,
+): Promise<{ id: string } | null> {
+  const [row] = await db
+    .select({ id: people.id })
+    .from(people)
+    .where(
+      and(
+        eq(people.organizationId, organizationId),
+        eq(people.phoneE164, phoneE164),
+        isNotNull(people.deletedAt),
+      ),
+    )
+    .orderBy(desc(people.deletedAt))
+    .limit(1);
 
   return row ?? null;
 }
