@@ -84,6 +84,8 @@ export default async function PublicBuildingPage({
       </div>
       <TicketForm
         token={parsedToken.data}
+        buildingName={building.name}
+        adminWhatsappE164={building.adminWhatsappE164}
         categories={categories}
         units={units}
       />

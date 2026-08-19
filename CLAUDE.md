@@ -798,6 +798,125 @@ expone el dominio (`wa.me` vs `api.whatsapp.com`) como parámetro
 configurable: no hay caller legítimo que deba elegir entre los dos, y
 exponerlo debilitaría justo el aislamiento que el riesgo R9 pide.
 
+## Pantalla de confirmación (paso 5.8)
+
+`TicketForm` (`src/features/public-form/components/ticket-form.tsx`), al
+recibir un `sentTicket`, deja de mostrar el formulario de 4 pasos y
+muestra la confirmación -- el último momento del recorrido del vecino, y
+el que decide si el administrador se entera hoy (por WhatsApp) o recién
+cuando abra el panel.
+
+**La tensión central, resuelta separando dos hechos distintos:** "el
+reclamo está registrado" (ya pasó, es un hecho, no depende de nada más) de
+"tu administración todavía no se enteró" (es cierto, y tiene una
+consecuencia real si no se avisa). Decirle al vecino SOLO lo primero
+("ya está, podés cerrar esto") no le da ningún motivo para tocar el
+botón, y el administrador se entera recién cuando entra al panel -- puede
+ser en minutos o en días. Insinuar que "sin el botón no cuenta" es
+mentira, y una mentira detectable (el código ya está ahí, es la prueba de
+que sí cuenta). La pantalla dice las dos cosas, en ese orden, sin
+mezclarlas: primero confirma el registro (ícono, título, código, link de
+seguimiento -- una zona visualmente cerrada, con `CircleCheck`), y recién
+después, en una tarjeta aparte, explica la consecuencia real y honesta de
+no avisar: _"Para que tu administración se entere hoy, avisale por
+WhatsApp. Si no lo hacés, igual va a ver tu reclamo, pero recién la
+próxima vez que entre al sistema."_ No es una amenaza vacía ("si no
+apretás esto no pasa nada") ni una falsa neutralidad ("da lo mismo") --
+es lo que de verdad pasa.
+
+**Mensaje y URL se arman del lado del CLIENTE**, no los devuelve
+`createTicketAction`: `formatTicketMessage` (paso 5.6) y `buildWhatsAppUrl`
+(paso 5.7) son funciones puras sin `"use server"`, así que no hay ningún
+motivo para pagar un round-trip al servidor solo para formatear texto y
+armar una URL. `CreateTicketState` (`ticket-schema.ts`) SÍ se extendió con
+un campo nuevo, `priority`: es el único dato que el cliente no puede
+reconstruir por su cuenta (sale de `categories.default_priority`,
+resuelto en el servidor -- el formulario público nunca le pregunta la
+prioridad al vecino, paso 5.2). Todo lo demás que el mensaje necesita
+(nombre, unidad, categoría, descripción, cantidad de adjuntos) el cliente
+ya lo tiene en sus propios `values`.
+
+**`adminWhatsappE164` viaja al cliente** (`getBuildingByPublicToken`
+extendida): no es una filtración nueva -- el flujo entero de este
+proyecto depende de que ese número termine visible en la URL que el
+PROPIO vecino abre (ver CLAUDE.md > Qué es este proyecto), así que ya iba
+a viajar al navegador en cuanto se tocara el botón. Traerlo como prop
+solo adelanta ese momento.
+
+**Si `buildWhatsAppUrl` tira `BuildWhatsAppUrlError`** (número vacío o
+corrupto -- no debería pasar en la práctica, `NOT NULL` + Zod desde el
+paso 4.1, ver CLAUDE.md > Link de WhatsApp): la pantalla NO se rompe ni
+esconde que el reclamo se guardó (eso ya es cierto, pasó antes que esto).
+Esconde solo el botón de WhatsApp, con un mensaje honesto en su lugar
+("no pudimos preparar el aviso automático... copiá el mensaje y mandalo
+vos"), y el botón "Copiar mensaje" sigue disponible (no depende de la
+URL, solo del texto). Probado con una ruta de diagnóstico temporal
+(borrada después de probar -- no se puede reproducir con datos reales,
+`admin_whatsapp_e164` es `NOT NULL` con `CHECK` en la base, así que ningún
+edificio real puede tener este dato vacío).
+
+**Borrador de localStorage, una vez enviado:** se borra (mismo criterio
+que ya regía desde el 5.2/5.5), pero encontrado en la práctica probando
+este paso: el efecto que autoguarda el borrador en cada cambio
+RESUCITABA el borrador recién borrado, porque `watch()` de
+react-hook-form devuelve un objeto `values` nuevo en cada render (no una
+referencia estable) -- el efecto volvía a dispararse en el render
+siguiente a `setSentTicket()`, aunque los DATOS del formulario no
+hubieran cambiado, y reescribía el borrador. Arreglado agregando
+`sentTicket` a las dependencias del efecto: con un reclamo ya enviado, no
+autoguarda nada, borra lo que haya quedado en vez de reescribirlo.
+
+**Reload o "atrás" después de enviar -- no se puede mandar el mismo
+reclamo dos veces:** clave nueva de localStorage, `sentKey(token)`
+(`consofy:reclamo-enviado:<token>`), DISTINTA de la del borrador y
+prioritaria sobre ella en el efecto de hidratación -- si existe, la
+pantalla de confirmación se reconstruye directo desde ahí (mismos datos
+que ya tenía el navegador, sin volver a llamar a `createTicketAction`) y
+el formulario nunca vuelve a mostrarse para este token en este
+dispositivo. Probado con los dos casos reales: recargar la página, y
+navegar afuera y volver con "atrás"/"adelante" del navegador -- los dos
+terminan en el mismo lugar (un remount del componente), y los dos
+muestran la confirmación, nunca el formulario. La única forma de volver a
+ver el formulario es "Cargar otro reclamo" (acción explícita, borra
+`sentKey` y `draftKey`, reinicia el formulario Y genera un
+`formSessionId` nuevo -- un reclamo distinto necesita su propio
+namespace de adjuntos en Storage).
+
+**Límite conocido, no resuelto en este paso:** `sentKey`/`draftKey` viven
+en `localStorage`, compartido entre pestañas del mismo origen (mismo
+trade-off ya aceptado para la cookie del selector de edificio, ver
+CLAUDE.md > Selector de edificio activo). Si el mismo dispositivo manda
+DOS reclamos distintos para el MISMO edificio en dos pestañas separadas,
+la segunda confirmación pisa el registro de la primera -- si esa primera
+pestaña se recarga después, muestra el código del segundo reclamo, no el
+suyo (los dos reclamos siguen bien guardados en la base; es solo la
+pantalla la que muestra el más reciente). Caso angosto, encontrado
+pensando el diseño, no arreglado a propósito: resolverlo necesitaría
+`sessionStorage` en vez de `localStorage`, lo que rompería la propiedad
+que el borrador SÍ necesita ("sobrevive a cerrar el navegador").
+
+**Copiar mensaje en un celular, probado, no asumido:** dos caminos --
+`navigator.clipboard.writeText()` (moderno, exige contexto seguro) y,
+si no está disponible, un `<textarea>` oculto + `document.execCommand
+("copy")` (viejo pero real). Probados los dos con Playwright en un
+viewport mobile: el primero funciona con la Clipboard API disponible
+(contenido leído de vuelta del portapapeles, coincide exacto con el
+mensaje); el segundo funciona igual con `navigator.clipboard` forzado a
+`undefined` antes de cargar la página. Ninguno de los dos se probó contra
+Safari/iOS real (no hay esa plataforma disponible en este entorno) --
+queda como un supuesto razonable (Safari soporta la Clipboard API desde
+la versión 13.1), no como algo verificado.
+
+**Link de seguimiento (paso 5.11, todavía no existe):** se muestra como
+un link real (`/s/{publicCode}`), RELATIVO al origen actual -- a
+diferencia del link que va DENTRO del mensaje de WhatsApp (que necesita
+ser absoluto, `DEFAULT_ATTACHMENTS_BASE_URL` del paso 5.6, porque viaja
+afuera de la app), este vive en la misma página, así que un link relativo
+apunta solo a este mismo deploy, sin depender de si esa constante coincide
+con el dominio real. Va a devolver 404 hasta que el paso 5.11 exista --
+mismo criterio que el paso 5.6 con el link de adjuntos: construir la
+forma que va a tener ahora, dejarlo dicho acá.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.

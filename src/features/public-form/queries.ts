@@ -11,6 +11,14 @@ export type PublicBuilding = {
   organizationId: string;
   name: string;
   active: boolean;
+  // Necesario del lado del cliente recién desde el paso 5.8 (armar el link
+  // `wa.me` con buildWhatsAppUrl, src/lib/whatsapp-url.ts) -- exponerlo acá
+  // no es una filtración nueva: el flujo entero de este proyecto depende de
+  // que ESTE número termine visible en la URL que el propio vecino abre
+  // (ver CLAUDE.md > Qué es este proyecto), así que ya iba a viajar al
+  // navegador en cuanto se tocara el botón. Traerlo antes, como prop, solo
+  // adelanta ese momento.
+  adminWhatsappE164: string;
 };
 
 // ÚNICA excepción del proyecto al patrón "organizationId es siempre el
@@ -46,6 +54,7 @@ export const getBuildingByPublicToken = cache(
         organizationId: buildings.organizationId,
         name: buildings.name,
         active: buildings.active,
+        adminWhatsappE164: buildings.adminWhatsappE164,
       })
       .from(buildings)
       .where(

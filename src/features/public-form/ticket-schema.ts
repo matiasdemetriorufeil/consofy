@@ -6,6 +6,7 @@ import {
   normalizePhoneInput,
 } from "@/lib/phone";
 import { personFieldsSchema } from "@/features/people/person-schema";
+import type { TicketMessagePriority } from "@/features/tickets/format-ticket-message";
 
 // Compartido entre cliente (TicketForm, vía zodResolver) y lo que va a ser
 // el servidor en el paso 5.5 -- mismo patrón que unit-schema.ts/
@@ -217,9 +218,23 @@ export type CreateTicketOutput = z.output<typeof createTicketInputSchema>;
 // initialBulkPreviewState de units/actions.ts hacia unit-schema.ts en el
 // paso 4.3 (ver el comentario de ese archivo), aplicado acá al resultado de
 // createTicketAction.
+//
+// `priority` se suma en el paso 5.8: la pantalla de confirmación arma el
+// mensaje de WhatsApp (formatTicketMessage, paso 5.6) del lado del
+// cliente, y la prioridad real del reclamo sale de la categoría
+// (categories.default_priority), resuelta en el servidor -- el formulario
+// público nunca le pide prioridad al vecino (paso 5.2), así que el cliente
+// no tiene forma de saberla por su cuenta. Todo lo demás que ese mensaje
+// necesita (nombre, unidad, categoría, descripción, cantidad de adjuntos)
+// ya lo tiene el cliente en sus propios `values`, sin que la acción
+// necesite repetirlo acá.
 export type CreateTicketState =
   | { status: "idle" }
   | { status: "error"; message: string }
-  | { status: "success"; publicCode: string };
+  | {
+      status: "success";
+      publicCode: string;
+      priority: TicketMessagePriority;
+    };
 
 export const initialCreateTicketState: CreateTicketState = { status: "idle" };

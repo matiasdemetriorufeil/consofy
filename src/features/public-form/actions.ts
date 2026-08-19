@@ -318,7 +318,11 @@ export async function createTicketAction(
       attachmentsToInsert,
       data,
     );
-    return { status: "success", publicCode: created.publicCode };
+    return {
+      status: "success",
+      publicCode: created.publicCode,
+      priority: category.defaultPriority,
+    };
   } catch (error) {
     if (!isPhoneRaceError(error)) {
       return translateCreateTicketError(error);
@@ -341,7 +345,11 @@ export async function createTicketAction(
         attachmentsToInsert,
         data,
       );
-      return { status: "success", publicCode: created.publicCode };
+      return {
+        status: "success",
+        publicCode: created.publicCode,
+        priority: category.defaultPriority,
+      };
     } catch (retryError) {
       return translateCreateTicketError(retryError);
     }

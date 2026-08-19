@@ -1,9 +1,18 @@
 "use client";
 
 import { zodResolver } from "@hookform/resolvers/zod";
-import { type ChangeEvent, useEffect, useRef, useState } from "react";
+import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Controller, useForm } from "react-hook-form";
-import { File as FileIcon, RotateCw, X } from "lucide-react";
+import {
+  Check,
+  Copy,
+  CircleCheck,
+  File as FileIcon,
+  MessageCircle,
+  RotateCw,
+  X,
+} from "lucide-react";
+import { toast } from "sonner";
 
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -24,8 +33,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  formatTicketMessage,
+  type TicketMessageInput,
+  type TicketMessagePriority,
+} from "@/features/tickets/format-ticket-message";
 import { AR_WHATSAPP_HELP } from "@/lib/phone";
 import { cn } from "@/lib/utils";
+import { BuildWhatsAppUrlError, buildWhatsAppUrl } from "@/lib/whatsapp-url";
 
 import { createTicketAction } from "../actions";
 import type { PublicFormCategory } from "../queries";
@@ -71,6 +86,40 @@ const DEFAULT_VALUES: PublicTicketFormInput = {
 function draftKey(token: string): string {
   return `consofy:reclamo-borrador:${token}`;
 }
+
+// Paso 5.8: registro del ÚLTIMO reclamo que este dispositivo mandó para
+// ESTE edificio -- clave DISTINTA de draftKey, con un propósito distinto.
+// El borrador es "lo que estoy escribiendo todavía"; esto es "lo que ya
+// mandé de verdad". Se escribe apenas createTicketAction devuelve éxito, y
+// se lee ANTES que el borrador en el efecto de hidratación de más abajo:
+// si existe, la pantalla de confirmación se reconstruye directo desde acá
+// (recorriendo formatTicketMessage/buildWhatsAppUrl de nuevo con los mismos
+// datos), sin volver a mostrar el formulario -- así, recargar la página o
+// volver con el botón "atrás" del navegador después de enviar NUNCA
+// reabre un formulario vacío listo para mandar el MISMO reclamo dos veces.
+// La única forma de volver a ver el formulario para este token es
+// "Cargar otro reclamo" (ver startNewTicket), una acción explícita que
+// borra esta clave a propósito.
+function sentKey(token: string): string {
+  return `consofy:reclamo-enviado:${token}`;
+}
+
+// Todo lo que formatTicketMessage necesita para reconstruir el mensaje
+// exacto, MENOS buildingName (llega como prop, no hace falta duplicarlo
+// acá). `priority` viene del servidor (ver CreateTicketState en
+// ticket-schema.ts): es la única pieza que el cliente no puede reconstruir
+// por su cuenta, porque sale de categories.default_priority y el
+// formulario público nunca le pregunta la prioridad al vecino.
+type SentTicket = {
+  publicCode: string;
+  priority: TicketMessagePriority;
+  neighborFirstName: string;
+  neighborLastName: string | null;
+  unitLabel: string;
+  categoryName: string;
+  description: string;
+  attachmentsCount: number;
+};
 
 // Estado de cada adjunto (paso 5.4): "queued" -> "processing" (comprimiendo
 // o subiendo) -> "uploaded" | "error". `file` SOLO existe mientras dura
@@ -160,10 +209,14 @@ function StepProgress({ step }: { step: number }) {
 // no pierde nada, porque nunca se desmonta el estado.
 export function TicketForm({
   token,
+  buildingName,
+  adminWhatsappE164,
   categories,
   units,
 }: {
   token: string;
+  buildingName: string;
+  adminWhatsappE164: string;
   categories: PublicFormCategory[];
   units: PublicFormUnit[];
 }) {
@@ -172,8 +225,18 @@ export function TicketForm({
   // Un id por CARGA del formulario, no por reclamo -- ver
   // upload-attachment.ts para el porqué completo. Se genera acá mismo
   // (lazy initializer de useState, corre una sola vez) y el efecto de
-  // hidratación de abajo lo pisa si había uno guardado en el borrador.
-  const [formSessionId] = useState(() => crypto.randomUUID());
+  // hidratación de abajo lo pisa si había uno guardado en el borrador. Con
+  // setter propio (a diferencia de antes del paso 5.8) porque
+  // "Cargar otro reclamo" (ver startNewTicket) necesita uno NUEVO: el
+  // anterior sigue siendo válido para Storage, pero ya no tiene sentido
+  // seguir usándolo para un reclamo distinto.
+  const [formSessionId, setFormSessionId] = useState(() => crypto.randomUUID());
+  // Paso 5.8: el reclamo que este dispositivo ya mandó para este token, si
+  // lo mandó. No nulo == mostrar la pantalla de confirmación en vez del
+  // formulario, sin importar en qué `step` haya quedado el form -- ver
+  // sentKey() más arriba para el porqué completo.
+  const [sentTicket, setSentTicket] = useState<SentTicket | null>(null);
+  const [copied, setCopied] = useState(false);
   const [attachments, setAttachments] = useState<AttachmentItem[]>([]);
   const [attachmentsBusy, setAttachmentsBusy] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
@@ -218,6 +281,25 @@ export function TicketForm({
   // estaba a mitad de subir cuando se cerró el navegador no tiene forma de
   // reanudarse (el File en sí sí se pierde), así que se descarta sin más.
   useEffect(() => {
+    // Paso 5.8: un reclamo YA enviado desde este dispositivo manda por
+    // sobre cualquier borrador -- si existe, ni siquiera se mira
+    // draftKey(). Es la defensa contra recargar o volver atrás después de
+    // confirmar (ver sentKey() para el razonamiento completo): sin esto,
+    // el borrador (que la propia app siguió escribiendo hasta el momento
+    // de enviar, ver el efecto de autoguardado más abajo) reabriría el
+    // formulario ya completo, un toque de "Enviar reclamo" de distancia de
+    // mandar el mismo reclamo dos veces.
+    const sentRaw = window.localStorage.getItem(sentKey(token));
+    if (sentRaw) {
+      try {
+        setSentTicket(JSON.parse(sentRaw) as SentTicket);
+        setHydrated(true);
+        return;
+      } catch {
+        window.localStorage.removeItem(sentKey(token));
+      }
+    }
+
     const raw = window.localStorage.getItem(draftKey(token));
     if (raw) {
       try {
@@ -245,6 +327,20 @@ export function TicketForm({
     if (!hydrated) {
       return;
     }
+    if (sentTicket) {
+      // Paso 5.8: sin este chequeo, este mismo efecto RESUCITA el
+      // borrador que handleSubmit acaba de borrar -- encontrado en la
+      // práctica probando el paso 5.8: watch() devuelve un objeto values
+      // nuevo en cada render (no una referencia estable), así que este
+      // efecto igual se dispara de nuevo en el render que sigue a
+      // setSentTicket(), aunque los DATOS del formulario no hayan
+      // cambiado, y sin este `return` reescribiría el borrador justo
+      // después de que handleSubmit lo borró. Una vez que hay un reclamo
+      // enviado, no hay nada que autoguardar -- lo que quedaba del último
+      // envío se borra, en vez de reescribirse cada render.
+      window.localStorage.removeItem(draftKey(token));
+      return;
+    }
     const draft: Draft = {
       step,
       values,
@@ -252,7 +348,7 @@ export function TicketForm({
       attachments: attachments.map((item) => stripFile(item)),
     };
     window.localStorage.setItem(draftKey(token), JSON.stringify(draft));
-  }, [hydrated, step, values, token, formSessionId, attachments]);
+  }, [hydrated, sentTicket, step, values, token, formSessionId, attachments]);
 
   // Cola de subida: procesa UN adjunto a la vez, nunca en paralelo -- ver
   // compress-image.ts para el motivo (memoria en un celular viejo). Este
@@ -436,6 +532,28 @@ export function TicketForm({
         // mismo link más tarde, no tiene sentido reabrirlo a mitad de un
         // reclamo que ya quedó registrado.
         window.localStorage.removeItem(draftKey(token));
+
+        // Paso 5.8: graba el reclamo enviado ANTES de tocar el estado de
+        // React -- si algo llegara a fallar entre esto y el setState (no
+        // debería, pero es la misma disciplina de "guardar primero" que ya
+        // rige el resto del flujo), localStorage queda escrito igual, y la
+        // próxima carga de la página lo recupera solo. `selectedUnitLabel`
+        // nunca es null acá en la práctica: el servidor ya validó que el
+        // reclamo tiene una unidad real o texto libre (ver el CHECK
+        // documentado en CLAUDE.md > Mensaje al administrador) -- el `?? ""`
+        // es solo para satisfacer el tipo, no una rama que se espere usar.
+        const sent: SentTicket = {
+          publicCode: result.publicCode,
+          priority: result.priority,
+          neighborFirstName: values.firstName,
+          neighborLastName: values.lastName || null,
+          unitLabel: selectedUnitLabel ?? "",
+          categoryName: selectedCategory?.name ?? "",
+          description: values.description,
+          attachmentsCount: uploadedAttachments.length,
+        };
+        window.localStorage.setItem(sentKey(token), JSON.stringify(sent));
+        setSentTicket(sent);
       }
     } catch {
       // Corte de conexión real (o cualquier falla que no llegó a producir
@@ -460,6 +578,196 @@ export function TicketForm({
     : matchedUnit
       ? formatUnitLabel(matchedUnit)
       : null;
+
+  // Paso 5.8: el mensaje se arma del lado del CLIENTE, no lo devuelve
+  // createTicketAction -- formatTicketMessage (paso 5.6) es una función
+  // pura sin nada de "use server", así que no hay motivo para pagar un
+  // round-trip solo para formatear texto. Recalcula con useMemo, no en
+  // cada render: sentTicket/buildingName solo cambian en dos momentos (una
+  // confirmación real, o la restauración desde localStorage), no en cada
+  // tecla que se aprieta en el resto del formulario.
+  const confirmationMessage = useMemo(() => {
+    if (!sentTicket) {
+      return null;
+    }
+    const input: TicketMessageInput = {
+      buildingName,
+      neighborFirstName: sentTicket.neighborFirstName,
+      neighborLastName: sentTicket.neighborLastName,
+      unitLabel: sentTicket.unitLabel,
+      categoryName: sentTicket.categoryName,
+      priority: sentTicket.priority,
+      description: sentTicket.description,
+      attachmentsCount: sentTicket.attachmentsCount,
+      publicCode: sentTicket.publicCode,
+    };
+    return formatTicketMessage(input);
+  }, [sentTicket, buildingName]);
+
+  // `{ ok: false }` cubre el caso documentado en CLAUDE.md > Link de
+  // WhatsApp (paso 5.7): buildWhatsAppUrl tira BuildWhatsAppUrlError si
+  // adminWhatsappE164 llega vacío o corrupto -- no debería pasar nunca en
+  // la práctica (NOT NULL + Zod desde el paso 4.1), pero esta pantalla no
+  // asume que esa garantía se cumplió para toda fila real (ver el
+  // razonamiento completo en el reporte de 5.7). Si pasa, la pantalla
+  // sigue mostrando que el reclamo quedó registrado -- eso ya es cierto,
+  // pasó antes que esto -- y esconde SOLO el botón de WhatsApp, con un
+  // mensaje honesto en su lugar. Cualquier OTRO error no se traga: si
+  // buildWhatsAppUrl tirara algo que no sea BuildWhatsAppUrlError, es un
+  // bug real, no un dato mal cargado, y tiene que romper visiblemente en
+  // vez de mostrar una pantalla a medias sin explicación.
+  const whatsappLink = useMemo(() => {
+    if (!confirmationMessage) {
+      return null;
+    }
+    try {
+      return {
+        ok: true as const,
+        url: buildWhatsAppUrl(adminWhatsappE164, confirmationMessage),
+      };
+    } catch (error) {
+      if (error instanceof BuildWhatsAppUrlError) {
+        return { ok: false as const };
+      }
+      throw error;
+    }
+  }, [confirmationMessage, adminWhatsappE164]);
+
+  // Copiar al portapapeles en un celular (paso 5.8, "probalo") -- dos
+  // caminos reales, no uno solo:
+  // 1. navigator.clipboard.writeText(), la API moderna -- exige contexto
+  //    seguro (HTTPS o localhost) y, en algunos navegadores, que el
+  //    llamado cuelgue directo de un gesto del usuario. Anda bien en
+  //    Chrome/Android (probado en el reporte).
+  // 2. document.execCommand("copy") sobre un <textarea> oculto -- API
+  //    vieja y "deprecada", pero sigue siendo el fallback real para
+  //    contextos sin Clipboard API (o sin HTTPS). Se prueba SOLO si (1) no
+  //    está disponible, nunca como primera opción.
+  // Si las dos fallan, no se finge que funcionó: mensaje de error honesto,
+  // y el texto sigue disponible para seleccionar a mano (ver el botón de
+  // WhatsApp Web más abajo, que muestra el mismo mensaje).
+  async function handleCopyMessage() {
+    if (!confirmationMessage) {
+      return;
+    }
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(confirmationMessage);
+      } else {
+        const textarea = document.createElement("textarea");
+        textarea.value = confirmationMessage;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+      }
+      setCopied(true);
+      toast.success("Mensaje copiado.");
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast.error(
+        "No pudimos copiar el mensaje. Mantené el dedo apretado sobre el texto para copiarlo a mano.",
+      );
+    }
+  }
+
+  // "¿Qué hace el vecino después?" (paso 5.8) -- vuelve a un formulario
+  // limpio para ESTE mismo edificio, no a otra pantalla. Borra las DOS
+  // claves de localStorage (enviado y borrador -- un borrador viejo de
+  // ANTES de este reclamo no debería reaparecer) y reinicia todo el
+  // estado local a mano, porque react-hook-form no se remonta solo. Un
+  // formSessionId nuevo: el anterior ya cumplió su función (Storage sigue
+  // teniendo esos archivos bajo su prefijo, referenciados por el reclamo
+  // ya creado), un reclamo distinto necesita su propio namespace de
+  // adjuntos.
+  function startNewTicket() {
+    window.localStorage.removeItem(sentKey(token));
+    window.localStorage.removeItem(draftKey(token));
+    setSentTicket(null);
+    setSubmitState(initialCreateTicketState);
+    reset(DEFAULT_VALUES);
+    if (units.length === 0) {
+      setValue("unitNotListed", true);
+    }
+    setAttachments([]);
+    setAttachmentError(null);
+    setFormSessionId(crypto.randomUUID());
+    setStep(1);
+  }
+
+  if (sentTicket) {
+    return (
+      <Card className="w-full">
+        <CardContent className="flex flex-col gap-5">
+          <div className="flex flex-col items-center gap-2 py-2 text-center">
+            <CircleCheck className="text-primary size-10" />
+            <h2 className="text-ink font-display text-lg font-semibold">
+              Listo, tu reclamo ya quedó registrado
+            </h2>
+            <p className="text-ink-muted text-sm">
+              Guardá este código para hacer el seguimiento con tu
+              administración:
+            </p>
+            <p className="text-ink font-mono text-2xl font-semibold">
+              {sentTicket.publicCode}
+            </p>
+            <a
+              href={`/s/${sentTicket.publicCode}`}
+              className="text-primary text-sm underline underline-offset-4"
+            >
+              Ver el estado de tu reclamo
+            </a>
+          </div>
+
+          <div className="border-border bg-muted/40 flex flex-col gap-3 rounded-lg border p-4">
+            <p className="text-ink text-sm">
+              {whatsappLink?.ok
+                ? "Para que tu administración se entere hoy, avisale por WhatsApp. Si no lo hacés, igual va a ver tu reclamo, pero recién la próxima vez que entre al sistema."
+                : "Tu reclamo ya quedó registrado igual. No pudimos preparar el aviso automático por WhatsApp -- copiá el mensaje y mandalo vos, o comunicate directo con tu administración."}
+            </p>
+
+            {whatsappLink?.ok && (
+              <Button asChild size="lg" className="w-full">
+                <a
+                  href={whatsappLink.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  <MessageCircle />
+                  Enviar por WhatsApp
+                </a>
+              </Button>
+            )}
+
+            <Button
+              type="button"
+              variant="outline"
+              className="w-full"
+              onClick={handleCopyMessage}
+            >
+              {copied ? <Check /> : <Copy />}
+              {copied ? "Mensaje copiado" : "Copiar mensaje"}
+            </Button>
+            <p className="text-ink-muted text-xs">
+              Por si usás WhatsApp Web, o si el botón no te abrió la app.
+            </p>
+          </div>
+
+          <Button
+            type="button"
+            variant="ghost"
+            className="w-full"
+            onClick={startNewTicket}
+          >
+            Cargar otro reclamo
+          </Button>
+        </CardContent>
+      </Card>
+    );
+  }
 
   return (
     <Card className="w-full">
@@ -688,22 +996,7 @@ export function TicketForm({
               </>
             )}
 
-            {step === 4 && submitState.status === "success" && (
-              <div className="flex flex-col items-center gap-3 py-6 text-center">
-                <h3 className="text-ink font-display text-lg font-semibold">
-                  Listo, tu reclamo quedó registrado
-                </h3>
-                <p className="text-ink-muted text-sm">
-                  Guardá este código para hacer el seguimiento con tu
-                  administración:
-                </p>
-                <p className="text-ink font-mono text-2xl font-semibold">
-                  {submitState.publicCode}
-                </p>
-              </div>
-            )}
-
-            {step === 4 && submitState.status !== "success" && (
+            {step === 4 && (
               <>
                 <dl className="text-sm">
                   <div className="border-border flex justify-between gap-4 border-b py-2">
