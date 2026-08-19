@@ -42,7 +42,10 @@ import { AR_WHATSAPP_HELP } from "@/lib/phone";
 import { cn } from "@/lib/utils";
 import { BuildWhatsAppUrlError, buildWhatsAppUrl } from "@/lib/whatsapp-url";
 
-import { createTicketAction } from "../actions";
+import {
+  createTicketAction,
+  registerWhatsappHandoffOpenedAction,
+} from "../actions";
 import type { PublicFormCategory } from "../queries";
 import {
   IDENTIFICATION_STEP_FIELDS,
@@ -646,6 +649,26 @@ export function TicketForm({
   // Si las dos fallan, no se finge que funcionó: mensaje de error honesto,
   // y el texto sigue disponible para seleccionar a mano (ver el botón de
   // WhatsApp Web más abajo, que muestra el mismo mensaje).
+  // Paso 5.9: deja constancia de que se tocó el botón, sin demorar ni
+  // arriesgar que WhatsApp deje de abrirse. El <a> de más abajo YA tiene
+  // su href resuelto (whatsappLink.url, calculado en el useMemo de arriba)
+  // -- el navegador abre esa navegación por su cuenta apenas ocurre el
+  // click, sin esperar a este handler. Este handler NO llama
+  // preventDefault() en ningún momento, y llama a la Server Action SIN
+  // await ("fire and forget"): si esperara la respuesta acá, la apertura
+  // de WhatsApp quedaría atada a un round-trip al servidor -- exactamente
+  // lo que el enunciado pide evitar (algunos navegadores además bloquean
+  // una navegación/popup que no sea la reacción DIRECTA y sincrónica a un
+  // toque, así que ni siquiera sería seguro esperar). El `.catch()` sin
+  // acción es a propósito: si el registro falla (red, servidor, lo que
+  // sea), no hay nada que mostrarle al vecino sobre un evento de
+  // analítica que ni sabe que existe, y no hay ningún reintento -- ver
+  // registerWhatsappHandoffOpenedAction en actions.ts para el mismo
+  // razonamiento del lado del servidor.
+  function handleWhatsAppClick(publicCode: string) {
+    void registerWhatsappHandoffOpenedAction(token, publicCode).catch(() => {});
+  }
+
   async function handleCopyMessage() {
     if (!confirmationMessage) {
       return;
@@ -735,6 +758,7 @@ export function TicketForm({
                   href={whatsappLink.url}
                   target="_blank"
                   rel="noopener noreferrer"
+                  onClick={() => handleWhatsAppClick(sentTicket.publicCode)}
                 >
                   <MessageCircle />
                   Enviar por WhatsApp

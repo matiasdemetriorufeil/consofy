@@ -1,6 +1,7 @@
 "use server";
 
 import { and, eq, isNotNull } from "drizzle-orm";
+import { z } from "zod";
 
 import { db } from "@/db";
 import { people, ticketAttachments, ticketEvents, tickets } from "@/db/schema";
@@ -354,4 +355,123 @@ export async function createTicketAction(
       return translateCreateTicketError(retryError);
     }
   }
+}
+
+// Deja constancia de que el vecino TOCÓ el botón "Enviar por WhatsApp"
+// (paso 5.9) -- NO de que el mensaje se haya entregado, ni siquiera de que
+// se haya enviado. Riesgo R8 del plan: entre tocar el botón y que el
+// mensaje llegue de verdad al administrador pasan varios pasos que esta
+// acción no puede ver ni controlar -- WhatsApp (la app o WhatsApp Web)
+// tiene que abrir con el texto precargado, el vecino tiene que decidir
+// apretar "Enviar" ahí adentro (puede arrepentirse, puede editar el texto
+// hasta vaciarlo, puede cerrar la app sin mandar nada), y recién si manda,
+// WhatsApp tiene que entregarlo. Nada de eso es observable desde acá: un
+// link `wa.me` no tiene webhook de "se mandó" ni de "se entregó" (eso solo
+// existe del lado de la Cloud API de WhatsApp Business, que este flujo de
+// entrada no usa a propósito -- ver CLAUDE.md > Reglas de WhatsApp). Por
+// eso el nombre del evento es "se ABRIÓ el handoff", no "se mandó el
+// aviso": es literalmente lo único que esta acción puede afirmar con
+// certeza.
+export async function registerWhatsappHandoffOpenedAction(
+  token: string,
+  publicCode: string,
+): Promise<void> {
+  // Nunca debe demorar la apertura de WhatsApp -- ver el comentario en
+  // TicketForm sobre por qué se llama sin esperar la respuesta (fire and
+  // forget) desde un <a href> real, no un window.open() disparado después
+  // de un await. Acá adentro, en cambio, si algo no cierra (token
+  // inválido, código que no existe, lo que sea) simplemente no se escribe
+  // nada -- no hay ningún error que mostrarle al vecino sobre un evento de
+  // analítica que ni sabe que existe, y el cliente que llama esto ya
+  // descarta cualquier falla sin mirarla (ver más abajo).
+  const parsedToken = z.uuid().safeParse(token);
+  const parsedCode = z.string().min(1).max(50).safeParse(publicCode);
+  if (!parsedToken.success || !parsedCode.success) {
+    return;
+  }
+
+  // Mismo patrón que createTicketAction: el `token` es la única credencial
+  // de este flujo, la organización sale de ACÁ, nunca de nada que el
+  // cliente mande. `public_code` es único por ORGANIZACIÓN, no global (ver
+  // el comentario del índice en src/db/schema/tickets.ts) -- sin resolver
+  // la organización desde el token primero, un mismo código de otra
+  // organización podría escribir un evento sobre un reclamo ajeno.
+  const building = await getBuildingByPublicToken(parsedToken.data);
+  if (!building) {
+    return;
+  }
+
+  // Filtra por ORGANIZACIÓN **Y** EDIFICIO, no solo por organización --
+  // `public_code` es único por organización, no por edificio (ver el
+  // comentario del índice en src/db/schema/tickets.ts), así que un código
+  // real de OTRO edificio de la MISMA organización (ej. el token de Torre
+  // Central junto con un código real de Los Álamos) igual matchearía si
+  // acá solo se filtrara por organización -- un token de un edificio no
+  // tiene por qué poder escribir eventos sobre el reclamo de otro
+  // edificio, aunque compartan organización.
+  //
+  // Defensa acotada, no anti-abuso completo (eso es un paso posterior, ver
+  // el reporte de este paso para el razonamiento): quien conoce el token
+  // de un edificio (el mismo que ya usó para cargar el formulario) podría
+  // en teoría probar códigos de OTROS reclamos del MISMO edificio y
+  // escribirles eventos falsos. El daño de eso es acotado a propósito por
+  // lo que esta acción hace: un evento de más en una línea de tiempo, sin
+  // payload, sin tocar ningún dato del reclamo ni de la persona -- no
+  // crea, no borra, no cambia estado. Igual queda acotado a UN reclamo por
+  // llamada (nunca a una lista ni a un rango): siempre hace falta un
+  // public_code real y existente EN ESE edificio para que escriba algo.
+  const [ticket] = await db
+    .select({ id: tickets.id, personId: tickets.personId })
+    .from(tickets)
+    .where(
+      and(
+        eq(tickets.organizationId, building.organizationId),
+        eq(tickets.buildingId, building.id),
+        eq(tickets.publicCode, parsedCode.data),
+      ),
+    );
+  if (!ticket) {
+    return;
+  }
+
+  // actorLabel reusa el nombre del vecino tal como está guardado en
+  // people (mismo dato ya escrito en el evento "created" del paso 5.5, no
+  // uno nuevo) -- consistente con el resto de la línea de tiempo del
+  // reclamo. Sin persona vinculada (no debería pasar para un reclamo del
+  // formulario público, pero esta acción tampoco lo asume), cae a un
+  // rótulo genérico en vez de fallar.
+  let actorLabel = "Vecino";
+  if (ticket.personId) {
+    const [person] = await db
+      .select({ firstName: people.firstName, lastName: people.lastName })
+      .from(people)
+      .where(eq(people.id, ticket.personId));
+    if (person) {
+      actorLabel =
+        [person.firstName, person.lastName].filter(Boolean).join(" ") ||
+        actorLabel;
+    }
+  }
+
+  // Un evento por CADA toque del botón, no uno solo por reclamo -- a
+  // propósito. El vecino puede tocarlo dos veces (se arrepintió, cerró
+  // WhatsApp sin mandar, lo vuelve a intentar) o volver más tarde desde la
+  // pantalla reconstruida (paso 5.8, `sentKey`) y tocarlo de nuevo. Cada
+  // toque es un hecho real distinto -- `ticket_events` es un log
+  // append-only (ver src/db/schema/ticket-events.ts), no un flag "ya
+  // avisó sí/no": dos eventos con timestamps distintos le dicen al
+  // administrador algo que un booleano no puede ("lo intentó dos veces,
+  // la primera vez algo falló o se arrepintió"). Sin payload (el default
+  // `{}` de la columna alcanza): no hay ningún dato adicional que valga la
+  // pena guardar acá sin caer en "guardar de más" -- ni IP, ni
+  // user-agent, ni nada de tracking (mismo criterio ya fijado en el paso
+  // 5.5 para Ley 25.326/riesgo R7). El tipo de evento, el actor y el
+  // momento ya cuentan toda la historia que este paso necesita contar.
+  await db.insert(ticketEvents).values({
+    organizationId: building.organizationId,
+    ticketId: ticket.id,
+    type: "whatsapp_handoff_opened",
+    actorType: "neighbor",
+    actorLabel,
+  });
 }

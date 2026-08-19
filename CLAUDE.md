@@ -917,6 +917,88 @@ con el dominio real. Va a devolver 404 hasta que el paso 5.11 exista --
 mismo criterio que el paso 5.6 con el link de adjuntos: construir la
 forma que va a tener ahora, dejarlo dicho acá.
 
+## Evento de handoff (paso 5.9)
+
+`registerWhatsappHandoffOpenedAction` (`src/features/public-form/
+actions.ts`) deja constancia, en `ticket_events`, de que el vecino tocó
+"Enviar por WhatsApp" -- tipo `whatsapp_handoff_opened` (el enum de
+`ticket_event_type` ya lo tenía desde la migración `0006`, sin usar hasta
+ahora, no hizo falta ninguna migración nueva para este paso).
+
+**Qué NO confirma este evento -- riesgo R8 del plan, documentado en el
+código, no solo acá:** ni que el mensaje se mandó, ni que llegó. Entre el
+click y que el administrador reciba algo pasan pasos que esta acción no
+puede ver: WhatsApp tiene que abrir con el texto precargado, el vecino
+tiene que decidir apretar "Enviar" ADENTRO de WhatsApp (puede
+arrepentirse, editar el texto hasta vaciarlo, cerrar la app sin mandar
+nada), y recién ahí WhatsApp tiene que entregarlo. Un link `wa.me` no
+tiene webhook de entrega -- eso solo existe del lado de la Cloud API de
+WhatsApp Business, que el flujo de entrada no usa a propósito (ver
+CLAUDE.md > Reglas de WhatsApp). Por eso el nombre es "se ABRIÓ el
+handoff", no "se mandó el aviso": es lo único que se puede afirmar con
+certeza.
+
+**Sin demorar la apertura de WhatsApp -- fire and forget, no
+`window.open()` después de un `await`:** el `<a href>` del botón (paso
+5.8) ya tiene su URL resuelta ANTES del click (calculada en un `useMemo`);
+el navegador la abre por su cuenta en cuanto ocurre el click nativo, sin
+esperar a nada. El `onClick` del botón llama a la Server Action SIN
+`await` y sin `preventDefault()` en ningún momento -- si esperara la
+respuesta ahí, la apertura de WhatsApp quedaría atada a un round-trip al
+servidor, exactamente lo que el enunciado pide evitar (algunos
+navegadores además bloquean una navegación que no sea la reacción
+DIRECTA y sincrónica a un toque -- ni siquiera sería seguro esperar).
+
+**Si el registro falla, WhatsApp se abre igual:** el `.catch(() => {})`
+del lado del cliente descarta cualquier error sin mostrar nada -- no hay
+qué explicarle al vecino sobre un evento de analítica que ni sabe que
+existe, y no hay reintento. Probado de verdad, no asumido: interceptando
+y abortando la request de la Server Action con Playwright, el botón
+igual abrió una pestaña nueva hacia `wa.me`, la pantalla siguió intacta y
+sin ningún error visible -- y, del lado de la base, el ticket de esa
+prueba quedó SIN el evento de handoff (solo `created`), confirmando que
+la falla no se disimula ni se finge.
+
+**Un evento por cada toque del botón, no uno solo por reclamo:** el
+vecino puede tocarlo dos veces (se arrepintió, cerró WhatsApp sin mandar,
+lo reintenta) o volver más tarde desde la pantalla reconstruida (paso
+5.8, `sentKey`) y tocarlo de nuevo. `ticket_events` es un log
+append-only, no un flag "ya avisó sí/no" -- cada toque es un hecho real
+distinto, y dos eventos con timestamps distintos le dicen al
+administrador algo que un booleano no puede. Probado con dos clicks
+reales seguidos (dos eventos, timestamps distintos) y con un click desde
+la pantalla reconstruida tras un `reload()` (tercer evento, mismos
+datos).
+
+**Payload vacío, a propósito:** el default `{}` de la columna alcanza --
+tipo, actor y momento ya cuentan toda la historia que hace falta. Ningún
+dato de tracking nuevo (ni IP, ni user-agent), mismo criterio ya fijado
+en el paso 5.5 para Ley 25.326/riesgo R7. `actorLabel` reusa el nombre
+del vecino tal como quedó guardado en `people` (el mismo dato que ya usa
+el evento `created`, no uno nuevo) -- consistente con el resto de la
+línea de tiempo del reclamo.
+
+**Acción pública, sin sesión -- análisis de seguridad:** mismo patrón que
+`createTicketAction` (`token` resuelve la organización, nunca se confía
+en lo que mande el cliente). Filtra por organización **Y** edificio, no
+solo por organización -- encontrado en la práctica revisando este mismo
+paso: `public_code` es único por organización, no por edificio (ver el
+índice en `src/db/schema/tickets.ts`), así que filtrar solo por
+organización habría dejado que el token de UN edificio escribiera
+eventos sobre el reclamo de OTRO edificio de la misma organización.
+Probado con un ataque real (ruta de diagnóstico temporal, borrada
+después): el token de Torre Central junto con un código real de Los
+Álamos (mismo organización, otro edificio) no escribió nada; un código
+inventado, un token inexistente y un token con formato inválido tampoco;
+un código real de Torre Central con su propio token sí escribió el
+evento (control positivo). Defensa acotada, no anti-abuso completo (eso
+es un paso posterior): quien conoce el token de un edificio podría en
+teoría probar códigos de OTROS reclamos del MISMO edificio y escribirles
+eventos falsos -- el daño de eso queda acotado por lo que esta acción
+hace (un evento de más, sin payload, que no crea ni borra ni cambia
+estado de nada) y por estar siempre acotada a UN reclamo real y existente
+por llamada, nunca a una lista ni a un rango.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
@@ -1028,12 +1110,58 @@ trabaja. Ninguna de las tres es negociable:
 
 ## Reglas de WhatsApp
 
-- Todo lo relacionado con mensajería pasa por la interfaz `MessagingProvider`.
-  Ningún componente de UI ni de dominio importa nada de WhatsApp directamente.
+Dos flujos de WhatsApp en este proyecto, con necesidades de abstracción
+DISTINTAS -- confundirlos fue un error real de esta misma sección (ver
+más abajo, "por qué no hay una sola regla para los dos").
+
+**Flujo de ENTRADA (el vecino le avisa a su administración -- pasos
+5.6/5.7/5.8):** el vecino manda el mensaje desde SU PROPIA cuenta de
+WhatsApp personal, gratis, con un link `wa.me` -- esa es la decisión
+central del producto (ver CLAUDE.md > Qué es este proyecto), no un detalle
+de implementación provisorio. No hay ningún proveedor que cambiar acá: no
+existe un mundo en el que este flujo pase a usar la Cloud API de
+WhatsApp (eso costaría dinero por mensaje, y requeriría que el vecino le
+escriba a un número de negocio en vez de que la propia administración
+reciba el aviso en su WhatsApp de siempre). Por eso este flujo **no
+tiene, ni necesita, una interfaz `MessagingProvider`**: está aislado en
+dos módulos chicos y sin estado --
+`src/features/tickets/format-ticket-message.ts` (arma el texto, paso 5.6)
+y `src/lib/whatsapp-url.ts` (arma el link `wa.me`, paso 5.7) -- que ya
+cumplen el objetivo real del riesgo R9 del plan ("un solo lugar que tocar
+si Meta cambia el comportamiento de los links `wa.me`"): ese lugar es
+`whatsapp-url.ts`, punto. Construir una interfaz formal con un solo
+implementor real, para un flujo que no va a cambiar de proveedor nunca,
+sería la sobre-ingeniería que este proyecto evita a propósito (ver
+CLAUDE.md > Qué NO hacer). `TicketForm` (`src/features/public-form/
+components/ticket-form.tsx`) importa `buildWhatsAppUrl` DIRECTO -- no es
+una violación de una regla vieja, es la forma correcta de este flujo.
+
 - Los links `wa.me` solo transportan TEXTO. Los adjuntos nunca viajan en el
   mensaje: se referencian con un link a la plataforma.
 - El reclamo se guarda en la base ANTES de abrir WhatsApp, nunca después. No
   podemos confirmar que el vecino haya apretado enviar.
+
+**Flujo de SALIDA (la administración le avisa a los vecinos -- etapa 8,
+comunicados masivos):** acá SÍ hay un proveedor real que puede cambiar --
+el plan prevé arrancar con links manuales (parecido al flujo de entrada,
+pero para muchos destinatarios a la vez) y migrar a la Cloud API de
+WhatsApp Business en la etapa 13, cuando el volumen de mensajes lo
+justifique. Ese es el escenario para el que una interfaz
+`MessagingProvider` sí tiene sentido: dos implementaciones reales
+(manual, Cloud API) detrás de un mismo contrato, para que la etapa 13 no
+tenga que reescribir la UI de comunicados. `MessagingProvider` sigue
+siendo el diseño previsto para esa etapa -- todavía no existe como
+código, porque la etapa 8 todavía no llegó.
+
+**Por qué no hay una sola regla para los dos:** la versión anterior de
+esta sección decía "todo lo relacionado con mensajería pasa por
+`MessagingProvider`, ningún componente de UI la importa directo" -- una
+regla escrita pensando solo en el flujo de salida (donde de verdad hace
+falta poder cambiar de proveedor), aplicada sin querer también al de
+entrada (donde no hace falta, y nunca va a hacer falta). Encontrado en la
+práctica en el paso 5.9: `TicketForm` ya importaba `buildWhatsAppUrl`
+directo desde el 5.8, en aparente contradicción con la regla vieja. La
+regla era la que estaba mal, no el código.
 
 ## Formato del mensaje al administrador
 
@@ -1468,6 +1596,40 @@ NOTHING`) queda disponible, no implementada, para archivos mucho más
   abrir la ficha de la persona aunque no tenga ocupación? ¿"Personas" del
   panel necesita un listado aparte (o el mismo, sin el INNER JOIN) para
   estos casos?
+
+- **`wa.me` le rompe TODOS los emojis del mensaje al redirigir -- bloqueante
+  para el diseño del paso 5.6, encontrado probando el paso 5.9, no
+  arreglado en este paso porque no fue lo que se pidió.** Confirmado con
+  `curl` directo contra `wa.me` (sin el navegador ni la app de por medio,
+  para descartar que fuera un artefacto de Playwright): `wa.me` redirige
+  (302) a `api.whatsapp.com/send/`, y en ese redirect, CUALQUIER emoji del
+  parámetro `text` -- no solo los astrales de 4 bytes como 🏢, también uno
+  simple de 3 bytes como ❤ -- se convierte en un único caracter de
+  reemplazo (`%EF%BF%BD`, U+FFFD), sin importar cuántos bytes UTF-8
+  ocupara el emoji original. El resto del texto (letras, tildes, `á`/`í`
+  incluidas, signos de puntuación) pasa intacto por el mismo redirect --
+  el problema es específico de los emojis, no de todo lo no-ASCII.
+  Reproducido de forma consistente con varios emojis distintos y con
+  mensajes reales generados por `formatTicketMessage`.
+
+  Consecuencia práctica: el mensaje precargado que el administrador ve de
+  verdad en WhatsApp probablemente muestre "�" en vez de cada emoji de
+  `CLAUDE.md > Formato del mensaje al administrador` (🏢👤🚪🔧⚠️📝📷🔖) --
+  no se pudo confirmar el último paso (abrir la app de WhatsApp real, o
+  loguearse en WhatsApp Web) sin una cuenta real, pero el `Location` del
+  redirect ya llega corrompido antes de que la app tenga la chance de
+  mostrar nada. Esto no es un bug de `formatTicketMessage` (paso 5.6) ni
+  de `buildWhatsAppUrl` (paso 5.7): los dos codifican el texto
+  correctamente (confirmado con tests unitarios); es un comportamiento del
+  lado de servidor de `wa.me`, fuera del control de este proyecto.
+
+  Falta decidir (no una decisión de código sola): si vale la pena sacar
+  los emojis del mensaje que viaja en la URL (posiblemente usando
+  `api.whatsapp.com/send` directo en vez de `wa.me`, para ver si evita el
+  redirect que corrompe el texto -- sin confirmar todavía si eso alcanza),
+  mantenerlos a pesar del riesgo (el resto del mensaje se lee bien igual),
+  o alguna otra estrategia. Ninguna se implementó todavía -- corresponde
+  decidirlo antes de tocar el código de 5.6/5.7, no dentro del paso 5.9.
 
 ## Qué NO hacer
 
