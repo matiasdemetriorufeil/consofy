@@ -3,6 +3,7 @@ import "server-only";
 import { sql } from "drizzle-orm";
 
 import { db } from "@/db";
+import { createAdminClient } from "@/lib/supabase/admin";
 
 import { TICKET_ATTACHMENTS_BUCKET } from "./ticket-schema";
 
@@ -47,4 +48,62 @@ export async function getExistingAttachmentPaths(
   `);
 
   return new Set(Array.from(rows).map((row) => row.name));
+}
+
+// "Corta duración" (paso 5.10, CLAUDE.md > Reglas de seguridad -- no
+// negociable) medida como una hora, no minutos: es una URL para que un
+// administrador MIRE fotos en una pantalla, tal vez se distraiga y
+// vuelva, no un link de descarga de un solo uso. Una hora es corta frente
+// a lo que se está reemplazando (un link permanente sin vencimiento) y
+// larga frente a lo que hace falta para ver una galería de hasta 5 fotos
+// sin que se corten a mitad de sesión. Si en algún momento hace falta
+// ajustarla, es UN número en un solo lugar.
+const SIGNED_URL_EXPIRES_IN_SECONDS = 60 * 60;
+
+// Única forma de generar una URL que sirva el CONTENIDO de un archivo del
+// bucket privado `ticket-attachments` -- a diferencia de
+// getExistingAttachmentPaths() (arriba, una SELECT de metadata contra
+// storage.objects, que el rol `postgres` de la app ya puede leer sin
+// nada especial), esto es una operación real del motor de Storage
+// (firmar una URL), no una fila de una tabla -- necesita el SDK de
+// Supabase con la service-role key (`createAdminClient`,
+// src/lib/supabase/admin.ts), que evade las policies del bucket (sin
+// SELECT para `anon`/`authenticated`, ver la migración 0019) igual que
+// el rol `postgres` evade RLS en las tablas. Es EXACTAMENTE el uso que
+// el paso 5.4 ya anticipó y documentó en CLAUDE.md ("una futura pantalla
+// de administrador... va a pedir una URL firmada generada del lado del
+// servidor con la service-role key").
+//
+// createSignedUrls() (plural, un solo request para varios paths) en vez
+// de un createSignedUrl() por archivo en un loop: menos round-trips a la
+// API de Storage para una galería de varias fotos.
+//
+// Devuelve un Map -- silenciosamente SIN entrada para cualquier path que
+// falle (archivo borrado del bucket por fuera de la app, por ejemplo):
+// el caller (la página de la galería) decide qué hacer con un adjunto sin
+// URL en vez de que esta función tire abajo toda la galería por un solo
+// archivo problemático.
+export async function createSignedAttachmentUrls(
+  paths: string[],
+): Promise<Map<string, string>> {
+  if (paths.length === 0) {
+    return new Map();
+  }
+
+  const supabase = createAdminClient();
+  const { data, error } = await supabase.storage
+    .from(TICKET_ATTACHMENTS_BUCKET)
+    .createSignedUrls(paths, SIGNED_URL_EXPIRES_IN_SECONDS);
+
+  if (error) {
+    throw error;
+  }
+
+  const urls = new Map<string, string>();
+  for (const item of data) {
+    if (item.path && item.signedUrl && !item.error) {
+      urls.set(item.path, item.signedUrl);
+    }
+  }
+  return urls;
 }

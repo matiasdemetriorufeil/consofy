@@ -4,9 +4,12 @@ import { z } from "zod";
 
 // REGLA: una variable se agrega a este esquema en el mismo paso en que algún
 // código empieza a leerla, nunca antes. Hoy lo leen src/db/index.ts
-// (DATABASE_URL) y src/features/buildings/public-link.ts
-// (NEXT_PUBLIC_APP_URL, paso 4.6). No agregues SUPABASE_SERVICE_ROLE_KEY ni
-// MESSAGING_PROVIDER hasta que algo las importe de verdad — ver PASO 2.1b en
+// (DATABASE_URL), src/features/buildings/public-link.ts
+// (NEXT_PUBLIC_APP_URL, paso 4.6) y src/lib/supabase/admin.ts
+// (SUPABASE_SERVICE_ROLE_KEY, paso 5.10: la única forma de generar URLs
+// firmadas para el bucket privado de adjuntos, ver CLAUDE.md > Reglas de
+// entorno sobre por qué esta clave se usa lo menos posible). No agregues
+// MESSAGING_PROVIDER hasta que algo la importe de verdad — ver PASO 2.1b en
 // el historial: validar variables que nada consume obliga a rellenarlas con
 // dummies para poder probar cualquier otra cosa, y eso invalida la
 // validación.
@@ -33,6 +36,7 @@ import { z } from "zod";
 const schema = z.object({
   DATABASE_URL: z.url(),
   NEXT_PUBLIC_APP_URL: z.url(),
+  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
 });
 
 function parseEnv() {
@@ -47,6 +51,7 @@ function parseEnv() {
   const parsed = schema.safeParse({
     DATABASE_URL: process.env.DATABASE_URL,
     NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL,
+    SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
   });
 
   if (!parsed.success) {

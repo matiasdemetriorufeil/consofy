@@ -1,14 +1,12 @@
 import { normalizePhoneInput } from "./phone";
 
-// Constructor del link `wa.me` (paso 5.7) -- AISLADO A PROPÓSITO. El plan lo
-// marca como riesgo R9: si Meta cambia el dominio, el formato del número o
-// el nombre del parámetro de texto, ESTE es el único archivo del proyecto
-// que hay que tocar. Por eso el dominio/template de la URL vive en UNA sola
-// constante acá abajo (WA_ME_BASE_URL), no repetido en ningún componente ni
-// Server Action -- ningún otro lugar del código arma un link `wa.me` a
-// mano (ver CLAUDE.md > Reglas de WhatsApp: "todo lo relacionado con
-// mensajería pasa por la interfaz MessagingProvider", que en la práctica
-// hoy es este módulo, hasta que exista esa interfaz).
+// Constructor del link de WhatsApp (paso 5.7) -- AISLADO A PROPÓSITO. El
+// plan lo marca como riesgo R9: si Meta cambia el dominio, el formato del
+// número o el nombre del parámetro de texto, ESTE es el único archivo del
+// proyecto que hay que tocar. Por eso el dominio/template de la URL vive en
+// UNA sola constante acá abajo (WA_LINK_BASE_URL), no repetido en ningún
+// componente ni Server Action -- ningún otro lugar del código arma un link
+// de WhatsApp a mano (ver CLAUDE.md > Reglas de WhatsApp).
 //
 // Vive en src/lib/, no en src/features/tickets/: a diferencia de
 // formatTicketMessage() (paso 5.6, que sabe qué es un "ticket"), esta
@@ -16,37 +14,48 @@ import { normalizePhoneInput } from "./phone";
 // armado, nada más. Mismo criterio que separa utilidades transversales de
 // lógica de negocio (ver CLAUDE.md > Estructura de carpetas).
 
-// --- Dominio y formato, verificados contra la documentación oficial ---
+// --- Dominio: api.whatsapp.com/send, NO wa.me -- cambiado en el paso
+// 5.9b tras encontrar un bug real de wa.me, medido con curl, no con el
+// navegador (ver CLAUDE.md > Bug de emojis en wa.me, paso 5.9b, para el
+// diagnóstico completo con salidas literales) ---
 //
-// Fuente: WhatsApp Help Center, "How to use click to chat"
-// (faq.whatsapp.com/5913398998672934 -- la página sirve su contenido por
-// JS y no pude traer el HTML crudo con las herramientas de este entorno,
-// así que la cito tal como la devolvió la búsqueda, indexada directo desde
-// ese dominio, y la contrasté con varias guías de terceros que reproducen
-// la misma redacción palabra por palabra, señal fuerte de que es la
-// oficial): "Use https://wa.me/<number> where the <number> is a full phone
-// number in international format, omitting any zeroes, brackets, or
-// dashes" -- y para el mensaje precargado: "Use
-// https://wa.me/whatsappphonenumber?text=urlencodedtext where
-// whatsappphonenumber is a full phone number in international format and
-// urlencodedtext is the URL-encoded pre-filled message." La misma fuente
-// aclara que "Click to chat works on both your phone and WhatsApp Web".
+// `wa.me` hace un redirect 302 a `api.whatsapp.com/send/` -- y en ESE
+// redirect, el propio servidor de `wa.me` corrompe CUALQUIER emoji del
+// parámetro `text` a un único caracter de reemplazo (U+FFFD, "�"), sin
+// importar cuántos bytes UTF-8 ocupara el emoji original (probado con
+// emojis de 3 y 4 bytes, con variation selector, y compuestos con ZWJ --
+// los cuatro se corrompen igual). El resto del texto (letras, tildes,
+// puntuación) pasa intacto -- el bug es específico de los emojis, no de
+// todo lo no-ASCII. Confirmado que la corrupción ocurre en el redirect
+// mismo (el `Location` que devuelve `wa.me` ya llega con `%EF%BF%BD` en
+// vez del emoji original), así que todo lo que viene DESPUÉS de ese
+// redirect -- la página de `api.whatsapp.com`, el link real "Continuar a
+// la conversación" (`web.whatsapp.com/send/?...`), el deep link
+// `whatsapp://send/?...` que abre la app en el celular -- hereda esa
+// corrupción sin ninguna forma de recuperarla.
 //
-// wa.me, no api.whatsapp.com/send: es el formato que la documentación
-// oficial usa primero y que varias guías de terceros señalan como "el más
-// corto, documentado y recomendado para compartir" -- api.whatsapp.com/send
-// es el endpoint al que wa.me redirige internamente (mismo destino, más
-// texto), así que no hay diferencia de comportamiento, solo de largo. Con
-// el presupuesto de caracteres ya ajustado en el paso 5.6 (que reservó el
-// prefijo MÁS largo de los dos a propósito, ver
-// format-ticket-message.ts), usar el más corto acá deja más margen real.
+// Yendo DIRECTO a `api.whatsapp.com/send` (sin pasar por `wa.me`) el texto
+// llega intacto de punta a punta: confirmado extrayendo el link funcional
+// real de la página (`id="action-button"`, el que dice "Continuar a la
+// conversación" en desktop) y el deep link `whatsapp://send/?phone=...
+// &text=...` que la página arma para abrir la app en un celular (embebido
+// en un bloque JSON interno de la página, con el emoji codificado byte a
+// byte igual al original) -- los dos, con los cuatro tipos de emoji
+// probados, sin corromper nada.
+//
+// Dominio/formato base, verificados contra documentación (WhatsApp Help
+// Center, "How to use click to chat", faq.whatsapp.com/5913398998672934,
+// citada en el paso 5.7): el mismo parámetro `?text=urlencodedtext`, el
+// mismo formato de número (dígitos puros, sin "+"). Lo único que cambia
+// del paso 5.7 es el HOST -- `api.whatsapp.com/send` en vez de `wa.me` --
+// justo para evitar el redirect donde está el bug.
 //
 // Formato del número: SIN "+", sin ceros/guiones/espacios/paréntesis --
 // dígitos puros, país + área + número como un solo string. Los números de
 // este proyecto ya llegan como E.164 con "+" (`AR_WHATSAPP_E164_REGEX`,
 // src/lib/phone.ts) -- este módulo le saca el "+" y normaliza cualquier
 // resto de puntuación antes de armar la URL.
-const WA_ME_BASE_URL = "https://wa.me";
+const WA_LINK_BASE_URL = "https://api.whatsapp.com/send";
 
 export class BuildWhatsAppUrlError extends Error {}
 
@@ -91,9 +100,9 @@ function assertUsableDigits(digits: string, rawPhone: string): void {
   }
 }
 
-// Función pura: arma la URL `wa.me` con el número del administrador y el
-// mensaje YA formateado (ver formatTicketMessage, paso 5.6 -- ese paso ya
-// se encargó de que el texto entre en el largo seguro de un link; esta
+// Función pura: arma la URL de WhatsApp con el número del administrador y
+// el mensaje YA formateado (ver formatTicketMessage, paso 5.6 -- ese paso
+// ya se encargó de que el texto entre en el largo seguro de un link; esta
 // función no vuelve a medir nada de eso, solo codifica y arma la URL).
 //
 // El campo es NOT NULL desde el paso 4.1 (`buildings.admin_whatsapp_e164`)
@@ -127,5 +136,11 @@ export function buildWhatsAppUrl(
     );
   }
 
-  return `${WA_ME_BASE_URL}/${digits}?text=${encodedMessage}`;
+  // `api.whatsapp.com/send` recibe el número por QUERY STRING
+  // (`?phone=...`), no como segmento de ruta -- a diferencia de `wa.me/
+  // <número>`. Confirmado con curl (ver el comentario de
+  // WA_LINK_BASE_URL): esta forma exacta, sin barra final, ya produce el
+  // link "Continuar a la conversación" y el deep link `whatsapp://send/`
+  // correctos, con el texto intacto.
+  return `${WA_LINK_BASE_URL}?phone=${digits}&text=${encodedMessage}`;
 }

@@ -20,6 +20,7 @@ function baseInput(
     description: "Pierde agua el caño de la cocina desde ayer a la noche.",
     attachmentsCount: 2,
     publicCode: "TC-2026-0025",
+    attachmentsToken: "a1111111-1111-1111-1111-111111111111",
     ...overrides,
   };
 }
@@ -36,10 +37,24 @@ describe("formatTicketMessage", () => {
         "🔧 Categoría: Plomería",
         "⚠️ Prioridad: Alta",
         "📝 Problema: Pierde agua el caño de la cocina desde ayer a la noche.",
-        `📷 Adjuntos: ${DEFAULT_ATTACHMENTS_BASE_URL}/s/TC-2026-0025`,
+        `📷 Adjuntos: ${DEFAULT_ATTACHMENTS_BASE_URL}/s/a1111111-1111-1111-1111-111111111111`,
         "🔖 Código: TC-2026-0025",
       ].join("\n"),
     );
+  });
+
+  it("el link de adjuntos usa attachmentsToken, NUNCA publicCode -- public_code es adivinable", () => {
+    // Regresión deliberada (paso 5.10): public_code es corto y secuencial
+    // por diseño (para que el vecino se lo pueda decir por teléfono), lo
+    // que lo hace enumerable -- ver el análisis de seguridad del paso
+    // 5.10. Si el link de la galería de fotos alguna vez volviera a armarse
+    // con publicCode, cualquiera podría recorrer TC-2026-0001,
+    // TC-2026-0002... y ver fotos ajenas. Este test se rompe si eso pasa.
+    const message = formatTicketMessage(baseInput());
+    expect(message).toContain(
+      "📷 Adjuntos: https://consofy.app/s/a1111111-1111-1111-1111-111111111111",
+    );
+    expect(message).not.toContain("/s/TC-2026-0025");
   });
 
   it("omite el apellido sin dejar un espacio de más", () => {
@@ -60,7 +75,7 @@ describe("formatTicketMessage", () => {
       baseUrl: "https://staging.consofy.app",
     });
     expect(message).toContain(
-      "📷 Adjuntos: https://staging.consofy.app/s/TC-2026-0025",
+      "📷 Adjuntos: https://staging.consofy.app/s/a1111111-1111-1111-1111-111111111111",
     );
   });
 

@@ -68,7 +68,7 @@ async function attemptCreateTicket(
   category: TicketCategory,
   attachmentsToInsert: AttachmentToInsert[],
   data: CreateTicketOutput,
-): Promise<{ id: string; publicCode: string }> {
+): Promise<{ id: string; publicCode: string; attachmentsToken: string }> {
   const activeMatch = await findPersonByPhone(
     building.organizationId,
     data.phoneE164,
@@ -155,8 +155,13 @@ async function attemptCreateTicket(
       // El trigger set_ticket_public_code (migración 0007/0009) ya pone
       // public_code SIEMPRE, sin que esta acción tenga que calcular nada
       // -- .returning() lo trae de vuelta para poder mostrárselo al
-      // vecino.
-      .returning({ id: tickets.id, publicCode: tickets.publicCode });
+      // vecino. attachments_token (paso 5.10) sale igual, de
+      // defaultRandom() en la base -- ver src/db/schema/tickets.ts.
+      .returning({
+        id: tickets.id,
+        publicCode: tickets.publicCode,
+        attachmentsToken: tickets.attachmentsToken,
+      });
     if (!ticket) {
       throw new Error("TICKET_CREATE_FAILED");
     }
@@ -323,6 +328,7 @@ export async function createTicketAction(
       status: "success",
       publicCode: created.publicCode,
       priority: category.defaultPriority,
+      attachmentsToken: created.attachmentsToken,
     };
   } catch (error) {
     if (!isPhoneRaceError(error)) {
@@ -350,6 +356,7 @@ export async function createTicketAction(
         status: "success",
         publicCode: created.publicCode,
         priority: category.defaultPriority,
+        attachmentsToken: created.attachmentsToken,
       };
     } catch (retryError) {
       return translateCreateTicketError(retryError);

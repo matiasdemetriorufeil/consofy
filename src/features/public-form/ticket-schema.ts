@@ -228,6 +228,16 @@ export type CreateTicketOutput = z.output<typeof createTicketInputSchema>;
 // necesita (nombre, unidad, categoría, descripción, cantidad de adjuntos)
 // ya lo tiene el cliente en sus propios `values`, sin que la acción
 // necesite repetirlo acá.
+//
+// `attachmentsToken` se suma en el paso 5.10: es la credencial del link
+// de la galería de fotos (`tickets.attachments_token`, generada por la
+// base con `defaultRandom()` -- ver esa columna en
+// src/db/schema/tickets.ts), así que tampoco es algo que el cliente pueda
+// inventar por su cuenta. Reemplaza a `publicCode` como identificador de
+// la ruta `/s/[token]` -- ver el comentario de ese campo en
+// `TicketMessageInput` (format-ticket-message.ts) para el motivo
+// completo (public_code es corto y adivinable a propósito, inválido como
+// credencial de algo privado).
 export type CreateTicketState =
   | { status: "idle" }
   | { status: "error"; message: string }
@@ -235,6 +245,7 @@ export type CreateTicketState =
       status: "success";
       publicCode: string;
       priority: TicketMessagePriority;
+      attachmentsToken: string;
     };
 
 export const initialCreateTicketState: CreateTicketState = { status: "idle" };

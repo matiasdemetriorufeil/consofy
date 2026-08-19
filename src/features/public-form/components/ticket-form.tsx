@@ -122,6 +122,13 @@ type SentTicket = {
   categoryName: string;
   description: string;
   attachmentsCount: number;
+  // Credencial del link de la galería de fotos (paso 5.10) -- viene del
+  // servidor (createTicketAction), igual que priority: es
+  // tickets.attachments_token, generado por la base, no algo que el
+  // cliente pueda inventar. Reemplaza a publicCode como identificador de
+  // la ruta /s/[token] -- ver el comentario de este campo en
+  // TicketMessageInput (format-ticket-message.ts) para el motivo.
+  attachmentsToken: string;
 };
 
 // Estado de cada adjunto (paso 5.4): "queued" -> "processing" (comprimiendo
@@ -214,12 +221,21 @@ export function TicketForm({
   token,
   buildingName,
   adminWhatsappE164,
+  appBaseUrl,
   categories,
   units,
 }: {
   token: string;
   buildingName: string;
   adminWhatsappE164: string;
+  // URL pública real de esta app (paso 5.10) -- env.NEXT_PUBLIC_APP_URL,
+  // resuelta en el servidor (page.tsx) y pasada como prop, mismo patrón
+  // que buildingName/adminWhatsappE164: env.ts es "server-only", este
+  // componente ("use client") no puede leerlo directo. Sin esto, el link
+  // de "📷 Adjuntos" del mensaje quedaría armado con
+  // DEFAULT_ATTACHMENTS_BASE_URL (un placeholder que no apunta a ningún
+  // lado real -- ver format-ticket-message.ts).
+  appBaseUrl: string;
   categories: PublicFormCategory[];
   units: PublicFormUnit[];
 }) {
@@ -554,6 +570,7 @@ export function TicketForm({
           categoryName: selectedCategory?.name ?? "",
           description: values.description,
           attachmentsCount: uploadedAttachments.length,
+          attachmentsToken: result.attachmentsToken,
         };
         window.localStorage.setItem(sentKey(token), JSON.stringify(sent));
         setSentTicket(sent);
@@ -603,9 +620,10 @@ export function TicketForm({
       description: sentTicket.description,
       attachmentsCount: sentTicket.attachmentsCount,
       publicCode: sentTicket.publicCode,
+      attachmentsToken: sentTicket.attachmentsToken,
     };
-    return formatTicketMessage(input);
-  }, [sentTicket, buildingName]);
+    return formatTicketMessage(input, { baseUrl: appBaseUrl });
+  }, [sentTicket, buildingName, appBaseUrl]);
 
   // `{ ok: false }` cubre el caso documentado en CLAUDE.md > Link de
   // WhatsApp (paso 5.7): buildWhatsAppUrl tira BuildWhatsAppUrlError si
@@ -738,7 +756,7 @@ export function TicketForm({
               {sentTicket.publicCode}
             </p>
             <a
-              href={`/s/${sentTicket.publicCode}`}
+              href={`/s/${sentTicket.attachmentsToken}`}
               className="text-primary text-sm underline underline-offset-4"
             >
               Ver el estado de tu reclamo

@@ -96,6 +96,22 @@ export const tickets = pgTable(
       // de la app debe setearlo a mano, ni podría acertar el valor
       // correcto sin repetir la lógica del contador.
       .default(sql`''`),
+    // Credencial de acceso a la galería pública de adjuntos (paso 5.10,
+    // /s/[token]) -- DISTINTA de public_code a propósito, mismo criterio
+    // exacto que buildings.public_token (ver el comentario de esa
+    // columna): public_code tiene que ser corto y legible para que el
+    // vecino se lo pueda decir al administrador por teléfono, lo que lo
+    // hace por construcción adivinable/enumerable (TC-2026-0001,
+    // TC-2026-0002...) -- perfecto para una referencia humana, inválido
+    // como credencial de algo privado. Un uuid random e independiente no
+    // tiene ese problema, y al ser una columna aparte (no derivada de
+    // `id`) se puede regenerar si un link se filtra sin tocar la
+    // identidad interna de la fila ni las FK que apuntan a ella (mismo
+    // razonamiento que documenta buildings.public_token).
+    attachmentsToken: uuid("attachments_token")
+      .notNull()
+      .defaultRandom()
+      .unique(),
     // Distinto de created_at: es la fecha de negocio ("cuándo se reportó
     // el problema"), que un administrador tiene que poder backdatear al
     // cargar un reclamo que le llegó ayer por teléfono. created_at es

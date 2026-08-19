@@ -35,6 +35,17 @@ export type TicketMessageInput = {
   description: string;
   attachmentsCount: number;
   publicCode: string;
+  // Credencial del link de la galería de fotos (paso 5.10,
+  // src/db/schema/tickets.ts) -- DISTINTA de publicCode a propósito.
+  // publicCode es la referencia corta y legible que el vecino le puede
+  // decir al administrador por teléfono (por eso sigue en la línea
+  // "🔖 Código" del mensaje); es también, por construcción, adivinable
+  // (TC-2026-0001, TC-2026-0002...). attachmentsToken es un uuid random,
+  // no correlacionado con publicCode, pensado para ser la única forma de
+  // llegar a fotos que pueden mostrar el interior de la casa de alguien
+  // -- ver el análisis de seguridad del paso 5.10. El link de "📷
+  // Adjuntos" usa ESTE campo, nunca publicCode.
+  attachmentsToken: string;
 };
 
 export type FormatTicketMessageOptions = {
@@ -42,14 +53,19 @@ export type FormatTicketMessageOptions = {
   maxEncodedLength?: number;
 };
 
-// Forma que va a tener la ruta pública de adjuntos del paso 5.10 -- todavía
-// no existe como código (ver `src/app/`, no hay ningún `src/app/s/`). "s"
-// de "seguimiento", mismo patrón corto que `/r/[token]` (paso 5.1) para el
-// formulario público. Un solo link para el reclamo entero (no uno aparte
-// "solo fotos"): más corto, y esa página va a mostrar estado + fotos juntos
-// de todas formas -- separarlos en dos links no le suma nada al
-// administrador y sí le resta caracteres al presupuesto del mensaje.
+// Ruta pública de la galería de fotos (paso 5.10, `src/app/s/[token]/`) --
+// "s" de "seguimiento", mismo patrón corto que `/r/[token]` (paso 5.1)
+// para el formulario público. El segmento dinámico es `attachmentsToken`,
+// no `publicCode` -- ver el comentario de ese campo en `TicketMessageInput`
+// para el motivo (public_code es adivinable, esta ruta muestra fotos
+// privadas).
 export const ATTACHMENTS_ROUTE_PREFIX = "/s";
+// Default de esta función pura, usado por sus propios tests y como
+// fallback -- el caller real (`TicketForm`, ver ticket-form.tsx) pasa
+// SIEMPRE `baseUrl: NEXT_PUBLIC_APP_URL` explícito (la URL pública real de
+// esta app, ya usada para el mismo propósito en
+// `getBuildingPublicUrl`/`/r/[token]`, paso 4.6), así que este valor nunca
+// termina en un link real -- ver el paso 5.10 para el cableado completo.
 export const DEFAULT_ATTACHMENTS_BASE_URL = "https://consofy.app";
 
 // --- Límite seguro, medido, no estimado (ver el reporte del paso 5.6) ---
@@ -57,8 +73,8 @@ export const DEFAULT_ATTACHMENTS_BASE_URL = "https://consofy.app";
 // WhatsApp documenta 4096 caracteres como tope de un mensaje de texto
 // (fuentes citadas en el reporte) -- pero ESE no es el límite que de
 // verdad importa acá, porque el mensaje no viaja como texto plano: viaja
-// codificado dentro de la query string de un link `wa.me`/
-// `api.whatsapp.com`, y el estándar de facto para que un link funcione en
+// codificado dentro de la query string de un link `api.whatsapp.com/send`
+// (paso 5.7/5.9b), y el estándar de facto para que un link funcione en
 // cualquier navegador/SO es bastante más chico: ~2000 caracteres (Chrome),
 // 2048 citado como tope "seguro" cross-browser (fuentes en el reporte). Es
 // ESE el límite que gobierna acá, no el de WhatsApp.
@@ -76,10 +92,11 @@ export const DEFAULT_ATTACHMENTS_BASE_URL = "https://consofy.app";
 const WA_SAFE_URL_LENGTH = 2000;
 
 // Lo que el link le resta al presupuesto ANTES de llegar al texto: el
-// prefijo (`https://api.whatsapp.com/send?phone=` mide 37, más largo que
-// `https://wa.me/`, así que se usa el más conservador de los dos) + un
+// prefijo real que usa buildWhatsAppUrl (paso 5.7, dominio cambiado a
+// `api.whatsapp.com/send` en el paso 5.9b -- ver CLAUDE.md > Bug de
+// emojis en wa.me -- `https://api.whatsapp.com/send?phone=` mide 36) + un
 // teléfono E.164 en su longitud máxima (15 dígitos, el tope del estándar)
-// + `&text=` (6). Medido: 37 + 15 + 6 = 58. Se redondea a 100 para dejar
+// + `&text=` (6). Medido: 36 + 15 + 6 = 57. Se redondea a 100 para dejar
 // margen (un parámetro extra que agregue un paso futuro, por ejemplo).
 const WA_LINK_OVERHEAD_RESERVE = 100;
 
@@ -174,7 +191,7 @@ function buildLines(
   // administrador, que ya puede asumir "sin foto" por su ausencia.
   if (input.attachmentsCount > 0) {
     lines.push(
-      `📷 Adjuntos: ${baseUrl}${ATTACHMENTS_ROUTE_PREFIX}/${input.publicCode}`,
+      `📷 Adjuntos: ${baseUrl}${ATTACHMENTS_ROUTE_PREFIX}/${input.attachmentsToken}`,
     );
   }
 

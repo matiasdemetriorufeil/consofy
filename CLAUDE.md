@@ -695,12 +695,25 @@ presupuesto ni para la elipsis -- la descripción queda vacía en vez de
 romper el resto del formato (no debería pasar en la práctica: significaría
 un edificio/categoría con nombres desproporcionados).
 
-**Link de adjuntos, forma que va a tener (paso 5.10, todavía no existe):**
-`{baseUrl}/s/{publicCode}` -- "s" de "seguimiento", mismo patrón corto que
-`/r/[token]` del formulario público (paso 5.1). Un solo link para todo el
-reclamo (no uno aparte solo para fotos): esa página va a mostrar estado +
-adjuntos juntos, y separarlos gastaría caracteres sin sumarle nada al
-administrador.
+**Link de adjuntos (paso 5.10, ya existe -- ver CLAUDE.md > Galería pública
+de adjuntos):** `{baseUrl}/s/{attachmentsToken}` -- "s" de "seguimiento",
+mismo patrón corto que `/r/[token]` del formulario público (paso 5.1), pero
+**NO** con `publicCode`. La forma original de este paso proponía
+`/s/{publicCode}`; se cambió antes de implementar el 5.10, porque
+`public_code` es corto y adivinable a propósito (`TC-2026-0001`,
+`TC-2026-0002`...) -- necesario para que un vecino lo lea en voz alta o lo
+tipee, pero eso mismo lo vuelve inservible como credencial de acceso a
+fotos que pueden mostrar el interior de la casa de alguien. `tickets.
+attachments_token` (columna nueva, un uuid, mismo patrón que `buildings.
+public_token`) es la credencial real; `TicketMessageInput` recibe los dos
+campos por separado (`publicCode` para la línea `🔖 Código`,
+`attachmentsToken` solo para este link) para que sea imposible confundirlos
+en el futuro. `formatTicketMessage` no midió de nuevo el presupuesto de
+caracteres por este cambio: un uuid (36 caracteres) v3 codificado no pesa
+más que `TC-2026-NNNN`, así que el margen ya calculado sigue de sobra. Un
+solo link para todo el reclamo (no uno aparte solo para fotos): esa página
+muestra el contexto del reclamo + adjuntos juntos, y separarlos gastaría
+caracteres sin sumarle nada al administrador.
 
 **Fuera de alcance de este paso, a propósito:** construir el link `wa.me`
 real y el botón que abre WhatsApp -- mismo criterio de scope que el paso
@@ -710,7 +723,12 @@ real y el botón que abre WhatsApp -- mismo criterio de scope que el paso
 
 ## Link de WhatsApp (paso 5.7)
 
-`buildWhatsAppUrl` (`src/lib/whatsapp-url.ts`) arma la URL `wa.me` a
+**Dominio corregido en el paso 5.9b -- ver CLAUDE.md > Bug de emojis en
+wa.me.** Esta sección queda como registro de la investigación original
+del paso 5.7 (correcta contra la documentación oficial, que no menciona
+el bug); el código de verdad usa `api.whatsapp.com/send`, no `wa.me`.
+
+`buildWhatsAppUrl` (`src/lib/whatsapp-url.ts`) arma la URL de WhatsApp a
 partir del WhatsApp del administrador y el mensaje ya formateado (paso
 5.6). Vive en `src/lib/`, no en `src/features/tickets/`: a diferencia de
 `formatTicketMessage`, no conoce nada del dominio -- toma un teléfono y un
@@ -719,8 +737,10 @@ texto, nada más (ver CLAUDE.md > Estructura de carpetas).
 **Aislada a propósito -- riesgo R9 del plan:** si Meta cambia el dominio,
 el formato del número o el nombre del parámetro de texto, este archivo es
 el ÚNICO que hay que tocar. El dominio/template vive en una sola constante
-(`WA_ME_BASE_URL`); ningún otro lugar del proyecto arma un link `wa.me` a
-mano.
+(`WA_LINK_BASE_URL`); ningún otro lugar del proyecto arma un link de
+WhatsApp a mano. Esta misma aislación fue lo que hizo barato corregir el
+bug del paso 5.9b: un cambio de una constante, no un cambio esparcido por
+el proyecto.
 
 **Dominio y formato, verificados contra documentación, no de memoria:**
 WhatsApp Help Center, "How to use click to chat"
@@ -907,15 +927,20 @@ Safari/iOS real (no hay esa plataforma disponible en este entorno) --
 queda como un supuesto razonable (Safari soporta la Clipboard API desde
 la versión 13.1), no como algo verificado.
 
-**Link de seguimiento (paso 5.11, todavía no existe):** se muestra como
-un link real (`/s/{publicCode}`), RELATIVO al origen actual -- a
-diferencia del link que va DENTRO del mensaje de WhatsApp (que necesita
-ser absoluto, `DEFAULT_ATTACHMENTS_BASE_URL` del paso 5.6, porque viaja
-afuera de la app), este vive en la misma página, así que un link relativo
-apunta solo a este mismo deploy, sin depender de si esa constante coincide
-con el dominio real. Va a devolver 404 hasta que el paso 5.11 exista --
-mismo criterio que el paso 5.6 con el link de adjuntos: construir la
-forma que va a tener ahora, dejarlo dicho acá.
+**Link de seguimiento:** se muestra como un link real
+(`/s/{attachmentsToken}`, no `publicCode` -- mismo cambio que el paso
+5.10 hizo en el link del mensaje de WhatsApp, ver CLAUDE.md > Galería
+pública de adjuntos), RELATIVO al origen actual -- a diferencia del link
+que va DENTRO del mensaje de WhatsApp (que necesita ser absoluto,
+`DEFAULT_ATTACHMENTS_BASE_URL` del paso 5.6, porque viaja afuera de la
+app), este vive en la misma página, así que un link relativo apunta solo
+a este mismo deploy, sin depender de si esa constante coincide con el
+dominio real. Desde el paso 5.10 este link ya resuelve de verdad y
+muestra la galería de fotos del reclamo -- el texto del botón ("Ver el
+estado de tu reclamo") se dejó sin cambiar a propósito: sigue siendo
+cierto una vez que el paso 5.11 (todavía no existe) agregue el estado del
+reclamo a esa misma página, así que no hace falta tocarlo de nuevo
+entonces.
 
 ## Evento de handoff (paso 5.9)
 
@@ -998,6 +1023,305 @@ eventos falsos -- el daño de eso queda acotado por lo que esta acción
 hace (un evento de más, sin payload, que no crea ni borra ni cambia
 estado de nada) y por estar siempre acotada a UN reclamo real y existente
 por llamada, nunca a una lista ni a un rango.
+
+## Bug de emojis en wa.me, corregido (paso 5.9b)
+
+Encontrado probando el paso 5.9 (el botón real, con un click real, abría
+una pestaña con `%EF%BF%BD` -- "�" -- en vez de cada emoji del mensaje).
+Diagnosticado con `curl`, nunca con el navegador (a propósito -- un
+navegador real puede enmascarar o reinterpretar cosas que un servidor
+devuelve tal cual; `curl` muestra exactamente los bytes que cada servidor
+manda, sin intermediarios).
+
+**El bug es de `wa.me`, no de este proyecto:**
+
+```
+curl -sI "https://wa.me/5493511234567?text=%F0%9F%8F%A2"
+Location: https://api.whatsapp.com/send/?phone=...&text=%EF%BF%BD...
+```
+
+`wa.me` hace un redirect 302 a `api.whatsapp.com/send/`, y en ESE
+redirect corrompe el emoji -- el `Location` que devuelve ya trae
+`%EF%BF%BD` (U+FFFD, el caracter de reemplazo) en vez del emoji
+original. Probado con los cuatro tipos de emoji que puede haber en un
+mensaje real, comparando la MISMA entrada contra `wa.me` (con redirect) y
+contra `api.whatsapp.com/send` directo (sin pasar por `wa.me`):
+
+| Tipo de emoji               | Bytes UTF-8               | `wa.me` (con redirect)                                | `api.whatsapp.com/send` (directo)                                                       |
+| --------------------------- | ------------------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| Simple (❤)                  | 3 bytes                   | `%EF%BF%BD` (roto)                                    | `%E2%9D%A4` (intacto)                                                                   |
+| Astral (🏢)                 | 4 bytes                   | `%EF%BF%BD` (roto)                                    | `%F0%9F%8F%A2` (intacto)                                                                |
+| Con variation selector (⚠️) | dos codepoints, 3+3 bytes | `%EF%BF%BD` (roto, LOS DOS codepoints colapsan a uno) | `%E2%9A%A0%EF%B8%8F` (intacto)                                                          |
+| Compuesto con ZWJ (👨‍👩‍👧‍👦)      | siete codepoints          | `%EF%BF%BD` (roto, TODO colapsa a un solo caracter)   | `%F0%9F%91%A8%E2%80%8D%F0%9F%91%A9%E2%80%8D%F0%9F%91%A7%E2%80%8D%F0%9F%91%A6` (intacto) |
+
+Uniforme, no parcial: los CUATRO tipos se rompen igual con `wa.me`, sin
+importar cuántos bytes o codepoints ocupara el original -- todo colapsa a
+un único `%EF%BF%BD`. El resto del texto (letras, tildes -- `á`, `í` --,
+puntuación) pasa intacto por el mismo redirect en los dos casos: el bug
+es específico de los emojis, no de todo lo no-ASCII.
+
+**Yendo directo a `api.whatsapp.com/send` (sin pasar por `wa.me`), el
+texto llega intacto de punta a punta -- verificado más allá de la sola
+respuesta HTTP,** siguiendo la cadena hasta las DOS piezas que
+efectivamente abren la conversación:
+
+- **Desktop:** el link `id="action-button"` de la propia página de
+  `api.whatsapp.com/send` (el que dice "Continuar a la conversación")
+  apunta a `https://web.whatsapp.com/send/?phone=...&text=%F0%9F%8F%A2...`
+  -- con el emoji intacto.
+- **Mobile:** embebido en un bloque de datos JS interno de la misma
+  página (`"open_custom_url"`, `"shouldAutoload":true`), el deep link que
+  intenta abrir la app es
+  `whatsapp://send/?phone=...&text=%F0%9F%8F%A2...` -- también intacto.
+
+Probado con el mensaje REAL de `formatTicketMessage` (los 8 emojis del
+formato de CLAUDE.md, edificio real, ticket real): los 8 aparecen
+byte a byte idénticos en el link `web.whatsapp.com/send/` final. La única
+corrupción que persiste, incluso yendo directo a `api.whatsapp.com/send`,
+es en un `<span style="color:#5E5E5E">` cosmético de la propia página
+(una vista previa decorativa del mensaje) -- irrelevante, no es el link
+que efectivamente abre la conversación.
+
+**La corrección:** `WA_LINK_BASE_URL` en `src/lib/whatsapp-url.ts` pasó
+de `https://wa.me` a `https://api.whatsapp.com/send`. Cambia también la
+FORMA de pasar el número -- `api.whatsapp.com/send` lo recibe por query
+string (`?phone=...`), no como segmento de ruta (`wa.me/<número>`) --
+`buildWhatsAppUrl` arma `${WA_LINK_BASE_URL}?phone=${digits}&text=
+${encodedMessage}` en vez de `${WA_LINK_BASE_URL}/${digits}?text=
+${encodedMessage}`.
+
+**Presupuesto de caracteres del paso 5.6, reverificado, no solo
+reusado:** el paso 5.6 ya había reservado `WA_LINK_OVERHEAD_RESERVE = 100`
+usando el prefijo MÁS largo de los dos dominios a propósito ("por las
+dudas") -- medido en su momento como 58, remedido ahora con precisión:
+`https://api.whatsapp.com/send?phone=` (36) + teléfono E.164 máximo (15
+dígitos) + `&text=` (6) = 57. El presupuesto de 1900 caracteres
+codificados sigue siendo válido y seguro sin ningún cambio -- la reserva
+de 100 ya cubría de sobra este prefijo, que ahora es el dominio REAL en
+uso, no solo el peor caso hipotético contra el que se protegía antes.
+
+**Límite real de lo que un test automatizado puede cubrir acá -- dicho
+explícitamente, no fingido:** ningún test de este proyecto puede probar
+que WhatsApp siga preservando el emoji en el futuro -- depende del
+comportamiento de un servidor de un tercero (Meta), que puede cambiar sin
+aviso. `whatsapp-url.test.ts` sí prueba, y con eso alcanza para lo que es
+responsabilidad de ESTE código: (a) que el dominio sea
+`api.whatsapp.com/send`, nunca `wa.me` (un test de regresión que se
+rompería si alguien revierte el dominio sin querer), y (b) que la
+codificación ida y vuelta (`encodeURIComponent`/`decodeURIComponent`) no
+pierda ningún byte para los cuatro tipos de emoji -- la mitad del
+problema que sí es nuestra. La otra mitad (qué hace el servidor de
+WhatsApp con esos bytes) se probó a mano con `curl`, documentada acá con
+salidas literales, y punto -- no hay forma honesta de automatizarla sin
+que la suite dependa de un servicio externo cambiante. Lo único que
+ningún `curl` puede confirmar tampoco es si la APP real de WhatsApp (o
+WhatsApp Web con una cuenta logueada de verdad) efectivamente muestra el
+emoji en el campo de texto ya precargado -- eso requiere probarlo desde
+un teléfono real.
+
+## Galería pública de adjuntos (paso 5.10)
+
+`/s/[token]` (`src/app/s/[token]/`) es la ruta que el link `📷 Adjuntos`
+del mensaje de WhatsApp (paso 5.6) referencia -- hasta este paso llevaba a
+la nada, la ruta no existía.
+
+**El problema central, encontrado ANTES de escribir código, en el
+análisis pedido explícitamente antes de implementar:** `tickets.
+public_code` tenía dos trabajos incompatibles. Corto y adivinable
+(`TC-2026-0001`, `TC-2026-0002`, `TC-2026-0003`...) es exactamente lo que
+se necesita para que un vecino lo lea en voz alta o lo tipee -- y
+exactamente lo que NO se puede usar como credencial de acceso a una
+galería de fotos: cualquiera que recibe un link de un reclamo puede
+cambiar el número y recorrer los reclamos de todo un edificio, viendo
+fotos que pueden mostrar el interior de la casa de alguien. La solución
+es separar los dos trabajos en dos columnas distintas, no mejorar
+`public_code`.
+
+**`tickets.attachments_token`** (migración `0020`): `uuid, not null,
+default random(), unique` -- mismo patrón exacto que `buildings.
+public_token` (paso 4.1), y por la misma razón documentada en ese
+comentario: tiene que poder existir independiente de la identidad interna
+de la fila (`id`), para que sea la única credencial de esta ruta sin
+exponer ni depender del `id` real. `ADD COLUMN ... DEFAULT gen_random_uuid()`
+backfilleó las 51 filas existentes con valores distintos entre sí
+(confirmado contando `DISTINCT` contra el total tras aplicar la
+migración) -- un default VOLATILE fuerza a Postgres a computar un valor
+por fila, no a compartir uno solo. Único de forma TOTAL (no parcial
+`WHERE deleted_at IS NULL`), mismo criterio que `public_token`: un token
+de URL no se reutiliza aunque el reclamo se dé de baja.
+
+**Alternativas evaluadas y descartadas** (pedido explícito: protege/
+rompe/costo para el administrador de cada una):
+
+- **Token aparte por reclamo (elegida, opción A).** Protege: el único
+  camino a las fotos de un reclamo es conocer un uuid v4, computacionalmente
+  inviable de adivinar o enumerar. Rompe: nada -- `public_code` sigue
+  cumpliendo su trabajo original sin cambios. Costo para el administrador:
+  cero -- sigue siendo un click desde WhatsApp, sin login ni paso extra.
+- **Variante de query param** (`?t=...` en vez de segmento de ruta): misma
+  familia que la opción A, mismo nivel de protección -- descartada solo
+  porque no aporta nada sobre un segmento de ruta y hace el link más largo
+  sin necesidad.
+- **Reusar `buildings.public_token` como capa extra**: descartada por ser
+  MÁS débil, no más fuerte -- ese token ya viaja en el link del formulario
+  público (`/r/[token]`), circula mucho más (cada vecino del edificio lo
+  tiene) y es compartido por TODOS los reclamos del edificio, así que
+  filtrarlo expone más que filtrar un token de un solo reclamo.
+- **Exigir login del panel**: descartada de plano -- rompe el requisito
+  explícito de que este link lo abre el administrador desde WhatsApp,
+  apurado, en el celular; pedirle loguearse cada vez lo lleva a dejar de
+  usarlo.
+- **PIN o rate-limiting sobre intentos**: descartada por innecesaria una
+  vez que se usa un uuid v4 (el espacio de búsqueda ya hace inviable
+  probar al azar) y porque este proyecto no tiene infraestructura de
+  rate-limiting hoy -- agregarla solo para este caso sería una superficie
+  nueva sin un riesgo real que justifique el costo.
+- **HMAC sin estado** (firmar `ticket_id` con una clave del servidor, sin
+  columna nueva): evaluada y descartada -- un HMAC no se puede regenerar
+  para UN solo reclamo si se filtra (cambiar la clave global invalida
+  TODOS los links a la vez); una columna sí, aunque hoy no exista todavía
+  una pantalla para regenerarla (mismo Pendiente que ya existe para
+  `buildings.public_token`, ver CLAUDE.md > Pendientes).
+
+**Reclamo sin fotos:** la página responde 200, no 404, con un mensaje
+honesto ("Este reclamo no tiene fotos ni archivos adjuntos.") en vez de
+esconder la página -- el link solo aparece en el mensaje de WhatsApp
+cuando hay adjuntos (paso 5.6, la línea `📷 Adjuntos` es condicional),
+pero alguien puede llegar igual (un token viejo guardado, el link de
+seguimiento del paso 5.8 que SIEMPRE se muestra). El token en sí ya es la
+autorización -- no hay nada que ocultar mostrando que este reclamo
+puntual no tiene fotos.
+
+**Cuánto vive el acceso -- SIN expiración, decisión explícita:** a
+diferencia de las URLs firmadas de Storage (que sí son de corta duración,
+ver más abajo), el token y la página no expiran. Justificación: hoy este
+link es la ÚNICA forma de ver las fotos de un reclamo -- no existe
+ninguna pantalla del panel que las muestre (ver el Pendiente nuevo más
+abajo). Si el token expirara, un reclamo de hace dos años dejaría de
+poder mostrar sus fotos a NADIE, ni siquiera al propio administrador
+buscando el WhatsApp viejo -- una regresión real a cambio de una
+protección que ya da el propio uuid (no hay ningún indicio de que este
+link circule más allá de quien lo recibió por WhatsApp). **Pendiente
+anotado a propósito:** cuando exista una pantalla de adjuntos en el
+panel (ver el Pendiente correspondiente), reconsiderar si este link
+debería tener una ventana más corta -- en ese momento ya no sería la
+única vía, así que el costo de expirarlo baja.
+
+**Edificio dado de baja:** la ruta devuelve 404 -- `getTicketByAttachmentsToken`
+(`src/features/public-form/queries.ts`) filtra `tickets.deleted_at IS
+NULL AND buildings.deleted_at IS NULL`. Aunque un ticket no se borra en
+cascada cuando su edificio se da de baja (la FK es `RESTRICT`, y dar de
+baja es un `UPDATE`, que no dispara `RESTRICT`), un edificio dado de baja
+significa "se fue del sistema" (ver CLAUDE.md > Acceso a datos, la
+distinción `deleted_at`/`active`) -- sus reclamos no deberían seguir
+exponiendo fotos por un link público indefinidamente. Mismo criterio de
+ambigüedad que `/r/[token]` (paso 5.1): un token que no resuelve nunca
+distingue POR QUÉ no resolvió (nunca existió, o el edificio se dio de
+baja), un solo mensaje ambiguo para los dos casos. Probado de verdad: se
+dio de baja Torre Central temporalmente contra la base de desarrollo, se
+confirmó 404 sobre un token real de un reclamo suyo, se restauró el
+edificio y se verificó `deleted_at: null` de nuevo.
+
+**URLs de fotos, siempre firmadas y de corta duración** (regla ya fijada
+en el paso 5.4, aplicada acá por primera vez): `createSignedAttachmentUrls`
+(`src/features/public-form/storage-objects.ts`) usa
+`createAdminClient()` (`src/lib/supabase/admin.ts`, NUEVO -- cliente de
+Supabase con la **service-role key**, la única forma de generar una URL
+que sirva bytes de este bucket: sus policies no dan `SELECT` ni a `anon`
+ni a `authenticated`, ver CLAUDE.md > Fotos y adjuntos). Expiran en 3600
+segundos (1 hora): corta en comparación con lo que reemplazan (un link
+público permanente), generosa para una sesión de lectura real (el
+administrador puede distraerse, volver, mirar varias fotos). Se generan
+frescas en CADA carga de la página (`createSignedUrls`, la versión en
+lote de la API, para no hacer un round-trip por foto) -- nunca se
+guardan ni se cachean. `SUPABASE_SERVICE_ROLE_KEY` se agregó recién acá a
+`src/lib/env.ts` (Zod): estaba en `.env.example`/`.env.local` desde antes
+como variable anticipada, pero `env.ts` solo suma una variable cuando
+algo la consume de verdad (regla propia del archivo) -- este paso es el
+primer consumidor real.
+
+**Por qué `<img>` nativo y no el `<Image>` de Next:** el optimizador de
+`<Image>` intenta cachear/proxyear la URL -- cachear algo diseñado para
+expirar y cambiar en cada carga de página es contraproducente. Mismo
+criterio que ya usa `AttachmentRow` en `TicketForm` para las miniaturas
+locales del formulario (con su propio `eslint-disable` documentado, por
+un motivo relacionado pero distinto: ahí son blob URLs locales, acá son
+URLs remotas firmadas).
+
+**Mobile -- ampliar sin lightbox propio:** cada miniatura es un
+`<a href={signedUrl} target="_blank">`, que abre la imagen a resolución
+completa en el visor nativo del navegador (con pinch-zoom real) en vez de
+construir una galería/lightbox en JS -- alcance mínimo a propósito (ver
+CLAUDE.md > Qué NO hacer), y el visor nativo del celular ya resuelve
+mejor "ampliar una foto" que cualquier componente que se pudiera armar acá.
+
+**Qué se ve en la página, además de las fotos -- decidido campo por
+campo, con el criterio "nada nuevo respecto de lo que ya viajó en el
+WhatsApp":** el administrador llega desde WhatsApp, apurado, y el token
+puede circular reenviado aunque sea imposible de adivinar. Se muestra:
+edificio, departamento, categoría, nombre del vecino, descripción,
+fecha (`<RelativeDate>`) y el `public_code` de referencia -- exactamente
+los mismos campos que YA aparecen en texto plano en el mensaje de
+WhatsApp (`formatTicketMessage`, paso 5.6), así que repetirlos acá no es
+una exposición nueva. Se excluye a propósito: el **teléfono** del vecino
+(nunca aparece en el mensaje de WhatsApp tampoco -- mostrarlo acá SÍ
+sería una exposición nueva que el mensaje nunca tuvo) y el **estado o
+asignación** del reclamo (dato de gestión interna, sin equivalente en el
+mensaje, y esta es una página de solo lectura sin ninguna acción de
+administración).
+
+**Análisis de seguridad, los tres casos pedidos:**
+
+1. **Alguien que tiene un token real** (lo recibió por WhatsApp, se lo
+   reenviaron, o lo encontró guardado): puede ver la galería de UN
+   reclamo -- el que ese token identifica, ninguno más -- con el mismo
+   contexto que ya tenía disponible en el mensaje de WhatsApp original
+   (ver la lista de campos arriba). No puede navegar a otros reclamos,
+   no ve datos que el mensaje no exponía ya, y no tiene ninguna acción de
+   escritura disponible (página de solo lectura).
+2. **Alguien que prueba tokens al azar**: computacionalmente inviable --
+   un uuid v4 tiene 122 bits de aleatoriedad real; no hay estructura
+   secuencial que explotar (a diferencia de `public_code`, que es
+   secuencial a propósito). Sin rate-limiting dedicado hoy (evaluado y
+   descartado arriba, redundante contra este espacio de búsqueda), pero
+   el volumen de intentos necesario para tener una probabilidad no
+   despreciable de acertar un solo token excede por muchos órdenes de
+   magnitud lo que cualquier tráfico real contra esta app podría generar.
+3. **Alguien que consigue una URL firmada de una foto y la comparte**:
+   esa URL sirve la imagen igual, sin volver a chequear el token de la
+   página, hasta que expira -- máximo 1 hora desde que se generó. Pasado
+   ese margen, Storage la rechaza (403) y hace falta volver a `/s/[token]`
+   para generar una nueva. Compartir una URL firmada filtra ESA foto
+   puntual por una ventana corta, nunca la galería completa ni acceso
+   continuo -- exactamente el trade-off que "URLs firmadas de corta
+   duración" (CLAUDE.md > Reglas de seguridad) está pensado para acotar.
+
+**Prueba real de punta a punta:** un reclamo real (`TC-2026-0035`) creado
+por el formulario público de verdad, con una foto subida de verdad. El
+mensaje de WhatsApp generado contuvo `http://localhost:3000/s/
+83315112-a872-4bee-9c0d-0daa68eccfed` (confirmando que `appBaseUrl` viaja
+correcto de servidor a cliente, no el placeholder `https://consofy.app`).
+La página resolvió 200, con el edificio/unidad/categoría/vecino/código/
+fecha/descripción correctos y la foto real cargando a sus dimensiones
+reales (`360x640`, verificado esperando `img.complete && img.naturalWidth
+
+> 0`, no solo a que el `<img>` apareciera en el DOM). Casos borde
+probados todos con datos reales, no simulados: token con formato
+inválido y uuid válido pero inexistente -> 404 ambiguo; reclamo sin fotos
+(`TC-2026-0036`) -> 200 con el mensaje honesto; edificio dado de baja
+(Torre Central, temporalmente) -> 404, restaurado después. Datos de
+prueba limpiados al terminar: los dos reclamos y sus dos personas
+("Prueba Galeria510"/+5493515559401, "Prueba SinFotos510"/+5493515559402)
+dados de baja lógicamente; el objeto real subido a Storage
+(`pending/.../1-....jpg`) borrado de verdad (no lógicamente -- Storage no
+> tiene ese concepto), confirmado listando la carpeta antes y después.
+
+**`appBaseUrl` como prop nueva de `TicketForm`:** `NEXT_PUBLIC_APP_URL`
+vive en el schema de SERVIDOR (`src/lib/env.ts`, que importa
+`server-only`), no en `env.public.ts` -- `TicketForm` es `"use client"` y
+no puede leerlo directo. Se resuelve en `src/app/r/[token]/page.tsx`
+(Server Component) y se pasa como prop, mismo patrón ya usado para
+`buildingName`/`adminWhatsappE164`.
 
 ## Reglas de seguridad (no negociables)
 
@@ -1597,39 +1921,51 @@ NOTHING`) queda disponible, no implementada, para archivos mucho más
   panel necesita un listado aparte (o el mismo, sin el INNER JOIN) para
   estos casos?
 
-- **`wa.me` le rompe TODOS los emojis del mensaje al redirigir -- bloqueante
-  para el diseño del paso 5.6, encontrado probando el paso 5.9, no
-  arreglado en este paso porque no fue lo que se pidió.** Confirmado con
-  `curl` directo contra `wa.me` (sin el navegador ni la app de por medio,
-  para descartar que fuera un artefacto de Playwright): `wa.me` redirige
-  (302) a `api.whatsapp.com/send/`, y en ese redirect, CUALQUIER emoji del
-  parámetro `text` -- no solo los astrales de 4 bytes como 🏢, también uno
-  simple de 3 bytes como ❤ -- se convierte en un único caracter de
-  reemplazo (`%EF%BF%BD`, U+FFFD), sin importar cuántos bytes UTF-8
-  ocupara el emoji original. El resto del texto (letras, tildes, `á`/`í`
-  incluidas, signos de puntuación) pasa intacto por el mismo redirect --
-  el problema es específico de los emojis, no de todo lo no-ASCII.
-  Reproducido de forma consistente con varios emojis distintos y con
-  mensajes reales generados por `formatTicketMessage`.
+- ~~`wa.me` le rompe TODOS los emojis del mensaje al redirigir -- bloqueante
+  para el diseño del paso 5.6.~~ **Resuelto en el paso 5.9b: cambiar de
+  dominio, de `wa.me` a `api.whatsapp.com/send`.** Encontrado probando el
+  paso 5.9, confirmado con `curl` (nunca con el navegador): `wa.me`
+  redirige (302) a `api.whatsapp.com/send/`, y en ESE redirect corrompe
+  cualquier emoji del parámetro `text` a un único caracter de reemplazo
+  (`%EF%BF%BD`, U+FFFD) -- probado con los cuatro tipos posibles (simple
+  de 3 bytes, astral de 4, con variation selector, compuesto con ZWJ),
+  los cuatro se rompen igual. Yendo directo a `api.whatsapp.com/send`
+  (sin pasar por `wa.me`) el texto llega intacto de punta a punta,
+  confirmado hasta el link real que abre la conversación (`web.whatsapp.
+com/send/` en desktop, `whatsapp://send/` en mobile) -- no solo la
+  respuesta HTTP. Ver CLAUDE.md > Bug de emojis en wa.me para el
+  diagnóstico completo, con salidas literales de `curl` comparando los
+  dos dominios. No se pudo confirmar el último eslabón (la app de
+  WhatsApp real, o WhatsApp Web con una cuenta logueada, mostrando el
+  mensaje ya precargado) sin un teléfono real -- documentado como límite
+  explícito de lo que este proyecto puede verificar por su cuenta.
 
-  Consecuencia práctica: el mensaje precargado que el administrador ve de
-  verdad en WhatsApp probablemente muestre "�" en vez de cada emoji de
-  `CLAUDE.md > Formato del mensaje al administrador` (🏢👤🚪🔧⚠️📝📷🔖) --
-  no se pudo confirmar el último paso (abrir la app de WhatsApp real, o
-  loguearse en WhatsApp Web) sin una cuenta real, pero el `Location` del
-  redirect ya llega corrompido antes de que la app tenga la chance de
-  mostrar nada. Esto no es un bug de `formatTicketMessage` (paso 5.6) ni
-  de `buildWhatsAppUrl` (paso 5.7): los dos codifican el texto
-  correctamente (confirmado con tests unitarios); es un comportamiento del
-  lado de servidor de `wa.me`, fuera del control de este proyecto.
+- **El administrador no tiene HOY ninguna forma de ver los adjuntos de un
+  reclamo desde el panel -- depende enteramente de encontrar el WhatsApp
+  viejo.** Encontrado en el paso 5.10 (galería pública de adjuntos):
+  `/s/[token]` es la ÚNICA pantalla del proyecto que muestra las fotos de
+  un reclamo, y el único camino para llegar ahí es el link que viajó por
+  WhatsApp -- si el administrador borró esa conversación, cambió de
+  celular, o nunca llegó a tocar "Enviar por WhatsApp" (el reclamo se
+  guarda igual, ver CLAUDE.md > Pantalla de confirmación), no tiene
+  ninguna otra vía para ver esas fotos. Es un problema real, no
+  hipotético, a resolver en la etapa 6 (la que construye la bandeja de
+  reclamos del panel): esa pantalla necesita su propia forma de listar y
+  mostrar los adjuntos de un reclamo, generando sus propias URLs firmadas
+  server-side con la service-role key (mismo mecanismo que ya usa `/s/
+[token]`, ver CLAUDE.md > Galería pública de adjuntos).
 
-  Falta decidir (no una decisión de código sola): si vale la pena sacar
-  los emojis del mensaje que viaja en la URL (posiblemente usando
-  `api.whatsapp.com/send` directo en vez de `wa.me`, para ver si evita el
-  redirect que corrompe el texto -- sin confirmar todavía si eso alcanza),
-  mantenerlos a pesar del riesgo (el resto del mensaje se lee bien igual),
-  o alguna otra estrategia. Ninguna se implementó todavía -- corresponde
-  decidirlo antes de tocar el código de 5.6/5.7, no dentro del paso 5.9.
+- **Reconsiderar si `/s/[token]` debería tener una ventana de acceso más
+  corta, una vez que exista la pantalla de adjuntos del panel (el
+  Pendiente de arriba).** Decisión del paso 5.10: el token y la página NO
+  expiran hoy, justificado porque hoy son la ÚNICA forma de ver esas
+  fotos -- expirar el link dejaría un reclamo viejo sin ninguna forma de
+  mostrar sus fotos a nadie. Ese argumento deja de aplicar en cuanto el
+  panel tenga su propia vista de adjuntos: en ese momento, `/s/[token]`
+  pasa a ser una vía de acceso ADICIONAL (no la única), y ahí sí se
+  justifica evaluar una ventana más corta -- por ejemplo, invalidar el
+  link unos días después de creado el reclamo, cuando ya cumplió su
+  propósito de aviso inmediato.
 
 ## Qué NO hacer
 

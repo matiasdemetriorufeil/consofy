@@ -13,6 +13,7 @@ import {
   getBuildingByPublicToken,
 } from "@/features/public-form/queries";
 import { getUnitsForBuilding } from "@/features/units/queries";
+import { env } from "@/lib/env";
 
 // Ruta pública, sin sesión (paso 5.1) -- la única superficie de la app
 // abierta a internet sin autenticación (ver CLAUDE.md > Qué es este
@@ -86,6 +87,7 @@ export default async function PublicBuildingPage({
         token={parsedToken.data}
         buildingName={building.name}
         adminWhatsappE164={building.adminWhatsappE164}
+        appBaseUrl={env.NEXT_PUBLIC_APP_URL}
         categories={categories}
         units={units}
       />

@@ -1,0 +1,2 @@
+ALTER TABLE "tickets" ADD COLUMN "attachments_token" uuid DEFAULT gen_random_uuid() NOT NULL;--> statement-breakpoint
+ALTER TABLE "tickets" ADD CONSTRAINT "tickets_attachments_token_unique" UNIQUE("attachments_token");
