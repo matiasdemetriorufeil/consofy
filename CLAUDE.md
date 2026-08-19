@@ -339,6 +339,52 @@ tabla nueva sigue necesitando su propio `.enableRLS()` (ya es la convención,
 ver `_shared.ts`) y su propia `denyAnonAuthenticated()` en el array de
 `extraConfig` para que el linter no la marque como `0008_rls_enabled_no_policy`.
 
+## Rate limiting de login (paso 3.2)
+
+**Esta sección se escribió recién en el paso 5.11, retroactiva** -- el
+mecanismo es del paso 3.2, pero nunca había quedado documentado acá. Esa
+ausencia tuvo una consecuencia real: al analizar el paso 5.11 se asumió
+(de palabra, sin ir a leer el código) que este rate limiter era "por
+instancia de proceso" y que por lo tanto no servía en Vercel. Es falso --
+ver `src/features/auth/login-rate-limit.ts`, que ya usa una tabla de
+Postgres (`login_attempts`) desde el paso 3.2, con un comentario propio en
+el archivo explicando exactamente por qué (memoria de proceso no se
+comparte entre instancias serverless; Redis sería infraestructura nueva
+sin necesidad real). El error se corrigió yendo a leer el código en vez de
+confiar en el recuerdo -- esta sección existe para que no se repita.
+
+`isRateLimited(email, ip)` (llamada desde `loginAction`,
+`src/features/auth/actions.ts`) cuenta intentos FALLIDOS de login en una
+ventana de 15 minutos, por dos claves independientes:
+
+- **Por email**: máximo 5 fallidos en 15 minutos -- la defensa real contra
+  fuerza bruta dirigida a UNA cuenta puntual.
+- **Por IP**: máximo 20 fallidos en 15 minutos -- más laxo a propósito
+  (una IP compartida, oficina o NAT, no debe trabar a todos por el error
+  de uno solo).
+
+Solo cuenta intentos FALLIDOS (`succeeded = false`), a diferencia del rate
+limiter del paso 5.11 (ver más abajo) que cuenta TODO intento sin importar
+el resultado -- acá un login exitoso no necesita frenarse, la señal de
+abuso es específicamente la repetición de fallos.
+
+**Limitaciones documentadas en el propio código, no escondidas:** el
+límite de IP confía en `x-forwarded-for`, que es la garantía de Vercel (su
+borde reemplaza el header entrante, no lo reenvía tal cual) -- corriendo
+detrás de otro proxy que no haga eso, alguien podría variar el header y
+esquivarlo. Por eso el límite por EMAIL es la defensa real. Ninguno de los
+dos frena un ataque lento y distribuido (una sola contraseña por cuenta,
+contra muchas cuentas, desde muchas IPs) -- limitación inherente a
+cualquier rate limit de una sola clave, no arreglable gratis ni con Redis
+ni con un servicio pago sin algo más (CAPTCHA, MFA). Para el perfil de
+esta app (un puñado de administradores) el riesgo real es bajo.
+
+`getClientIp()` (antes definida acá mismo) se extrajo a
+`src/lib/request-ip.ts` en el paso 5.11, que es su segundo consumidor real
+(el rate limiter del formulario público) -- mismo criterio ya usado en
+este proyecto para decidir cuándo separar un helper compartido (ver
+`AR_WHATSAPP_*` en `ticket-schema.ts`).
+
 ## Autorización de rutas y Server Actions
 
 **El layout de una ruta protege lo que se renderiza ahí, nada más.**
@@ -1323,6 +1369,189 @@ no puede leerlo directo. Se resuelve en `src/app/r/[token]/page.tsx`
 (Server Component) y se pasa como prop, mismo patrón ya usado para
 `buildingName`/`adminWhatsappE164`.
 
+## Rate limiting y anti-abuso del formulario público (paso 5.11)
+
+Antes de implementar, se analizó contra qué se defiende de verdad este
+paso -- pedido explícito: ordenar los abusos posibles por PROBABILIDAD
+REAL, no por gravedad teórica. De más a menos probable: (1) un vecino real
+reenviando el formulario varias veces -- NO es abuso, es la restricción de
+diseño que toda defensa de abajo tiene que respetar; (2) una persona
+enojada o con ganas de joder clickeando el formulario a mano unas cuantas
+veces; (3) bots genéricos de internet que rastrean formularios públicos
+para spam, sin apuntar a este edificio en particular; (4) un script
+escrito a mano apuntando a UN edificio puntual (necesita conocer o
+adivinar -- inviable -- su token); (5) un atacante distribuido y paciente
+decidido a agotar el Storage o corromper datos a escala. Contra un
+atacante del tipo (5), la única defensa real es un servicio externo con
+señal cruzada entre sitios (Cloudflare y similares) -- pero ese escenario
+es el MENOS probable de la lista para un sistema que usan tres edificios
+de Córdoba sin datos de valor para nadie. Las defensas de este paso
+apuntan a los casos (1)-(3), que son los realmente probables, sin pretender
+ser bulletproof contra (4)/(5).
+
+**Corrección de rumbo antes de empezar:** el análisis previo asumía que no
+había infraestructura de rate limiting en el proyecto ("el del login es
+por instancia de proceso, no sirve en Vercel"). Al ir a leer el código
+(`src/features/auth/login-rate-limit.ts`), resultó falso -- ya es
+Postgres-backed desde el paso 3.2, y ya funciona bien en serverless. Ver
+CLAUDE.md > Rate limiting de login para la sección que debería haber
+existido desde el paso 3.2 y no existía. Esto cambió el paso 5.11 entero:
+en vez de evaluar si sumar infraestructura nueva, se reusó el mismo patrón
+ya probado.
+
+### Rate limiting de `createTicketAction` (por teléfono y por IP)
+
+Tabla nueva, `public_form_rate_limit_attempts` (migración `0021`), mismo
+patrón que `login_attempts`: Postgres, no memoria de proceso (no
+sobrevive entre instancias serverless de Vercel) ni Redis (infraestructura
+nueva sin necesidad real). Una sola tabla para dos acciones distintas del
+mismo formulario (enviar el reclamo, subir un adjunto), distinguidas por
+`kind` -- ver el comentario completo en
+`src/db/schema/public-form-rate-limit-attempts.ts` para por qué no son dos
+tablas casi idénticas, y por qué la tabla no lleva `organization_id`/
+`building_id` (el límite es global por ip/teléfono, no por edificio --
+mismo motivo que `login_attempts` tampoco lo lleva) ni `succeeded` (acá el
+VOLUMEN es la señal de abuso, no el resultado: un script mandando 50
+reclamos estructuralmente válidos igual es abuso).
+
+**Umbrales, elegidos contra el caso de uso real, no contra un ataque
+teórico** (`src/features/public-form/rate-limit.ts`): el caso que NUNCA
+puede bloquearse es el ejemplo del enunciado -- la señora del 3°B con su
+tercer reclamo del mes, sobre el ascensor que se rompe seguido. Esos
+envíos están separados por DÍAS o SEMANAS: ninguna ventana de minutos u
+horas los ve nunca, sin importar el umbral. Lo que la ventana sí tiene que
+tolerar es una sesión real de uso normal -- un reintento por falla de red,
+o dos problemas distintos cargados el mismo día.
+
+- **Por teléfono: 5 envíos cada 30 minutos.** Cubre con margen una sesión
+  real (reintento + dos o tres problemas distintos) sin que nadie
+  legítimo lo note; 5+ envíos con el MISMO teléfono en media hora ya no es
+  un patrón normal.
+- **Por IP: 15 envíos cada 30 minutos** -- 3x el umbral de teléfono, misma
+  asimetría que login (ahí es 4x), justificada más fuerte todavía acá: una
+  IP compartida (el WiFi de un área común, varios vecinos del mismo
+  edificio) es un escenario legítimo más plausible acá que en login (un
+  puñado de administradores no suele compartir red).
+
+El intento se registra UNA vez por envío real del vecino (antes de llamar
+a `attemptCreateTicket`), nunca dentro del reintento acotado por carrera de
+teléfono (paso 5.5) -- ese reintento es el MISMO envío, no un segundo
+intento independiente. Un envío bloqueado no se registra (mismo criterio
+que `loginAction`): no consumió presupuesto, así que no debe contarlo.
+
+**Mensaje al vecino bloqueado, deliberadamente humano:** "Estás mandando
+reclamos muy seguido. Esperá unos minutos e intentá de nuevo." -- ni
+"rate limit", ni "429", ni ningún término interno. Explica qué pasó (está
+mandando seguido) y qué hacer (esperar), sin culpar ni sonar a error
+técnico -- mismo criterio que CLAUDE.md > Voz y escritura ya fija para
+toda la app.
+
+### Honeypot
+
+Campo señuelo (`referencia_extra`, nombre elegido para no parecerse a
+ningún campo de autocompletado estándar del navegador -- `email`,
+`website`, `phone` sí lo son, y arriesgan que un gestor de contraseñas lo
+rellene por error en un vecino real) agregado a `createTicketExtraFieldsSchema`
+(`ticket-schema.ts`) y validado con un `.refine()` sobre
+`createTicketInputSchema`: si llega con contenido, el parseo entero falla.
+
+**Validado en el servidor, no solo con CSS -- a propósito:**
+`createTicketAction` es invocable por POST directo sin pasar por ningún
+componente (CLAUDE.md > Autorización de rutas y Server Actions), así que
+esconder el campo del lado del navegador no alcanza como defensa por sí
+sola. Un envío con el honeypot lleno recibe el MISMO mensaje genérico
+que cualquier otro dato inválido ("Revisá los datos del formulario e
+intentá de nuevo.") -- no hay ninguna señal distinta entre "te
+detectamos" y "tu request está mal formado", a propósito: no le da a un
+bot ninguna pista de qué evadir la próxima vez.
+
+**Oculto con la técnica estándar de "visually hidden" (`sr-only`, clip a
+1x1px), no `display:none` ni un offset de miles de píxeles:** algunos bots
+saltean campos con `display:none` si lo detectan; un offset como
+`left: -9999px` puede generar scroll horizontal no deseado en la página si
+ningún ancestro lo recorta -- se probó y descartó esa variante antes de
+optar por `sr-only`. `tabIndex={-1}` y `aria-hidden="true"` completan que
+ni el teclado ni un lector de pantalla lo expongan nunca a un vecino real.
+
+### Rate limiting de la subida de adjuntos (por IP)
+
+**Hallazgo antes de implementar, que cambió la forma de esta pieza:** la
+propuesta original asumía que había una Server Action de subida a la que
+agregarle un chequeo. Es falso -- `uploadFormAttachment()`
+(`upload-attachment.ts`, paso 5.4) sube DIRECTO del navegador a Supabase
+Storage con la anon key; nunca pasa por el servidor de Next. No existe
+ninguna Server Action de subida en la que meter un rate limit.
+
+**Solución: una compuerta separada.** `checkAttachmentUploadAllowedAction()`
+(`actions.ts`) SÍ corre en el servidor -- no sube nada, solo responde
+"¿podés intentarlo?" contra el mismo mecanismo de `rate-limit.ts` (kind =
+`attachment_upload`, solo por IP -- sin teléfono, porque la subida puede
+ocurrir antes de que el vecino termine de escribirlo si navega los pasos
+fuera de orden). `uploadFormAttachment()` la llama al principio, ANTES de
+tocar Storage; si no da permiso, tira `AttachmentUploadError` con el mismo
+tipo de error que el caller (`TicketForm`) ya sabe mostrar -- sin agregar
+manejo nuevo de UI. El diseño client-directo del paso 5.4 (los bytes del
+archivo nunca pasan por nuestro servidor) no cambió -- esta compuerta es
+una consulta chica aparte, no un proxy de la subida real.
+
+**Umbral: 30 subidas por IP cada 30 minutos** -- hasta 5 archivos por
+reclamo (`MAX_TICKET_PHOTOS`), así que tolera hasta 6 reclamos "llenos" de
+fotos por IP en la ventana, muy por encima de cualquier uso real de un
+solo vecino, generoso para varios vecinos compartiendo una misma IP. No
+resuelve la limpieza de los adjuntos que quedan huérfanos si el vecino
+nunca confirma el reclamo -- frena la VELOCIDAD a la que alguien podría
+llenar el Storage, nada más. Ver el Pendiente de limpieza más abajo.
+
+### Límite de reclamos abiertos por unidad -- descartado, a propósito
+
+El plan original de la etapa 5 pedía este límite; **se descartó
+completamente en el paso 5.11**, y se deja anotado acá con el mismo peso
+que una decisión implementada, para que nadie lo reintroduzca dentro de
+seis meses leyendo el plan viejo sin este contexto.
+
+**Por qué:** el dato que distingue "abuso" de "problema real recurrente"
+no es CUÁNTOS reclamos abiertos tiene una unidad -- es la VELOCIDAD y
+quién los manda. Un ascensor que se rompe seguido genera reclamos
+separados por días o semanas, típicamente del mismo teléfono -- un patrón
+que el rate limit por teléfono de arriba ya deja pasar sin problema (su
+ventana es de minutos, no de semanas). Un tope por CANTIDAD de reclamos
+abiertos, en cambio, penaliza justo al vecino con el problema más real y
+persistente. Además, la etapa 7 (agrupación de reclamos repetidos) existe
+específicamente para tratar esa repetición como señal útil para el
+administrador, no como ruido a cortar en el formulario -- un límite acá
+competiría con lo que esa etapa va a resolver mejor.
+
+**Qué reemplaza a la idea original:** nada bloqueante. Cuando exista la
+bandeja del panel (etapa 6/7), una marca informativa ("5 reclamos abiertos
+en este departamento") ahí es la forma correcta de usar esa señal --
+ayuda al administrador a priorizar, sin impedir que un vecino cargue un
+sexto reclamo real. No implementado todavía -- queda para cuando esa
+pantalla exista.
+
+### CAPTCHA -- no por ahora, opción disponible
+
+Evaluado y descartado para este paso, no porque cueste dinero (Cloudflare
+Turnstile es gratis para este volumen) sino porque agrega una dependencia
+externa nueva -- un script de terceros en una página pública que hoy no
+tiene ninguno -- para defenderse de un escenario (ítem 4/5 de la lista de
+arriba) que ya se evaluó como poco probable. El honeypot + el rate
+limiting ya cubren los casos realmente probables (1)-(3). Si en algún
+momento aparece evidencia real de abuso sofisticado (no solo la
+posibilidad teórica), Turnstile queda como la opción a sumar -- sin
+necesidad de rediseñar nada de lo que este paso construyó.
+
+### Análisis de seguridad -- honesto sobre el límite real
+
+Contra un atacante distribuido, paciente y decidido (ítem 5 de la lista de
+arriba), ninguna combinación de código propio lo para del todo -- eso
+requeriría un servicio externo con señal cruzada entre muchos sitios. Este
+paso no pretende serlo: cubre bien los casos (1)-(3) (los realmente
+probables), sube el costo del (4), y deja el (5) sin resolver a propósito,
+documentado acá en vez de fingido. Para un sistema que usan tres edificios
+de Córdoba sin datos de valor de reventa, ese es el balance correcto hoy
+-- no gastar presupuesto (de dinero o de complejidad) en el escenario
+menos probable de la lista.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
@@ -1870,10 +2099,22 @@ NOTHING`) queda disponible, no implementada, para archivos mucho más
   (cada foto comprimida pesa unos cientos de KB, no varios MB -- ver el
   reporte del paso 5.4), pero no es cero: con suficiente tráfico abandonado
   con el tiempo, sí puede sumar contra el 1 GB del free tier de Storage.
-  Falta, en una etapa posterior (no hay infraestructura de jobs
-  programados en el proyecto todavía): un barrido periódico que borre
-  objetos bajo `pending/` más viejos que un umbral razonable (ej. 48hs) sin
-  ninguna fila de `ticket_attachments` que los referencie.
+
+  **Mitigación parcial agregada en el paso 5.11, esto NO resuelve la
+  limpieza:** el rate limit por IP sobre la subida de adjuntos (ver
+  CLAUDE.md > Rate limiting y anti-abuso del formulario público) frena la
+  VELOCIDAD a la que alguien podría llenar el Storage subiendo sin nunca
+  confirmar un reclamo, pero no borra nada de lo que ya quedó huérfano ni
+  impide que un uso lento y sostenido (dentro del umbral) siga acumulando
+  archivos con el tiempo.
+
+  Falta, en una etapa posterior: un barrido periódico que borre objetos
+  bajo `pending/` más viejos que un umbral razonable (ej. 48hs) sin
+  ninguna fila de `ticket_attachments` que los referencie. Evaluado en el
+  paso 5.11 como candidato para esto: **Vercel Cron** (gratis en el plan
+  Hobby para jobs de una vez por día, que alcanza sobradamente para este
+  barrido) -- no implementado todavía, decisión pendiente de un paso
+  propio, no de este.
 
 - **`Checkbox` (`src/components/ui/checkbox.tsx`, sobre Radix) tira un
   error de hidratación cuando forma parte del HTML servido en la carga

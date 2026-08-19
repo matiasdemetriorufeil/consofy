@@ -17,4 +17,5 @@ export * from "./reminders";
 export * from "./documents";
 export * from "./notifications";
 export * from "./login-attempts";
+export * from "./public-form-rate-limit-attempts";
 export * from "./relations";

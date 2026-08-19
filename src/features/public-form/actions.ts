@@ -11,10 +11,17 @@ import {
   unitBelongsToBuilding,
 } from "@/features/people/queries";
 import { PHONE_UNIQUE_CONSTRAINT } from "@/features/people/constraints";
+import { getClientIp } from "@/lib/request-ip";
 import { UNIQUE_VIOLATION, unwrapPostgresError } from "@/lib/postgres-errors";
 
 import type { PublicBuilding, TicketCategory } from "./queries";
 import { getBuildingByPublicToken, getCategoryForTicket } from "./queries";
+import {
+  isAttachmentUploadRateLimited,
+  isTicketSubmissionRateLimited,
+  recordAttachmentUploadAttempt,
+  recordTicketSubmissionAttempt,
+} from "./rate-limit";
 import { getExistingAttachmentPaths } from "./storage-objects";
 import {
   createTicketInputSchema,
@@ -250,6 +257,21 @@ export async function createTicketAction(
   }
   const data = parsed.data;
 
+  // Rate limiting (paso 5.11) -- ANTES de tocar la base, mismo lugar que
+  // isRateLimited() en loginAction (ver CLAUDE.md > Rate limiting del
+  // formulario público para los umbrales y su justificación). Un vecino
+  // bloqueado nunca ve un error técnico -- el mensaje es honesto sobre lo
+  // que pasó (mandó reclamos muy seguido) y qué hacer (esperar), sin
+  // mencionar "rate limit" ni ningún término interno.
+  const ip = await getClientIp();
+  if (await isTicketSubmissionRateLimited(data.phoneE164, ip)) {
+    return {
+      status: "error",
+      message:
+        "Estás mandando reclamos muy seguido. Esperá unos minutos e intentá de nuevo.",
+    };
+  }
+
   // El token es la ÚNICA credencial de este flujo (ver public-form/
   // queries.ts) -- organizationId/buildingId salen DE ACÁ, nunca de nada
   // que el cliente mande. Un token inválido, o de un edificio dado de baja,
@@ -317,6 +339,13 @@ export async function createTicketAction(
     (a) => a.path.startsWith(sessionPrefix) && existingPaths.has(a.path),
   );
 
+  // Se registra UNA vez acá, no dentro de attemptCreateTicket(): el
+  // reintento acotado de más abajo (carrera de teléfono) es el MISMO envío
+  // del vecino, no un segundo intento independiente -- contarlo dos veces
+  // penalizaría a alguien que ya de por sí perdió una carrera de
+  // concurrencia, no a nadie enviando de más.
+  await recordTicketSubmissionAttempt(data.phoneE164, ip);
+
   try {
     const created = await attemptCreateTicket(
       building,
@@ -362,6 +391,29 @@ export async function createTicketAction(
       return translateCreateTicketError(retryError);
     }
   }
+}
+
+// Compuerta de rate limiting para la subida de adjuntos (paso 5.11) --
+// pública a propósito, mismo criterio que createTicketAction: no hay sesión
+// que exigir, el formulario público no tiene ninguna. NO sube nada: la
+// subida real sigue yendo del navegador directo a Supabase Storage (paso
+// 5.4, uploadFormAttachment en upload-attachment.ts) -- ese diseño no
+// cambia acá, sigue siendo el único camino razonable sin hacer pasar los
+// bytes del archivo por nuestro propio servidor. Esta acción solo responde
+// "¿podés intentarlo?" ANTES de que el cliente llame a Storage; ver el
+// comentario de uploadFormAttachment() sobre por qué hace falta esta
+// compuerta separada en vez de "un rate limit en la Server Action de
+// subida" (no existe tal acción: la subida nunca pasa por el servidor de
+// Next).
+export async function checkAttachmentUploadAllowedAction(): Promise<{
+  allowed: boolean;
+}> {
+  const ip = await getClientIp();
+  if (await isAttachmentUploadRateLimited(ip)) {
+    return { allowed: false };
+  }
+  await recordAttachmentUploadAttempt(ip);
+  return { allowed: true };
 }
 
 // Deja constancia de que el vecino TOCÓ el botón "Enviar por WhatsApp"

@@ -191,6 +191,17 @@ export function validateAttachmentSize(sizeBytes: number): string | null {
 // refine() encadenados (no un ZodObject plano), así que no tiene
 // `.extend()` -- `.and()` arma una intersección, que sigue validando los
 // dos refine() originales Y los campos nuevos, sin reescribir nada.
+// Honeypot (paso 5.11): campo que ningún vecino real ve ni completa (el
+// input queda oculto fuera de pantalla en TicketForm, con autoComplete="off"
+// y un nombre poco común para no atraer autocompletado de navegador/gestor
+// de contraseñas), pero que un bot que llena todo a ciegas sí. Validado
+// ACÁ, en el schema -- no solo con CSS del lado del cliente: createTicketAction
+// es invocable por POST directo sin pasar por ningún componente (ver
+// CLAUDE.md > Autorización de rutas y Server Actions), así que esconder el
+// campo en el navegador no alcanza como defensa por sí sola. `.optional()`
+// porque un caller legítimo (o un test) puede no mandarlo -- ausencia y
+// string vacío se tratan igual (ningún valor "lleno").
+export const HONEYPOT_FIELD_NAME = "referencia_extra" as const;
 const createTicketExtraFieldsSchema = z.object({
   token: z.uuid(),
   formSessionId: z.uuid(),
@@ -204,11 +215,22 @@ const createTicketExtraFieldsSchema = z.object({
       }),
     )
     .max(MAX_TICKET_PHOTOS),
+  [HONEYPOT_FIELD_NAME]: z.string().optional().default(""),
 });
 
-export const createTicketInputSchema = publicTicketFormSchema.and(
-  createTicketExtraFieldsSchema,
-);
+// El `.refine()` de acá abajo es la validación real del honeypot: si viene
+// con contenido, el parse entero falla -- createTicketAction ya trata
+// cualquier fallo de parseo con el MISMO mensaje genérico que cualquier otro
+// dato inválido ("Revisá los datos del formulario e intentá de nuevo."), así
+// que un bot atrapado acá no recibe ninguna señal distinta de "mandaste
+// algo mal" -- no hay forma de distinguir, desde afuera, "te agarré" de
+// "tu request está mal formado".
+export const createTicketInputSchema = publicTicketFormSchema
+  .and(createTicketExtraFieldsSchema)
+  .refine((data) => !data[HONEYPOT_FIELD_NAME], {
+    message: "Revisá los datos del formulario e intentá de nuevo.",
+    path: [HONEYPOT_FIELD_NAME],
+  });
 
 export type CreateTicketInput = z.input<typeof createTicketInputSchema>;
 export type CreateTicketOutput = z.output<typeof createTicketInputSchema>;

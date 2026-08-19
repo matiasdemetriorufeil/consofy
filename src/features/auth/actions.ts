@@ -2,14 +2,11 @@
 
 import { redirect } from "next/navigation";
 
+import { getClientIp } from "@/lib/request-ip";
 import { sanitizeNextPath } from "@/lib/safe-redirect";
 import { createClient } from "@/lib/supabase/server";
 
-import {
-  getClientIp,
-  isRateLimited,
-  recordLoginAttempt,
-} from "./login-rate-limit";
+import { isRateLimited, recordLoginAttempt } from "./login-rate-limit";
 import { loginSchema, type LoginState } from "./login-schema";
 
 // loginAction y logoutAction NO usan authorizedAction() (src/lib/auth.ts)

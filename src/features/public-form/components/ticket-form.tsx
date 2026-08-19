@@ -48,6 +48,7 @@ import {
 } from "../actions";
 import type { PublicFormCategory } from "../queries";
 import {
+  HONEYPOT_FIELD_NAME,
   IDENTIFICATION_STEP_FIELDS,
   MAX_TICKET_PHOTOS,
   initialCreateTicketState,
@@ -527,6 +528,13 @@ export function TicketForm({
   // la ventana de carrera que el estado de React no podía cerrar.
   const submittingRef = useRef(false);
 
+  // Honeypot (paso 5.11): input fuera de la RHF -- no forma parte de
+  // publicTicketFormSchema porque no es un dato real del reclamo, es un
+  // señuelo. Se lee con un ref (no controlado) al momento de enviar, mismo
+  // motivo que HONEYPOT_FIELD_NAME es un nombre poco común -- ver el campo
+  // oculto más abajo y ticket-schema.ts para la validación real (server).
+  const honeypotRef = useRef<HTMLInputElement>(null);
+
   async function handleSubmit() {
     if (submittingRef.current) {
       return;
@@ -544,6 +552,7 @@ export function TicketForm({
           mimeType: a.mimeType,
           sizeBytes: a.sizeBytes,
         })),
+        [HONEYPOT_FIELD_NAME]: honeypotRef.current?.value ?? "",
       });
       setSubmitState(result);
       if (result.status === "success") {
@@ -820,6 +829,24 @@ export function TicketForm({
         </h2>
 
         <form noValidate onSubmit={(e) => e.preventDefault()}>
+          {/* Honeypot (paso 5.11): invisible para un vecino real -- oculto
+              con la técnica estándar de "visually hidden" (clip a 1x1px,
+              `sr-only`), no display:none (algunos bots lo saltean si lo
+              detectan) ni un offset de miles de píxeles (podría generar
+              scroll horizontal no deseado en la página). Sin foco por
+              teclado ni lector de pantalla. Un bot que completa todo a
+              ciegas sí lo llena; ticket-schema.ts lo rechaza en el
+              servidor si llega con contenido. */}
+          <input
+            ref={honeypotRef}
+            type="text"
+            name={HONEYPOT_FIELD_NAME}
+            autoComplete="off"
+            tabIndex={-1}
+            aria-hidden="true"
+            className="sr-only"
+            defaultValue=""
+          />
           <FieldGroup>
             {step === 1 && (
               <>

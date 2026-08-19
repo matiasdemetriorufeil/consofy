@@ -1,7 +1,6 @@
 import "server-only";
 
 import { and, count, eq, gte } from "drizzle-orm";
-import { headers } from "next/headers";
 
 import { db } from "@/db";
 import { loginAttempts } from "@/db/schema";
@@ -120,17 +119,4 @@ export async function recordLoginAttempt(
   succeeded: boolean,
 ) {
   await db.insert(loginAttempts).values({ email, ip, succeeded });
-}
-
-// x-forwarded-for/x-real-ip: los que setea el proxy de Vercel delante de la
-// app -- no hay forma de conocer la IP real del cliente en Node sin pasar
-// por estos headers en un deploy serverless. En desarrollo local ninguno
-// de los dos suele venir seteado, de ahí el fallback.
-export async function getClientIp(): Promise<string> {
-  const headersList = await headers();
-  const forwardedFor = headersList.get("x-forwarded-for");
-  if (forwardedFor) {
-    return forwardedFor.split(",")[0]!.trim();
-  }
-  return headersList.get("x-real-ip") ?? "unknown";
 }

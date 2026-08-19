@@ -1,5 +1,6 @@
 import { createClient } from "@/lib/supabase/client";
 
+import { checkAttachmentUploadAllowedAction } from "./actions";
 import { compressImage, AttachmentUploadError } from "./compress-image";
 
 export { AttachmentUploadError };
@@ -64,11 +65,29 @@ function extensionFor(mimeType: string): string {
 // imagen; un PDF sube tal cual (no hay forma de comprimir un PDF del lado
 // del cliente sin una librería nueva, y el enunciado no la pide -- ver el
 // criterio completo sobre PDF en el reporte).
+//
+// Rate limiting por IP (paso 5.11): esta función sube DIRECTO del navegador
+// a Supabase Storage (createClient(), la anon key) -- nunca pasa por
+// nuestro servidor de Next, así que no hay ninguna Server Action "de
+// subida" existente donde meter un chequeo. La solución es una compuerta
+// SEPARADA (checkAttachmentUploadAllowedAction, en actions.ts) que sí corre
+// en nuestro servidor: se pregunta ANTES de tocar Storage, y si no da
+// permiso, esta función tira AttachmentUploadError con un mensaje humano en
+// vez de intentar la subida real -- el mismo tipo de error que ya maneja el
+// caller (ver el .catch() en TicketForm), así que no hace falta ningún
+// manejo nuevo del lado de la UI.
 export async function uploadFormAttachment(
   file: File,
   formSessionId: string,
   index: number,
 ): Promise<UploadedAttachment> {
+  const { allowed } = await checkAttachmentUploadAllowedAction();
+  if (!allowed) {
+    throw new AttachmentUploadError(
+      "Estás subiendo archivos muy rápido. Esperá un momento e intentá de nuevo.",
+    );
+  }
+
   let body: Blob = file;
   let mimeType = file.type;
 
