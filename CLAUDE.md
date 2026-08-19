@@ -708,6 +708,96 @@ real y el botón que abre WhatsApp -- mismo criterio de scope que el paso
 `TicketForm` (la pantalla de confirmación del paso 5.5 solo muestra el
 `public_code`); esa integración es del paso que arme el botón real.
 
+## Link de WhatsApp (paso 5.7)
+
+`buildWhatsAppUrl` (`src/lib/whatsapp-url.ts`) arma la URL `wa.me` a
+partir del WhatsApp del administrador y el mensaje ya formateado (paso
+5.6). Vive en `src/lib/`, no en `src/features/tickets/`: a diferencia de
+`formatTicketMessage`, no conoce nada del dominio -- toma un teléfono y un
+texto, nada más (ver CLAUDE.md > Estructura de carpetas).
+
+**Aislada a propósito -- riesgo R9 del plan:** si Meta cambia el dominio,
+el formato del número o el nombre del parámetro de texto, este archivo es
+el ÚNICO que hay que tocar. El dominio/template vive en una sola constante
+(`WA_ME_BASE_URL`); ningún otro lugar del proyecto arma un link `wa.me` a
+mano.
+
+**Dominio y formato, verificados contra documentación, no de memoria:**
+WhatsApp Help Center, "How to use click to chat"
+(`faq.whatsapp.com/5913398998672934` -- la página renderiza por JS y no
+pude traerle el HTML crudo con las herramientas de este entorno, así que
+la cito tal como la indexó la búsqueda, contrastada contra varias guías de
+terceros que reproducen la misma redacción palabra por palabra):
+_"Use https://wa.me/\<number\> where the \<number\> is a full phone number
+in international format, omitting any zeroes, brackets, or dashes"_, y
+para el mensaje precargado: _"Use
+https://wa.me/whatsappphonenumber?text=urlencodedtext"_. La misma fuente
+aclara: _"Click to chat works on both your phone and WhatsApp Web"_.
+`wa.me`, no `api.whatsapp.com/send`: la documentación oficial lo presenta
+primero, y varias guías de terceros señalan que es el endpoint más corto
+al que `api.whatsapp.com/send` redirige internamente igual (mismo
+destino, más texto) -- con el presupuesto de caracteres ya ajustado en el
+paso 5.6 (que reservó el prefijo MÁS largo de los dos a propósito), usar
+el más corto acá deja más margen real.
+
+**Comportamiento en las tres situaciones reales** (confirmado contra la
+misma fuente + guías de terceros independientes que coinciden en el
+mismo comportamiento):
+
+- **Celular con WhatsApp instalado:** el link abre la app directo, con el
+  chat ya armado y el texto precargado en el campo de escribir.
+- **Celular sin la app instalada:** el navegador no puede completar el
+  deep link -- el flujo típico documentado es un redirect a la tienda de
+  apps para instalar WhatsApp antes de poder continuar la conversación.
+- **Computadora (WhatsApp Web):** la fuente oficial dice explícitamente
+  que el click to chat "funciona tanto en el teléfono como en WhatsApp
+  Web" -- en desktop el link abre en el navegador y lleva a
+  `web.whatsapp.com`, que pide escanear el QR (o continúa directo si ya
+  hay una sesión activa).
+
+En los tres casos, esta función no hace nada distinto: entrega la MISMA
+URL siempre, es WhatsApp (la app, el navegador, o WhatsApp Web) quien
+decide cómo abrirla según el dispositivo -- no hay nada que esta función
+deba detectar o ramificar.
+
+**Número vacío o mal cargado:** `buildings.admin_whatsapp_e164` es
+`NOT NULL` desde el paso 4.1 y Zod lo exige al cargar un edificio, pero
+esta función no confía en que esas dos garantías se cumplieron para toda
+fila real (un dato viejo, una migración, un test, un caller futuro que no
+pase por el schema). Si el número queda vacío o sin ningún dígito
+utilizable después de normalizarlo, tira `BuildWhatsAppUrlError` en vez de
+devolver un link roto -- un botón "Enviar por WhatsApp" que abre un link
+sin número es peor que no mostrar el botón: el vecino cree que hizo algo
+cuando no pasó nada.
+
+**No revalida el formato argentino:** esa regla (`AR_WHATSAPP_E164_REGEX`)
+ya vive en `building-schema.ts` (Zod, paso 4.1), la capa de ENTRADA de
+datos -- repetirla acá rompería el aislamiento que este paso pide (mañana,
+si el proyecto acepta administradores de otro país, esa regla cambia en
+un archivo de dominio, no en el módulo de mecánica de `wa.me`). Lo que sí
+valida acá es más angosto y no específico de ningún país: que después de
+sacar símbolos y el `+` (reusa `normalizePhoneInput`, `src/lib/phone.ts`)
+quede una secuencia no vacía de puros dígitos -- probado con un E.164 de
+otro país (`+55...`), que arma el link igual, para dejar explícita esta
+frontera.
+
+**Emojis y saltos de línea en el mensaje:** `encodeURIComponent()` los
+codifica bien siempre que el string sea válido (`\n` → `%0A`, cada emoji a
+sus bytes UTF-8 en `%XX`) -- el riesgo real es el mismo que documentó el
+paso 5.6: un string con un subrogado suelto (medio par de un emoji
+astral) hace que `encodeURIComponent()` tire `URIError: URI malformed`.
+`formatTicketMessage()` ya garantiza que esto no pasa con sus propios
+mensajes (trunca por grafema completo). `buildWhatsAppUrl` igual envuelve
+esa llamada en un `try/catch` y tira `BuildWhatsAppUrlError` con un
+mensaje diagnosticable -- defensa para un caller que arme texto por otro
+lado sin esa garantía, probada con un subrogado suelto a mano.
+
+**Fuera de alcance, a propósito:** no vuelve a medir el largo del mensaje
+codificado -- eso ya lo hizo `formatTicketMessage` en el paso 5.6. No
+expone el dominio (`wa.me` vs `api.whatsapp.com`) como parámetro
+configurable: no hay caller legítimo que deba elegir entre los dos, y
+exponerlo debilitaría justo el aislamiento que el riesgo R9 pide.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
