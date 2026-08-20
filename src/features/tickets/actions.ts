@@ -1,6 +1,6 @@
 "use server";
 
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 
 import { db } from "@/db";
@@ -10,6 +10,11 @@ import { authorizedAction } from "@/lib/auth";
 import { toBadgeStatus } from "./status-mapping";
 import { STATUS_LABEL } from "./components/status-badge";
 import {
+  BULK_SELECTION_MAX,
+  getTicketIdsForFilters,
+  resolveTicketInboxFilters,
+} from "./queries";
+import {
   addTicketNoteInputSchema,
   assignTicketInputSchema,
   changeTicketPriorityInputSchema,
@@ -18,6 +23,16 @@ import {
   type TicketActionResult,
   type TicketStatusValue,
 } from "./ticket-actions-schema";
+import {
+  bulkAssignInputSchema,
+  bulkChangeStatusInputSchema,
+  type BulkActionResult,
+  type BulkTicketSelection,
+} from "./ticket-bulk-schema";
+import {
+  normalizeSearchParams,
+  ticketInboxSearchParamsSchema,
+} from "./ticket-inbox-schema";
 
 // Acciones sobre un reclamo (paso 6.4) -- hasta acá el panel solo miraba
 // (paso 6.3); desde acá el administrador trabaja. Las cuatro pasan por
@@ -326,5 +341,226 @@ export const addTicketNoteAction = authorizedAction(
 
     revalidateTicketPaths(ticketId, current.buildingId);
     return { ok: true };
+  },
+);
+
+// -----------------------------------------------------------------------
+// Acciones masivas (paso 6.5)
+// -----------------------------------------------------------------------
+
+// A diferencia de revalidateTicketPaths() (arriba, para UN reclamo con un
+// buildingId conocido), un lote puede tocar reclamos de VARIOS edificios a
+// la vez -- se revalida el patrón literal con corchetes para CUALQUIER
+// buildingId/ticketId (mismo criterio ya usado en imports/actions.ts y en
+// buildings/actions.ts para "todos los edificios", ver esos archivos).
+function revalidateBulkPaths() {
+  revalidatePath("/panel/tickets");
+  revalidatePath("/panel/tickets/[ticketId]");
+  revalidatePath("/panel/buildings/[buildingId]/tickets");
+  revalidatePath("/panel", "layout");
+}
+
+// Traduce una selección (paso 6.5, ver ticket-bulk-schema.ts) a la lista
+// real de ids sobre la que va a operar la acción -- "ids" ya la trae
+// resuelta; "filtered" vuelve a correr el MISMO filtro que arma la
+// bandeja (resolveTicketInboxFilters + getTicketIdsForFilters,
+// queries.ts) para traer TODOS los ids que matchean AHORA, nunca una
+// lista vieja armada en el cliente cuando se tildó la casilla. Devuelve
+// error si el filtro trae más de BULK_SELECTION_MAX reclamos -- un tope
+// de sanidad, no una limitación técnica (la consulta y el UPDATE son O(1)
+// en cantidad de round-trips sin importar cuántas filas toquen, ver el
+// reporte del paso), pensado para que "seleccionar todo lo filtrado"
+// nunca ejecute silenciosamente sobre un filtro mucho más ancho de lo que
+// el administrador imaginaba.
+async function resolveSelectionIds(
+  organizationId: string,
+  organizationTimezone: string,
+  selection: BulkTicketSelection,
+): Promise<{ ok: true; ids: string[] } | { ok: false; error: string }> {
+  if (selection.mode === "ids") {
+    return { ok: true, ids: selection.ticketIds };
+  }
+
+  const parsedFilters = ticketInboxSearchParamsSchema.safeParse(
+    normalizeSearchParams(selection.filters),
+  );
+  const filters = parsedFilters.success
+    ? parsedFilters.data
+    : ticketInboxSearchParamsSchema.parse({});
+  const inboxFilters = resolveTicketInboxFilters(filters, organizationTimezone);
+  const ids = await getTicketIdsForFilters(organizationId, inboxFilters);
+
+  if (ids.length > BULK_SELECTION_MAX) {
+    return {
+      ok: false,
+      error: `Hay demasiados reclamos con este filtro (más de ${BULK_SELECTION_MAX}) -- achicá el filtro antes de aplicar una acción masiva.`,
+    };
+  }
+  return { ok: true, ids };
+}
+
+// Cambiar estado en lote -- "se hace lo que se puede", nunca todo o nada
+// (ver CLAUDE.md > Acciones masivas): cada reclamo del lote se valida CON
+// SU PROPIO estado actual (leído fresco en esta misma consulta, nunca
+// asumido) contra isValidStatusTransition() -- el mismo mapa de
+// transiciones del paso 6.4, sin duplicarlo. Los que sí pueden se
+// actualizan en UN SOLO UPDATE (WHERE id = ANY(...)), sin importar si son
+// 2 o 200 -- ver el reporte del paso para la medición real. Un evento por
+// reclamo actualizado (nunca uno solo "resumen"): ticket_events está
+// indexado por ticket_id, así que un evento compartido sería invisible en
+// la línea de tiempo de cualquiera de esos reclamos vista individualmente
+// -- exactamente lo que un administrador mirando UN reclamo después
+// necesita entender.
+export const bulkChangeTicketStatusAction = authorizedAction(
+  async (context, input: unknown): Promise<BulkActionResult> => {
+    const parsed = bulkChangeStatusInputSchema.safeParse(input);
+    if (!parsed.success) {
+      return { ok: false, error: "Datos inválidos." };
+    }
+    const { selection, toStatus } = parsed.data;
+
+    const resolved = await resolveSelectionIds(
+      context.organization.id,
+      context.organization.timezone,
+      selection,
+    );
+    if (!resolved.ok) {
+      return resolved;
+    }
+    if (resolved.ids.length === 0) {
+      return { ok: false, error: "No hay reclamos para actualizar." };
+    }
+
+    const current = await db
+      .select({ id: tickets.id, status: tickets.status })
+      .from(tickets)
+      .where(
+        and(
+          inArray(tickets.id, resolved.ids),
+          eq(tickets.organizationId, context.organization.id),
+          isNull(tickets.deletedAt),
+        ),
+      );
+
+    const notFoundCount = resolved.ids.length - current.length;
+    const eligible = current.filter((t) =>
+      isValidStatusTransition(t.status, toStatus),
+    );
+    const skippedCount = current.length - eligible.length;
+
+    if (eligible.length === 0) {
+      return { ok: true, updatedCount: 0, skippedCount, notFoundCount };
+    }
+
+    const now = new Date();
+    const eligibleIds = eligible.map((t) => t.id);
+
+    await db
+      .update(tickets)
+      .set({ status: toStatus, ...timestampFieldsForStatus(toStatus, now) })
+      .where(
+        and(
+          inArray(tickets.id, eligibleIds),
+          eq(tickets.organizationId, context.organization.id),
+        ),
+      );
+
+    await db.insert(ticketEvents).values(
+      eligible.map((t) => ({
+        organizationId: context.organization.id,
+        ticketId: t.id,
+        type: "status_changed" as const,
+        actorType: "admin" as const,
+        actorLabel: context.appUser.displayName,
+        payload: { from: t.status, to: toStatus },
+      })),
+    );
+
+    revalidateBulkPaths();
+    return {
+      ok: true,
+      updatedCount: eligible.length,
+      skippedCount,
+      notFoundCount,
+    };
+  },
+);
+
+// Asignar responsable en lote -- sin concepto de "transición inválida"
+// (mismo criterio que la acción individual del paso 6.4): el único motivo
+// para saltar un reclamo es que YA tenga ese mismo responsable (no
+// escribir un evento sin cambio real).
+export const bulkAssignTicketsAction = authorizedAction(
+  async (context, input: unknown): Promise<BulkActionResult> => {
+    const parsed = bulkAssignInputSchema.safeParse(input);
+    if (!parsed.success) {
+      return {
+        ok: false,
+        error: parsed.error.issues[0]?.message ?? "Datos inválidos.",
+      };
+    }
+    const { selection, assignee } = parsed.data;
+
+    const resolved = await resolveSelectionIds(
+      context.organization.id,
+      context.organization.timezone,
+      selection,
+    );
+    if (!resolved.ok) {
+      return resolved;
+    }
+    if (resolved.ids.length === 0) {
+      return { ok: false, error: "No hay reclamos para actualizar." };
+    }
+
+    const current = await db
+      .select({ id: tickets.id, assignee: tickets.assignee })
+      .from(tickets)
+      .where(
+        and(
+          inArray(tickets.id, resolved.ids),
+          eq(tickets.organizationId, context.organization.id),
+          isNull(tickets.deletedAt),
+        ),
+      );
+
+    const notFoundCount = resolved.ids.length - current.length;
+    const eligible = current.filter((t) => t.assignee !== assignee);
+    const skippedCount = current.length - eligible.length;
+
+    if (eligible.length === 0) {
+      return { ok: true, updatedCount: 0, skippedCount, notFoundCount };
+    }
+
+    const eligibleIds = eligible.map((t) => t.id);
+
+    await db
+      .update(tickets)
+      .set({ assignee })
+      .where(
+        and(
+          inArray(tickets.id, eligibleIds),
+          eq(tickets.organizationId, context.organization.id),
+        ),
+      );
+
+    await db.insert(ticketEvents).values(
+      eligible.map((t) => ({
+        organizationId: context.organization.id,
+        ticketId: t.id,
+        type: "assigned" as const,
+        actorType: "admin" as const,
+        actorLabel: context.appUser.displayName,
+        payload: { assignee },
+      })),
+    );
+
+    revalidateBulkPaths();
+    return {
+      ok: true,
+      updatedCount: eligible.length,
+      skippedCount,
+      notFoundCount,
+    };
   },
 );

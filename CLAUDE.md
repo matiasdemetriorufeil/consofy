@@ -2073,13 +2073,13 @@ consorcio, no contra "cualquiera a cualquiera".** El mapa completo vive en
 `ticket-actions-schema.ts` (`TICKET_STATUS_TRANSITIONS`), con el
 razonamiento de cada flecha en el propio comentario del código. Resumen:
 
-| Desde \ Hacia | new | in_progress | resolved | closed | discarded |
-| -------------- | --- | ----------- | -------- | ------ | --------- |
-| **new**         | -   | ✅          | ✅       | ❌     | ✅        |
-| **in_progress** | ❌  | -           | ✅       | ❌     | ✅        |
-| **resolved**    | ❌  | ✅ (reabrir)| -        | ✅     | ❌        |
-| **closed**      | ❌  | ✅ (reabrir)| ❌       | -      | ❌        |
-| **discarded**   | ✅ (reabrir) | ❌ | ❌       | ❌     | -         |
+| Desde \ Hacia   | new          | in_progress  | resolved | closed | discarded |
+| --------------- | ------------ | ------------ | -------- | ------ | --------- |
+| **new**         | -            | ✅           | ✅       | ❌     | ✅        |
+| **in_progress** | ❌           | -            | ✅       | ❌     | ✅        |
+| **resolved**    | ❌           | ✅ (reabrir) | -        | ✅     | ❌        |
+| **closed**      | ❌           | ✅ (reabrir) | ❌       | -      | ❌        |
+| **discarded**   | ✅ (reabrir) | ❌           | ❌       | ❌     | -         |
 
 Ideas centrales: `new`/`in_progress` pueden resolverse directo (un arreglo
 inmediato no necesita el paso intermedio) o descartarse directo (duplicado,
@@ -2176,18 +2176,19 @@ es un evento más de `ticket_events` (`type: "note_added"`, `payload:
 {note}`) -- no hay una tabla ni columna aparte, la nota ES el evento, y ya
 se renderiza en la Línea de tiempo (paso 6.3, `describeTicketEvent`) sin
 tocar nada de ese código. `ticket_events` tiene `denyAnonAuthenticated()`
-+ RLS (ver CLAUDE.md > Políticas RLS) -- `anon`/`authenticated` no pueden
-leerla nunca, ni con la anon key del navegador; la única lectura de esta
-tabla en TODO el proyecto es `getTicketTimeline()`
-(`tickets/queries.ts`), y su único consumidor es
-`/panel/tickets/[ticketId]` (confirmado con grep: cero resultados fuera
-de esa página). Probado en la práctica: se cargó una nota interna real en
-un reclamo con adjuntos, y se abrió `/s/[token]` (la galería pública de
-ESE MISMO reclamo, criterio de aceptación de la etapa 11) -- ni el texto
-de la nota, ni la palabra "nota", ni el actor ("Administrador") aparecen
-en la página, ni en el texto visible ni en el HTML crudo de la respuesta.
-`/r/[token]` (el formulario) ni siquiera conoce `ticket_events` en
-absoluto.
+
+- RLS (ver CLAUDE.md > Políticas RLS) -- `anon`/`authenticated` no pueden
+  leerla nunca, ni con la anon key del navegador; la única lectura de esta
+  tabla en TODO el proyecto es `getTicketTimeline()`
+  (`tickets/queries.ts`), y su único consumidor es
+  `/panel/tickets/[ticketId]` (confirmado con grep: cero resultados fuera
+  de esa página). Probado en la práctica: se cargó una nota interna real en
+  un reclamo con adjuntos, y se abrió `/s/[token]` (la galería pública de
+  ESE MISMO reclamo, criterio de aceptación de la etapa 11) -- ni el texto
+  de la nota, ni la palabra "nota", ni el actor ("Administrador") aparecen
+  en la página, ni en el texto visible ni en el HTML crudo de la respuesta.
+  `/r/[token]` (el formulario) ni siquiera conoce `ticket_events` en
+  absoluto.
 
 **Avisarle algo al vecino cuando se resuelve -- analizado, NO
 implementado en este paso (pedido explícito del enunciado).** Hoy no
@@ -2245,6 +2246,155 @@ diagnóstico temporal, borrada después):**
    ("La nota no puede estar vacía."); de 2001 caracteres rechazada
    ("Como máximo 2000 caracteres.") -- validado con Zod antes de tocar la
    base.
+
+## Acciones masivas (paso 6.5)
+
+Seleccionar varios reclamos y cambiar estado o asignar responsable en
+lote -- `TicketInboxList`/`TicketBulkActionsBar`
+(`tickets/components/`) del lado de la UI,
+`bulkChangeTicketStatusAction`/`bulkAssignTicketsAction`
+(`tickets/actions.ts`) del lado del servidor.
+
+**Cómo se selecciona -- la trampa de "seleccionar todo" resuelta con dos
+modos explícitos, nunca ambiguos.** La casilla del encabezado de la tabla
+selecciona los reclamos de ESTA página nomás (hasta 25, ver
+`TICKET_INBOX_PAGE_SIZE`) -- mismo patrón que Gmail/Notion para esta
+ambigüedad exacta. Cuando la página entera ya está tildada Y hay más
+resultados que esta página, aparece una segunda línea explícita:
+"Seleccionaste los 25 reclamos de esta página. **Seleccionar los N
+reclamos que coinciden con estos filtros**" -- un click aparte, nunca
+automático, para que el administrador SIEMPRE sepa cuál de las dos cosas
+tiene seleccionada. Esta segunda opción no arma una lista de ids en el
+cliente (500 uuids no tienen ningún motivo para viajar por la red) --
+manda los mismos parámetros de filtro que ya vive en la URL de la bandeja
+(`selection: { mode: "filtered", filters }`), y el servidor vuelve a
+resolver la lista real de ids EN EL MOMENTO de ejecutar
+(`getTicketIdsForFilters`, queries.ts, reusando
+`buildTicketInboxConditions` -- el mismo WHERE que arma la bandeja, así
+que "todo lo filtrado" nunca puede desincronizarse de lo que la pantalla
+muestra). No hay selección manual que persista entre páginas (tildar en la
+página 1, pasar a la página 2, seguir tildando) -- alcance deliberadamente
+acotado: la única forma de operar sobre más de una página es la escalada
+de "todo lo filtrado", no una acumulación de selección individual cruzando
+páginas.
+
+**Un tope de sanidad, `BULK_SELECTION_MAX = 500`** (queries.ts): no es una
+limitación técnica (la consulta y el `UPDATE` son O(1) en cantidad de
+round-trips sin importar cuántas filas toquen, ver la medición más abajo)
+-- es para que "seleccionar todo lo filtrado" nunca ejecute en silencio
+sobre un filtro mucho más ancho de lo que el administrador imaginaba. Con
+más de 500 reclamos matcheando el filtro, la acción se rechaza con un
+mensaje que pide achicar el filtro primero.
+
+**Transiciones inválidas en un lote -- se hace lo que se puede, nunca todo
+o nada.** Reusa `isValidStatusTransition()` del paso 6.4 sin duplicar el
+mapa: cada reclamo del lote se valida con SU PROPIO estado real (leído
+fresco al ejecutar, nunca asumido del cliente). Se eligió aplicar
+parcialmente en vez de all-or-nothing porque una selección mixta
+("resolvé todos los del ascensor") es el caso NORMAL de un lote real, no
+un error -- exigir que el administrador desarme la selección a mano para
+que sea homogénea le devuelve el trabajo manual que el lote existe para
+evitar. El diálogo de confirmación explica este comportamiento ANTES de
+ejecutar (no como sorpresa después): "Los reclamos que no puedan pasar a
+ese estado desde el que están ahora quedan sin cambios." El resultado
+final (`updatedCount`/`skippedCount`/`notFoundCount`) se muestra en un
+toast, siempre. Probado con un lote real de 8 reclamos mixtos (2 `new`, 3
+`in_progress`, 2 `closed`, 1 `discarded`) pidiendo pasar a "Resuelto": el
+toast mostró "5 reclamos actualizados · 3 sin cambios" -- confirmado por
+SQL, exactamente los 2 `new` + 3 `in_progress` (los únicos con una
+transición válida hacia `resolved`) recibieron su evento
+`status_changed`, los otros 3 quedaron intactos.
+
+**Cuántos eventos -- uno por reclamo actualizado, nunca un evento
+"resumen".** `ticket_events` está indexado por `ticket_id`
+(`ticket_events_ticket_id_created_at_idx`) y cada `getTicketTimeline()`
+lee SOLO los eventos de UN reclamo puntual -- un evento compartido entre
+50 reclamos sería estructuralmente invisible al mirar el historial de
+cualquiera de esos 50 por separado, justo lo que un administrador
+necesita entender después ("¿por qué este reclamo puntual cambió de
+estado un martes a las 3pm?"). El `INSERT` sigue siendo UNA sola consulta
+aunque sean 50 o 200 filas (`db.insert(ticketEvents).values([...])`,
+multi-row, no un `INSERT` por fila) -- ver la medición.
+
+**Confirmación siempre antes de ejecutar, con la cuenta exacta.** Elegir
+un destino (estado o responsable) abre un diálogo -- nunca se ejecuta
+directo desde el `<Select>`/input. El título del diálogo repite el número
+exacto de reclamos y el destino elegido ("Cambiar el estado de 8 reclamos
+a 'Resuelto'"), pensado específicamente para el error de haber
+seleccionado de más: el administrador ve la cuenta ANTES de comprometerse,
+no después.
+
+**Deshacer -- analizado, no construido (no fue pedido).** Técnicamente
+viable para AMBAS acciones, con matices distintos:
+
+- **Responsable**: trivial -- cada evento `assigned` ya guarda el valor
+  anterior implícito (el evento previo de ese mismo reclamo), así que
+  "deshacer" es releer el estado antes del lote y reescribirlo. Ningún
+  problema de reglas de negocio de por medio.
+- **Estado**: viable pero MENOS directo de lo que parece -- cada evento
+  `status_changed` guarda `{from, to}`, así que en principio "deshacer"
+  sería aplicar la transición inversa. El problema real: la máquina de
+  estados NO es simétrica (ver la tabla de transiciones del paso 6.4) --
+  un reclamo que pasó de `new` a `resolved` no puede "deshacerse" con
+  `resolved -> new` porque esa transición no existe (solo
+  `resolved -> in_progress`, un reabrir, no una vuelta exacta al
+  estado anterior). Un deshacer real necesitaría una vía separada que
+  bypasee la validación normal de transiciones (o aceptar que no todos los
+  casos se puedan deshacer con precisión).
+
+Costo estimado de construirlo: un identificador de lote (`batchId`, hoy
+NO existe -- se evaluó agregarlo a los payloads de este mismo paso y se
+descartó por no tener un consumidor real todavía, ver más abajo) para
+poder encontrar "todos los eventos de ESTE lote puntual"; una acción nueva
+acotada a una ventana de tiempo corta (ej. 5 minutos, al estilo "deshacer
+envío" de Gmail); y, para estado, una vía que no pase por
+`isValidStatusTransition()` normal. Ninguna pieza es grande por separado,
+pero es trabajo real, no una casilla que falta tildar -- queda fuera de
+este paso.
+
+**`batchId` en el payload de los eventos -- evaluado y descartado por
+ahora.** Habría servido para agrupar "qué eventos vinieron del MISMO
+lote" (útil para el deshacer de arriba, o para que un administrador
+entienda "estos 50 cambios pasaron juntos"). Se descartó en este paso
+porque los timestamps de los eventos de un mismo lote ya quedan
+prácticamente idénticos (la misma invocación de servidor los escribe a
+todos en el mismo `INSERT`), así que ya son agrupables por inspección sin
+necesitar una columna nueva -- agregar `batchId` sin ningún consumidor
+real todavía sería la misma clase de anticipación que CLAUDE.md > Qué NO
+hacer desaconseja.
+
+**Avisarle al vecino -- fuera de alcance, mismo análisis que el paso 6.4**
+(ver esa sección): sigue sin existir un canal de salida barato.
+
+**Rendimiento -- consultas CONSTANTES sin importar el tamaño del lote,
+medido de verdad con 50 y 200 reclamos reales ("Prueba carga 6.5", mezcla
+de los 5 estados).** Tres consultas siempre en modo "ids" (`SELECT`
+estado real + `UPDATE` masivo + `INSERT` multi-row de eventos), cuatro en
+modo "filtered" (+1, `getTicketIdsForFilters`) -- nunca una consulta por
+fila, mismo aprendizaje ya aplicado en la importación CSV (paso 4.5,
+`IMPORT_WRITE_POOL_MAX`) de que la latencia por consulta se multiplica
+rápido. Medido:
+
+- **Costo real de cada consulta, aislado (`EXPLAIN ANALYZE` sobre el
+  `SELECT` con 200 ids):** `Execution Time: 0.317 ms` -- un Bitmap Index
+  Scan sobre la PK, prácticamente gratis para Postgres sin importar la
+  cantidad de ids en el `ANY(...)`.
+- **Las tres consultas juntas, aisladas de la red de Next.js/
+  `requireUser()`:** ~330ms cada una en estado estable (172-380ms es el
+  rango ya documentado para un round-trip a la base de desarrollo, ver
+  CLAUDE.md > Separación dev/producción) -- **~1 segundo total**, CASI
+  IDÉNTICO entre 50 y 200 reclamos (978ms vs. 997ms en la segunda
+  corrida): confirma que el costo es por CANTIDAD DE CONSULTAS, no por
+  cantidad de filas.
+- **La Server Action completa, HTTP incluido (con `authorizedAction`/
+  `requireUser`/Next.js de por medio):** ~1.5 segundos en estado estable
+  para 50 y para 200 -- la primera invocación de una ruta nueva en
+  desarrollo pagó un costo de compilación de ~3.9s, no representativo
+  (Next.js compila la ruta la primera vez que se pide, no en cada
+  request).
+- **Estimado en producción**, misma base numérica que el resto del
+  proyecto (multiplicador ~57x ya medido): 3-4 round-trips a ~3-4ms cada
+  uno dan **12-16ms totales**, sin importar si el lote es de 5 o de 500.
 
 ## Reglas de seguridad (no negociables)
 

@@ -23,9 +23,11 @@ import {
   tickets,
   units,
 } from "@/db/schema";
+import { zonedDayBoundsToUtc } from "@/lib/format-date";
 import {
   TICKET_INBOX_PAGE_SIZE,
   UNASSIGNED_ASSIGNEE_VALUE,
+  type TicketInboxSearchParams,
   type TicketSortColumn,
   type TicketSortDirection,
   type TicketStatusFilterValue,
@@ -318,6 +320,41 @@ export function getStatusesForFilter(
   return [statusFilter];
 }
 
+// Convierte los searchParams YA VALIDADOS (ticketInboxSearchParamsSchema)
+// al shape que espera getTicketInbox() -- extraído en el paso 6.5, cuando
+// apareció el segundo consumidor real: `page.tsx` ya armaba este objeto a
+// mano, y las acciones masivas (actions.ts, modo "filtered" -- "todos los
+// reclamos que matchean el filtro actual", no solo la página visible)
+// necesitan exactamente la misma conversión, con la misma zona horaria del
+// rango de fechas. Mismo criterio de extracción ya usado en el proyecto
+// (AR_WHATSAPP_*, getClientIp, createSignedAttachmentUrls): se factoriza
+// recién con el segundo consumidor real, no antes.
+export function resolveTicketInboxFilters(
+  filters: TicketInboxSearchParams,
+  timezone: string,
+): TicketInboxFilters {
+  const dateFrom = filters.from
+    ? zonedDayBoundsToUtc(filters.from, timezone).start
+    : undefined;
+  const dateTo = filters.to
+    ? zonedDayBoundsToUtc(filters.to, timezone).end
+    : undefined;
+
+  return {
+    buildingId: filters.building,
+    unitId: filters.unit,
+    categoryId: filters.category,
+    statuses: getStatusesForFilter(filters.status),
+    priority: filters.priority,
+    assignee: filters.assignee,
+    dateFrom,
+    dateTo,
+    search: filters.q || undefined,
+    sortBy: filters.sort,
+    sortDir: filters.dir,
+  };
+}
+
 export type TicketInboxFilters = {
   buildingId?: string;
   unitId?: string;
@@ -588,6 +625,43 @@ export async function getTicketInboxCount(
     )
     .where(and(...conditions));
   return row?.count ?? 0;
+}
+
+// Tope de una acción masiva (paso 6.5) -- ver ticket-bulk-schema.ts para
+// el razonamiento completo de por qué existe un límite. Vive acá (no solo
+// en el schema) porque esta consulta es la que efectivamente lo aplica
+// con un LIMIT real, no confiando en que el caller lo respete.
+export const BULK_SELECTION_MAX = 500;
+
+// Resuelve TODOS los ids que matchean el filtro actual, sin paginar --
+// paso 6.5, modo "seleccionar todos los reclamos filtrados" de las
+// acciones masivas. Reusa exactamente las mismas condiciones que
+// getTicketInbox()/getTicketInboxCount() (mismo buildTicketInboxConditions),
+// así que "todos los que matchean el filtro" es, por construcción, el
+// mismo conjunto que ve el administrador escaneando la bandeja con ese
+// filtro puesto -- nunca puede desincronizarse de lo que la pantalla
+// muestra. `LIMIT BULK_SELECTION_MAX + 1` (no exactamente el tope): pedir
+// uno de más es lo que permite distinguir "hay exactamente 500" de "hay
+// más de 500" con una sola consulta, sin un COUNT(*) aparte -- el caller
+// (actions.ts) decide qué hacer si la respuesta trae el excedente.
+export async function getTicketIdsForFilters(
+  organizationId: string,
+  filters: TicketInboxFilters,
+): Promise<string[]> {
+  const conditions = buildTicketInboxConditions(organizationId, filters);
+  const rows = await db
+    .select({ id: tickets.id })
+    .from(tickets)
+    .leftJoin(
+      people,
+      and(
+        eq(people.id, tickets.personId),
+        eq(people.organizationId, tickets.organizationId),
+      ),
+    )
+    .where(and(...conditions))
+    .limit(BULK_SELECTION_MAX + 1);
+  return rows.map((row) => row.id);
 }
 
 // Filtro-vacío vs. org-vacía (ver el reporte del paso): esta consulta

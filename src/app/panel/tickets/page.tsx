@@ -1,29 +1,17 @@
-import { ArrowDown, ArrowUp, Inbox, SearchX } from "lucide-react";
-import Link from "next/link";
+import { Inbox, SearchX } from "lucide-react";
 
 import { EmptyState } from "@/components/empty-state";
-import { RelativeDate } from "@/components/relative-date";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { getBuildingFilterOptions } from "@/features/buildings/queries";
-import { PriorityBadge } from "@/features/tickets/components/priority-badge";
-import { StatusBadge } from "@/features/tickets/components/status-badge";
-import { TicketCode } from "@/features/tickets/components/ticket-code";
 import { TicketFiltersBar } from "@/features/tickets/components/ticket-filters-bar";
+import { TicketInboxList } from "@/features/tickets/components/ticket-inbox-list";
 import { TicketPagination } from "@/features/tickets/components/ticket-pagination";
 import {
   getAssigneeFilterOptions,
   getCategoryFilterOptions,
-  getStatusesForFilter,
   getTicketInbox,
   getTicketInboxCount,
   organizationHasAnyTicket,
+  resolveTicketInboxFilters,
 } from "@/features/tickets/queries";
 import {
   buildTicketInboxHref,
@@ -32,20 +20,16 @@ import {
   TICKET_INBOX_PAGE_SIZE,
   ticketInboxQueryString,
   ticketInboxSearchParamsSchema,
-  type TicketSortColumn,
-  type TicketSortDirection,
 } from "@/features/tickets/ticket-inbox-schema";
-import {
-  toBadgePriority,
-  toBadgeStatus,
-} from "@/features/tickets/status-mapping";
 import { getUnitsForBuilding } from "@/features/units/queries";
 import { requireUser } from "@/lib/auth";
-import { zonedDayBoundsToUtc } from "@/lib/format-date";
 
-// Bandeja de reclamos con filtros, paginación y orden (pasos 6.1 y 6.2) --
-// la pantalla donde el administrador vive todos los días (ver CLAUDE.md >
-// Qué es este proyecto).
+// Bandeja de reclamos con filtros, paginación, orden (pasos 6.1/6.2) y
+// selección para acciones masivas (paso 6.5) -- la pantalla donde el
+// administrador vive todos los días (ver CLAUDE.md > Qué es este
+// proyecto). Sigue siendo un Server Component en su mayor parte -- solo la
+// selección de filas y la barra de acciones masivas (TicketInboxList) son
+// Client Component, ver el comentario de ese archivo sobre por qué.
 export default async function TicketsPage({
   searchParams,
 }: PageProps<"/panel/tickets">) {
@@ -81,26 +65,10 @@ export default async function TicketsPage({
     ? await getUnitsForBuilding(organization.id, filters.building)
     : [];
 
-  const dateFrom = filters.from
-    ? zonedDayBoundsToUtc(filters.from, organization.timezone).start
-    : undefined;
-  const dateTo = filters.to
-    ? zonedDayBoundsToUtc(filters.to, organization.timezone).end
-    : undefined;
-
-  const inboxFilters = {
-    buildingId: filters.building,
-    unitId: filters.unit,
-    categoryId: filters.category,
-    statuses: getStatusesForFilter(filters.status),
-    priority: filters.priority,
-    assignee: filters.assignee,
-    dateFrom,
-    dateTo,
-    search: filters.q || undefined,
-    sortBy: filters.sort,
-    sortDir: filters.dir,
-  };
+  const inboxFilters = resolveTicketInboxFilters(
+    filters,
+    organization.timezone,
+  );
 
   let { rows: tickets, totalCount } = await getTicketInbox(organization.id, {
     ...inboxFilters,
@@ -168,14 +136,14 @@ export default async function TicketsPage({
     );
   }
 
-  // Encabezados ordenables (paso 6.2) -- Link de Next.js puro, sin
-  // Client Component: el servidor ya sabe el orden actual (filters.sort/
-  // dir) y puede calcular el próximo estado (toggle si ya es esta columna,
-  // "desc" si se cambia de columna) sin JS del lado del cliente. Cambiar
-  // de orden también resetea la página a 1 -- mismo motivo que cualquier
-  // otro cambio de filtro (ver TicketFiltersBar).
-  function buildSortHref(column: TicketSortColumn): string {
-    const nextDir: TicketSortDirection =
+  // Encabezados ordenables (paso 6.2) -- hrefs resueltos server-side
+  // (el servidor ya sabe el orden actual) y pasados como string a
+  // TicketInboxList, que es Client Component desde el paso 6.5 (ver ese
+  // archivo) -- ya no puede calcularlos por su cuenta con la misma lógica
+  // "sin JS" del Server Component original, pero el cálculO EN SÍ sigue
+  // pasando acá, server-side; el cliente solo recibe el resultado.
+  function buildSortHref(column: "priority" | "reportedAt"): string {
+    const nextDir =
       filters.sort === column
         ? filters.dir === "desc"
           ? "asc"
@@ -188,21 +156,6 @@ export default async function TicketsPage({
     });
   }
 
-  // Función común (no un componente -- ver el lint react-hooks/
-  // static-components: declarar un componente adentro del render de otro
-  // resetea su estado en cada render) que devuelve el ícono de dirección,
-  // o null si esta columna no es la que está ordenando ahora.
-  function sortIndicator(column: TicketSortColumn) {
-    if (filters.sort !== column) {
-      return null;
-    }
-    return filters.dir === "desc" ? (
-      <ArrowDown aria-hidden="true" className="size-3.5" />
-    ) : (
-      <ArrowUp aria-hidden="true" className="size-3.5" />
-    );
-  }
-
   function buildPageHref(page: number): string {
     return buildTicketInboxHref("/panel/tickets", normalizedParams, {
       page: page === 1 ? null : String(page),
@@ -210,20 +163,10 @@ export default async function TicketsPage({
   }
 
   // Cómo se llega al detalle y cómo se vuelve sin perder filtros (paso
-  // 6.3): el título de cada fila/tarjeta linkea a /panel/tickets/[id] con
-  // la query actual codificada en `from` -- el detalle arma su link
-  // "Volver a la bandeja" con ese valor tal cual, así que cambiar de
-  // filtro/página/orden y después entrar a un reclamo y volver deja al
-  // administrador exactamente donde estaba, nunca reseteado a la vista por
-  // default. Mismo criterio de "la URL decide" que ya fijaron los pasos
-  // 6.1/6.2, aplicado acá a la navegación entre pantallas en vez de a un
-  // control dentro de la misma.
+  // 6.3): viaja como string a TicketInboxList, que arma cada link de
+  // título con esto -- ver el comentario original de esta idea en el
+  // reporte del paso 6.3.
   const backQuery = ticketInboxQueryString(normalizedParams);
-  function buildDetailHref(ticketId: string): string {
-    return backQuery
-      ? `/panel/tickets/${ticketId}?from=${encodeURIComponent(backQuery)}`
-      : `/panel/tickets/${ticketId}`;
-  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -265,112 +208,21 @@ export default async function TicketsPage({
         {totalPages > 1 && ` · página ${effectivePage} de ${totalPages}`}
       </p>
 
-      {/* Desktop: tabla. Mobile: tarjetas apiladas -- una tabla de 7-8
-          columnas no entra en un celular sin scroll horizontal, y CLAUDE.md
-          pide evitar eso (ver Responsive > wide content). Misma
-          información en las dos, solo cambia el layout. */}
-      <div className="hidden md:block">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Código</TableHead>
-              {showBuildingColumn && <TableHead>Edificio</TableHead>}
-              <TableHead>Unidad</TableHead>
-              <TableHead>Categoría</TableHead>
-              <TableHead>Título</TableHead>
-              <TableHead>
-                <Link
-                  href={buildSortHref("priority")}
-                  className="hover:text-ink inline-flex items-center gap-1"
-                >
-                  Prioridad
-                  {sortIndicator("priority")}
-                </Link>
-              </TableHead>
-              <TableHead>Estado</TableHead>
-              <TableHead>
-                <Link
-                  href={buildSortHref("reportedAt")}
-                  className="hover:text-ink inline-flex items-center gap-1"
-                >
-                  Reportado
-                  {sortIndicator("reportedAt")}
-                </Link>
-              </TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {tickets.map((ticket) => (
-              <TableRow key={ticket.id}>
-                <TableCell>
-                  <TicketCode code={ticket.publicCode} />
-                </TableCell>
-                {showBuildingColumn && (
-                  <TableCell className="max-w-40 truncate">
-                    {ticket.buildingName}
-                  </TableCell>
-                )}
-                <TableCell className="text-ink-muted">
-                  {ticket.unitLabel ?? "—"}
-                </TableCell>
-                <TableCell>{ticket.categoryName}</TableCell>
-                <TableCell className="max-w-64 truncate">
-                  <Link
-                    href={buildDetailHref(ticket.id)}
-                    className="outline-none hover:underline focus-visible:underline"
-                  >
-                    {ticket.title}
-                  </Link>
-                </TableCell>
-                <TableCell>
-                  <PriorityBadge priority={toBadgePriority(ticket.priority)} />
-                </TableCell>
-                <TableCell>
-                  <StatusBadge status={toBadgeStatus(ticket.status)} />
-                </TableCell>
-                <TableCell>
-                  <RelativeDate
-                    date={ticket.reportedAt}
-                    timezone={organization.timezone}
-                  />
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
-
-      <ul className="flex flex-col gap-2 md:hidden">
-        {tickets.map((ticket) => (
-          <li
-            key={ticket.id}
-            className="border-border bg-surface flex flex-col gap-2 rounded-lg border p-3"
-          >
-            <div className="flex items-center justify-between gap-2">
-              <TicketCode code={ticket.publicCode} />
-              <RelativeDate
-                date={ticket.reportedAt}
-                timezone={organization.timezone}
-                className="text-ink-muted text-xs"
-              />
-            </div>
-            <Link
-              href={buildDetailHref(ticket.id)}
-              className="text-ink truncate text-sm font-medium hover:underline"
-            >
-              {ticket.title}
-            </Link>
-            <p className="text-ink-muted truncate text-xs">
-              {showBuildingColumn ? `${ticket.buildingName} · ` : ""}
-              {ticket.unitLabel ?? "Sin unidad"} · {ticket.categoryName}
-            </p>
-            <div className="flex flex-wrap items-center gap-2">
-              <PriorityBadge priority={toBadgePriority(ticket.priority)} />
-              <StatusBadge status={toBadgeStatus(ticket.status)} />
-            </div>
-          </li>
-        ))}
-      </ul>
+      <TicketInboxList
+        tickets={tickets}
+        showBuildingColumn={showBuildingColumn}
+        organizationTimezone={organization.timezone}
+        backQuery={backQuery}
+        activeSort={filters.sort}
+        activeDir={filters.dir}
+        sortHrefs={{
+          priority: buildSortHref("priority"),
+          reportedAt: buildSortHref("reportedAt"),
+        }}
+        assigneeOptions={assigneeOptions}
+        totalCount={totalCount}
+        rawFilters={normalizedParams}
+      />
 
       <TicketPagination
         currentPage={effectivePage}
