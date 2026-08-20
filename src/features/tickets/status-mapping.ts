@@ -16,14 +16,12 @@ const STATUS_MAP: Record<DbStatus, TicketStatus> = {
   in_progress: "en_progreso",
   resolved: "resuelto",
   closed: "cerrado",
-  // StatusBadge todavía no tiene un bucket propio para "descartado" (solo
-  // los 4 estados de arriba) -- se muestra como "cerrado", el más
-  // parecido en significado (terminado, no pide acción), sin tocar el
-  // componente compartido solo para este caso. Ninguna query del
-  // dashboard (paso 3.5) devuelve reclamos descartados hoy, así que esto
-  // no se ejercita todavía en la práctica -- queda correcto igual para
-  // cuando se use en otra pantalla.
-  discarded: "cerrado",
+  // Bucket propio desde el paso 6.1: StatusBadge antes no lo tenía y esto
+  // mapeaba a "cerrado" -- correcto mientras ninguna pantalla mostraba
+  // reclamos descartados, pero el listado de reclamos (paso 6.1) sí los
+  // filtra explícitamente, y un admin que elige "Descartado" en el filtro
+  // no puede ver todas las filas decir "Cerrado".
+  discarded: "descartado",
 };
 
 const PRIORITY_MAP: Record<DbPriority, Priority> = {

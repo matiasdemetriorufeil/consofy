@@ -155,6 +155,13 @@
       "when": 1787155682487,
       "tag": "0021_little_strong_guy",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1787169207427,
+      "tag": "0022_enable_pg_trgm_for_ticket_search",
+      "breakpoints": true
     }
   ]
 }

@@ -2,6 +2,8 @@ import "server-only";
 
 import { z } from "zod";
 
+import { publicEnv } from "./env.public";
+
 // REGLA: una variable se agrega a este esquema en el mismo paso en que algún
 // código empieza a leerla, nunca antes. Hoy lo leen src/db/index.ts
 // (DATABASE_URL), src/features/buildings/public-link.ts
@@ -39,6 +41,65 @@ const schema = z.object({
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
 });
 
+// -----------------------------------------------------------------------
+// Chequeo de consistencia entre proyectos de Supabase (incidente del
+// 13-19/08 de 2026, ver CLAUDE.md > Separación dev/producción para el
+// relato completo) -- DATABASE_URL y NEXT_PUBLIC_SUPABASE_URL tienen que
+// ser SIEMPRE del mismo proyecto de Supabase. Que no lo sean es más
+// peligroso que apuntar todo a producción a propósito: la app arranca
+// normal, el login funciona (contra un proyecto), y cada query de Drizzle
+// va a otro -- nada avisa que algo está mal hasta que alguien nota datos
+// donde no deberían estar. Esto pasó de verdad, tres veces en cinco días,
+// sin que nadie lo notara, corriendo `next build`/`next start` en una
+// máquina que tenía `.env.production-secrets.local` (antes
+// `.env.production.local`) de una tarea anterior con drizzle-kit -- ver el
+// renombre de ese archivo, la otra mitad de esta protección.
+//
+// Extrae el "project ref" (el identificador del proyecto en la URL, ej.
+// "ytvhanvwkmvyqjeoysab") de los dos formatos de URL de Postgres que
+// Supabase usa (pooler: `postgres.<ref>@...`; conexión directa:
+// `@db.<ref>.supabase.co`). Si el formato no matchea ninguno de los dos
+// (una URL de Postgres que no es de Supabase, en un entorno de prueba
+// distinto), devuelve null -- el chequeo de abajo no bloquea nada que no
+// pueda comparar con certeza.
+function extractSupabaseProjectRefFromDatabaseUrl(url: string): string | null {
+  const poolerMatch = url.match(/postgres\.([a-z0-9]+):/);
+  if (poolerMatch) {
+    return poolerMatch[1]!;
+  }
+  const directMatch = url.match(/@db\.([a-z0-9]+)\.supabase\.co/);
+  return directMatch ? directMatch[1]! : null;
+}
+
+function extractSupabaseProjectRefFromApiUrl(url: string): string | null {
+  const match = url.match(/^https:\/\/([a-z0-9]+)\.supabase\.co/);
+  return match ? match[1]! : null;
+}
+
+// Mensaje pensado para alguien que NO es programador -- si esto llega a
+// saltar alguna vez (ej. una variable mal pegada en el panel de Vercel), lo
+// primero que va a ver es este texto, no un stack trace. Explica qué pasó,
+// por qué importa, y qué hacer -- sin jerga ("project ref", "pooler") que
+// solo alguien que ya conoce el proyecto entendería.
+function assertConsistentSupabaseProject(databaseUrl: string): void {
+  const dbRef = extractSupabaseProjectRefFromDatabaseUrl(databaseUrl);
+  const apiRef = extractSupabaseProjectRefFromApiUrl(
+    publicEnv.NEXT_PUBLIC_SUPABASE_URL,
+  );
+
+  if (!dbRef || !apiRef) {
+    return;
+  }
+
+  if (dbRef !== apiRef) {
+    throw new Error(
+      "La aplicación detectó una configuración peligrosa y se detuvo antes de arrancar.\n\n" +
+        `La conexión a la base de datos y el sistema de acceso de usuarios apuntan a dos proyectos distintos (uno es "${dbRef}", el otro es "${apiRef}") -- deberían ser siempre el mismo. Si esto sigue así, la aplicación puede leer o escribir datos en el lugar equivocado sin ningún aviso.\n\n` +
+        "Qué hacer: revisá qué archivo de configuración se está usando (.env.local para desarrollo, .env.production-secrets.local para producción, o las variables cargadas en el panel de Vercel) y corregilo para que los dos apunten al mismo proyecto antes de volver a intentar.",
+    );
+  }
+}
+
 function parseEnv() {
   if (process.env.SKIP_ENV_VALIDATION === "true") {
     // Para CI o builds de análisis que no van a ejecutar la app de verdad
@@ -63,6 +124,8 @@ function parseEnv() {
       `Variables de entorno inválidas o faltantes. Revisá .env.local contra .env.example:\n${details}`,
     );
   }
+
+  assertConsistentSupabaseProject(parsed.data.DATABASE_URL);
 
   return parsed.data;
 }

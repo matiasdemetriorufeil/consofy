@@ -198,6 +198,40 @@ export async function getManagedBuildings(
     .orderBy(asc(buildings.name));
 }
 
+export type BuildingFilterOption = {
+  id: string;
+  name: string;
+  active: boolean;
+};
+
+// Para el filtro de edificio del listado de reclamos (paso 6.1) -- un
+// listado de gestión/historial (ver CLAUDE.md > Acceso a datos), así que
+// incluye edificios pausados (`active = false`), no solo los activos: el
+// administrador tiene que poder filtrar los reclamos VIEJOS de un edificio
+// que ya no recibe reclamos nuevos. Distinta de getManagedBuildings()
+// porque esta NO necesita los conteos de unidades/reclamos pendientes (son
+// caros de calcular -- dos subconsultas agregadas -- y esta función solo
+// alimenta un <select>, no una tabla de gestión) ni el resto de los campos
+// editables del edificio.
+export async function getBuildingFilterOptions(
+  organizationId: string,
+): Promise<BuildingFilterOption[]> {
+  return db
+    .select({
+      id: buildings.id,
+      name: buildings.name,
+      active: buildings.active,
+    })
+    .from(buildings)
+    .where(
+      and(
+        eq(buildings.organizationId, organizationId),
+        isNull(buildings.deletedAt),
+      ),
+    )
+    .orderBy(asc(buildings.name));
+}
+
 // Resuelve UN edificio para la vista de detalle (paso 4.2). Mismo criterio
 // de filtro que getManagedBuildings() (organización + no borrado, SIN
 // active = true): un edificio pausado sigue teniendo una vista de detalle

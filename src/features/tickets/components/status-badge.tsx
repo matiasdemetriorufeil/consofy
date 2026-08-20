@@ -1,13 +1,15 @@
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
-export type TicketStatus = "abierto" | "en_progreso" | "resuelto" | "cerrado";
+export type TicketStatus =
+  "abierto" | "en_progreso" | "resuelto" | "cerrado" | "descartado";
 
 const STATUS_LABEL: Record<TicketStatus, string> = {
   abierto: "Abierto",
   en_progreso: "En progreso",
   resuelto: "Resuelto",
   cerrado: "Cerrado",
+  descartado: "Descartado",
 };
 
 const STATUS_CLASS: Record<TicketStatus, string> = {
@@ -15,6 +17,10 @@ const STATUS_CLASS: Record<TicketStatus, string> = {
   en_progreso: "bg-alta/10 text-alta",
   resuelto: "bg-resuelto/10 text-resuelto",
   cerrado: "bg-baja/10 text-baja",
+  // Mismo tono gris que "cerrado" -- las dos son estados terminales sin
+  // acción pendiente, la diferencia es semántica (se resolvió vs. se
+  // decidió no atenderlo), no algo que necesite un color propio.
+  descartado: "bg-baja/10 text-baja",
 };
 
 interface StatusBadgeProps {

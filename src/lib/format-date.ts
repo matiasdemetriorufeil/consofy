@@ -23,3 +23,50 @@ export function formatExactDate(date: Date, timezone: string): string {
     timeStyle: "short",
   }).format(date);
 }
+
+// Offset UTC de una zona IANA en un instante dado, en minutos (ej. -180
+// para GMT-03:00) -- se resuelve por instante, no una constante fija, para
+// que zonas con horario de verano den el offset correcto según la fecha.
+// `longOffset` (Intl, sin dependencia nueva) devuelve un string tipo
+// "GMT-03:00" que se parsea a mano.
+function getTimezoneOffsetMinutes(date: Date, timeZone: string): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    timeZoneName: "longOffset",
+  }).formatToParts(date);
+  const offsetPart = parts.find((p) => p.type === "timeZoneName")?.value;
+  const match = offsetPart?.match(/GMT([+-])(\d{2}):(\d{2})/);
+  if (!match) {
+    return 0;
+  }
+  const sign = match[1] === "-" ? -1 : 1;
+  return sign * (Number(match[2]) * 60 + Number(match[3]));
+}
+
+// Convierte una fecha CIVIL ("YYYY-MM-DD", tal como la tipea el
+// administrador en un filtro de rango) al instante UTC real de "inicio" y
+// "fin" de ese día EN LA ZONA DE LA ORGANIZACIÓN -- nunca UTC ni la del
+// navegador (mismo criterio que el resto de este archivo). Necesario para
+// que un filtro "hasta el 15/08" incluya reclamos reportados esa noche en
+// la zona del edificio, aunque en UTC ya sea 16/08. Se resuelve el offset
+// al mediodía UTC de ese día (no a medianoche) para no arriesgar un
+// corrimiento de fecha al aplicar el offset antes de tenerlo.
+export function zonedDayBoundsToUtc(
+  dateStr: string,
+  timezone: string,
+): { start: Date; end: Date } {
+  const [year, month, day] = dateStr.split("-").map(Number) as [
+    number,
+    number,
+    number,
+  ];
+  const noonUtc = new Date(Date.UTC(year, month - 1, day, 12, 0, 0));
+  const offsetMinutes = getTimezoneOffsetMinutes(noonUtc, timezone);
+  const start = new Date(
+    Date.UTC(year, month - 1, day, 0, 0, 0) - offsetMinutes * 60_000,
+  );
+  const end = new Date(
+    Date.UTC(year, month - 1, day, 23, 59, 59, 999) - offsetMinutes * 60_000,
+  );
+  return { start, end };
+}

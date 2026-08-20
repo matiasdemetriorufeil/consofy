@@ -1552,6 +1552,201 @@ de Córdoba sin datos de valor de reventa, ese es el balance correcto hoy
 -- no gastar presupuesto (de dinero o de complejidad) en el escenario
 menos probable de la lista.
 
+## Bandeja de reclamos con filtros (paso 6.1)
+
+`/panel/tickets` (`src/app/panel/tickets/page.tsx`) es la pantalla donde el
+administrador vive todos los días (etapa 6) -- reemplaza el placeholder
+vacío que existía desde el paso 3.4.
+
+**Columnas del listado, elegidas para escanear, no para ser completas:**
+código, edificio (condicional, ver abajo), unidad, categoría, título,
+prioridad, estado, reportado. Se descartó mostrar el vecino en la tabla --
+el título ya dice "qué pasó" de un vistazo, y quién lo reportó es un dato
+de un nivel más de detalle, para cuando se abra el reclamo (todavía no
+existe esa pantalla). **Columna "Edificio" condicional:** desaparece del
+todo cuando el filtro de edificio está fijado a UNO puntual (el caso más
+común -- un administrador filtrando su propio edificio no necesita que se
+lo repitan en cada fila); reaparece en la vista "todos los edificios".
+Mismo criterio en mobile y desktop, solo cambia el layout (tabla vs.
+tarjetas apiladas, ver más abajo).
+
+**Estado inicial sin filtros: reclamos ABIERTOS (`new` + `in_progress`),
+no todos.** Mismo criterio que ya usa el dashboard (`PENDING_STATUSES`) --
+cuando el administrador abre el panel a la mañana, lo que necesita ver es
+qué requiere acción, no el historial completo de reclamos ya resueltos.
+El filtro "Estado" tiene una opción explícita "Todos los estados" para
+salir de ese default. La ausencia del parámetro `status` en la URL implica
+"abiertos" (no hace falta escribirlo); el `<select>` igual lo muestra
+preseleccionado, para que la pantalla nunca mienta sobre qué está
+filtrando.
+
+**Los filtros se combinan con AND, siempre** -- son recortes que estrechan
+la búsqueda, no alternativas. Tres estados vacíos DISTINTOS, no uno solo:
+
+1. La organización nunca tuvo un reclamo -- el placeholder original
+   ("Todavía no hay reclamos cargados").
+2. Vista por default (sin filtros explícitos) y cero reclamos ABIERTOS,
+   pero la organización SÍ tiene reclamos (todos resueltos/cerrados) --
+   mensaje positivo ("No hay reclamos abiertos"), no un error: para un
+   administrador, "no tengo nada pendiente" es una buena noticia, no un
+   estado vacío que lamentar (ver CLAUDE.md > Voz y escritura, "las
+   pantallas vacías son una invitación a actuar, no un cartel de
+   tristeza" -- acá la "invitación" es simplemente confirmar que está todo
+   al día).
+3. El administrador eligió filtros explícitos y no matchean nada -- "No
+   encontramos reclamos con estos filtros" + acción "Limpiar filtros".
+
+Distinguir (2) de (3) necesita saber si los filtros presentes son
+SOLO el default implícito o alguno puesto a mano --
+`hasExplicitFilters()` (`ticket-inbox-schema.ts`) hace esa distinción
+mirando los parámetros de la URL, no un flag de estado en el cliente.
+
+**Búsqueda de texto:** cubre `title`, `description`, `public_code` del
+reclamo y `first_name`/`last_name` del vecino (vía `ILIKE '%término%'`,
+combinados con OR) -- lo que un administrador recuerda de un reclamo es
+qué pasó, quién lo mandó, o el código si lo tiene a mano. Mínimo 2
+caracteres antes de aplicarse (un solo caracter no filtra nada real y
+desperdicia el índice). Debounce de 400ms del lado del cliente antes de
+escribir a la URL -- no navega en cada tecla.
+
+**`pg_trgm`, corrección de rumbo antes de implementar:** el enunciado del
+paso decía que la extensión "ya está habilitada desde la etapa 2". Se
+verificó contra la base real (`pg_extension`) antes de asumirlo, mismo
+criterio que ya corrigió el malentendido de rate limiting en el paso
+5.11 -- y **no estaba habilitada**, ni en ninguna migración del repo ni en
+la base de desarrollo. Se habilitó en este paso (migración `0022`), en el
+esquema `extensions` (mismo esquema que ya usan `pgcrypto`/`uuid-ossp` en
+este proyecto -- confirmado contra `pg_extension`, no asumido, siguiendo
+la práctica de Supabase de no instalar extensiones en `public`).
+`search_path` de la conexión de la app ya incluye `extensions`
+(confirmado con `SHOW search_path`), así que los operadores de trigram
+funcionan sin calificarlos. Cinco índices GIN nuevos (`tickets.title`,
+`tickets.description`, `tickets.public_code`, `people.first_name`,
+`people.last_name`) potencian el `ILIKE` de la búsqueda -- con los 500
+reclamos de la medición de este paso un seq scan ya es rápido de por sí
+(por eso la medición no muestra una diferencia dramática hoy); el valor
+real de estos índices es para cuando la cantidad de reclamos crezca con
+los años, que es el escenario para el que `pg_trgm` se dejó anticipado
+desde el plan.
+
+**Filtro de unidad, dependiente del edificio:** sin un edificio elegido,
+el `<select>` de unidad queda deshabilitado con un hint ("Elegí un
+edificio primero") en vez de listar unidades de TODOS los edificios
+mezcladas (números de piso/depto se repiten entre edificios distintos, así
+que una lista sin agrupar sería ambigua e inútil). Cambiar de edificio
+limpia cualquier unidad ya elegida -- una unidad pertenece a uno solo.
+
+**Filtro de responsable (`assignee`), sin catálogo aparte:** `tickets.
+assignee` es texto libre (todavía no existe una tabla de usuarios del
+panel -- ver el comentario de esa columna en `src/db/schema/tickets.ts`),
+así que las opciones del filtro son los valores `DISTINCT` que YA se usaron
+en reclamos reales de la organización, no una lista fija. Incluye una
+opción explícita "Sin asignar" (`assignee IS NULL`) -- un estado real y
+consultable, no solo la ausencia de elección. Los datos del seed no
+poblaban `tickets.assignee` (confirmado: cero reclamos del seed lo tenían
+seteado, aunque un evento de ejemplo lo mencionaba en su payload) -- se
+probó el filtro asignando el campo a mano contra un par de reclamos de
+prueba y restaurándolo después (ver el reporte del paso para el detalle).
+
+**Rango de fechas, en la zona horaria de la organización, no UTC:**
+`zonedDayBoundsToUtc()` (nuevo, `src/lib/format-date.ts`) convierte la
+fecha civil que tipea el administrador ("hasta el 15/08") al instante UTC
+real de inicio/fin de ESE día en la zona del edificio -- mismo criterio
+que el resto del proyecto ya aplica a toda fecha mostrada (ver CLAUDE.md >
+Convenciones). Sin esto, un reclamo reportado a la noche (hora local)
+podría quedar fuera de un filtro "hasta hoy" solo porque en UTC ya es el
+día siguiente. Resuelve el offset real de la zona (soporta horario de
+verano si la zona lo tuviera) formateando el mediodía UTC de ese día con
+`Intl.DateTimeFormat({ timeZoneName: "longOffset" })`, sin agregar
+`date-fns-tz` ni ninguna dependencia nueva.
+
+**`descartado` como bucket propio de `StatusBadge`:** antes de este paso,
+`toBadgeStatus()` mapeaba `discarded` a `"cerrado"` (documentado en su
+momento como aceptable porque ninguna pantalla mostraba reclamos
+descartados todavía). Ahora que el filtro de estado SÍ ofrece
+"Descartado" como opción explícita, ese mapeo se volvió incorrecto: un
+administrador que filtra por descartados vería cada fila decir "Cerrado".
+Bucket nuevo, mismo tono gris que "cerrado" (los dos son estados
+terminales sin acción pendiente -- la diferencia es semántica, no visual).
+
+**Mobile -- tabla vs. tarjetas, no una tabla con scroll horizontal:** una
+tabla de 7-8 columnas no entra en un celular sin cortar contenido (ver
+CLAUDE.md > Responsive). En vez de eso, `/panel/tickets` renderiza DOS
+representaciones de los mismos datos -- una `<Table>` (`hidden md:block`)
+y una lista de tarjetas apiladas (`md:hidden`) -- controladas por CSS, sin
+ramificar en JS: evita el salto de layout/hidratación que tendría decidir
+en el cliente qué versión mostrar según el viewport. El costo de
+renderizar las dos en el servidor es real pero chico (unos pocos
+milisegundos incluso con 500 filas -- ver la medición de performance más
+abajo, donde la latencia de red a la base domina por completo el tiempo
+de respuesta, no el render). Los filtros en mobile viven en un `Sheet`
+(`side="bottom"`) detrás de un botón "Filtros" con contador de filtros
+activos -- la búsqueda de texto queda siempre visible arriba, fuera del
+Sheet, porque es la acción de mayor frecuencia.
+
+**Consultas por carga de página -- sin N+1, confirmado:** entre 5 y 6
+consultas por carga, SIEMPRE, sin importar si el resultado son 5 reclamos
+o 500 -- `requireUser()`, las tres opciones de filtro (edificio/categoría/
+responsable, en paralelo vía `Promise.all`), opcionalmente unidades (solo
+si hay un edificio elegido), y la consulta principal de la bandeja (un
+solo `SELECT` con todos los JOINs -- edificio, categoría, unidad, vecino
+-- resueltos en la misma vuelta a la base, nunca una consulta por fila).
+Una séptima consulta puntual (`organizationHasAnyTicket`) solo se dispara
+en la rama de "cero resultados sin filtros explícitos", para distinguir
+los dos empty states (2) y (3) de arriba. El número de consultas NO crece
+con la cantidad de reclamos -- confirmado generando 500 reclamos reales y
+verificando que el conteo no cambió.
+
+**Medición de performance -- el criterio de aceptación pide <500ms con
+500 reclamos, medido de verdad, no estimado:** se generaron 470 reclamos
+sintéticos (sumados a los 30 del seed) para llegar a 500, vía INSERT
+directo por lotes (mismo patrón de datos de prueba identificable --
+prefijo "Prueba carga 6.1" en título/descripción -- limpiados al terminar,
+ver el reporte del paso). Resultados:
+
+- **La consulta a la base, aislada (`EXPLAIN ANALYZE`), corre en 1.6ms**
+  para el caso sin filtros (peor caso, 500 filas con cuatro JOINs) -- el
+  plan usa Hash Join sobre los índices existentes, sin secuencial scans
+  costosos.
+- **El tiempo de respuesta HTTP completo de la página, medido contra
+  desarrollo, da entre 1.1 y 1.9 segundos** según el filtro -- por encima
+  del criterio de 500ms. La causa NO es el query ni el render: es la
+  latencia de red hacia la base de desarrollo (Córdoba↔us-east-1, mismo
+  fenómeno ya documentado en CLAUDE.md > Separación dev/producción),
+  multiplicada por la cantidad de round-trips secuenciales que esta
+  pantalla hace. Medido con un `SELECT 1` suelto contra la misma base:
+  **p50 de 219ms por round-trip** en este momento -- con 5-6 consultas por
+  carga (ver arriba), casi todo el tiempo medido es esperar a la red, no
+  trabajo de Postgres ni de React.
+- **Por qué las consultas no corren en paralelo pese al `Promise.all`:**
+  `src/db/index.ts` configura el pool de Postgres con `max: 1` a propósito
+  (ver el comentario de ese archivo -- Supavisor ya multiplexa, y un pool
+  más ancho por instancia serverless agotaría el límite de conexiones del
+  free tier). Con una sola conexión física, el driver serializa las
+  consultas del `Promise.all` sobre esa conexión de todos modos -- el
+  paralelismo a nivel de JS no se traduce en paralelismo de red acá. Esto
+  no se cambió en este paso: es una decisión ya tomada y documentada para
+  TODO el proyecto, no algo que esta pantalla deba resolver por su cuenta.
+- **Estimado en producción:** con el mismo multiplicador ya medido en
+  CLAUDE.md > Separación dev/producción (`SELECT 1`: 172ms dev vs. 3ms
+  prod, ~57x -- Vercel co-ubicado con Supabase en la misma región), 5-6
+  round-trips a ~3-4ms cada uno dan un estimado de **20-25ms totales** en
+  producción, muy por debajo de los 500ms del criterio. No se pudo medir
+  contra un despliegue real de Vercel en este paso (no estaba pedido
+  desplegar) -- es una estimación con la misma base numérica que ya
+  respalda el resto de este documento, no una medición directa.
+
+**¿Hace falta paginación YA?** No, según lo medido: 500 filas sin paginar
+siguen siendo un solo `SELECT` barato (1.6ms) y un render que no domina el
+tiempo total. El problema real hoy es la latencia de desarrollo, no el
+volumen de datos ni la ausencia de paginación -- en producción, con la
+latencia real, esta misma pantalla sin paginar responde cómodamente bajo
+el criterio. Dicho esto, 500 filas SIN paginar en el DOM (sobre todo
+duplicadas en tabla + tarjetas, ver arriba) es una cantidad considerable
+para desplazarse -- la paginación del paso 6.2 sigue siendo necesaria por
+UX (nadie quiere scrollear 500 filas), no por un problema de performance
+que este paso haya encontrado.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
@@ -1778,9 +1973,9 @@ se contaminen entre sí:
 - `npm run db:migrate` — aplica las migraciones pendientes contra la base de
   **desarrollo** (`.env.local`). Usar siempre después de `db:generate`.
 - `npm run db:migrate:prod` — igual, pero contra **producción**
-  (`.env.production.local`). Comando aparte a propósito, ver "Separación
-  dev/producción" más abajo -- nunca usar `db:migrate` a secas pensando que
-  toca producción.
+  (`.env.production-secrets.local`). Comando aparte a propósito, ver
+  "Separación dev/producción" más abajo -- nunca usar `db:migrate` a
+  secas pensando que toca producción.
 - `npm run db:push` — sincroniza el esquema directo contra la base, sin
   generar migración. **Nunca en este proyecto**: se pierde el historial de
   cambios que da `generate` + `migrate`. Existe solo por si hace falta
@@ -1810,20 +2005,22 @@ queda ahí para siempre.
   host regional que el de transacciones pero puerto 5432, sí conecta).
 - **Producción**: project ref `qjruajnstgrklzbljcob` (el proyecto
   original). Las variables de entorno de Vercel siguen apuntando acá sin
-  cambios -- pooler de TRANSACCIONES, puerto 6543. `.env.production.local`
-  (gitignorado, igual que `.env.local`) tiene las credenciales de este
+  cambios -- pooler de TRANSACCIONES, puerto 6543. `.env.production-secrets.local`
+  (gitignorado, igual que `.env.local` -- ver el nombre exacto y por qué no
+  es `.env.production.local` más abajo) tiene las credenciales de este
   proyecto para uso LOCAL puntual y deliberado (migraciones, Drizzle
   Studio) -- la app en runtime nunca lee este archivo, solo Vercel.
 
 **Qué comando toca qué base:**
 
-| Comando                                    | Base                                                                                                      | Protección                                                                                                                                                                                                                                                                                         |
-| ------------------------------------------ | --------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `npm run dev`                              | Desarrollo (`.env.local`)                                                                                 | --                                                                                                                                                                                                                                                                                                 |
-| `npm run db:seed`                          | Desarrollo, y SOLO desarrollo                                                                             | Candado de project ref hardcodeado en `seed.ts` (`ALLOWED_DEV_PROJECT_REF`) -- aborta si `DATABASE_URL` no es del proyecto de desarrollo, sin excepción, ni con `--yes`. Probado en la práctica forzándolo contra producción con las demás salvaguardas satisfechas: abortó solo por este candado. |
-| `db:generate` / `db:migrate` / `db:studio` | Desarrollo (`.env.local`, vía `drizzle.config.ts`)                                                        | --                                                                                                                                                                                                                                                                                                 |
-| `db:migrate:prod` / `db:studio:prod`       | Producción (`.env.production.local`, vía `drizzle.config.production.ts`, pasado con `--config` explícito) | El NOMBRE del comando -- tocar producción exige escribir algo distinto y más largo a propósito, nunca el comando de todos los días con un archivo distinto cargado en silencio.                                                                                                                    |
-| Deploy de Vercel                           | Producción (env vars propias del dashboard de Vercel, no lee ningún `.env*` local)                        | --                                                                                                                                                                                                                                                                                                 |
+| Comando                                    | Base                                                                                                              | Protección                                                                                                                                                                                                                                                                                         |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run dev`                              | Desarrollo (`.env.local`)                                                                                         | --                                                                                                                                                                                                                                                                                                 |
+| `npm run db:seed`                          | Desarrollo, y SOLO desarrollo                                                                                     | Candado de project ref hardcodeado en `seed.ts` (`ALLOWED_DEV_PROJECT_REF`) -- aborta si `DATABASE_URL` no es del proyecto de desarrollo, sin excepción, ni con `--yes`. Probado en la práctica forzándolo contra producción con las demás salvaguardas satisfechas: abortó solo por este candado. |
+| `db:generate` / `db:migrate` / `db:studio` | Desarrollo (`.env.local`, vía `drizzle.config.ts`)                                                                | --                                                                                                                                                                                                                                                                                                 |
+| `db:migrate:prod` / `db:studio:prod`       | Producción (`.env.production-secrets.local`, vía `drizzle.config.production.ts`, pasado con `--config` explícito) | El NOMBRE del comando -- tocar producción exige escribir algo distinto y más largo a propósito, nunca el comando de todos los días con un archivo distinto cargado en silencio.                                                                                                                    |
+| `npm run build` / `npm run start`          | Desarrollo, siempre -- ver el incidente y la protección de abajo                                                  | El chequeo de consistencia de `src/lib/env.ts` (ver más abajo) + que `.env.production-secrets.local` no es un nombre que Next.js reconozca                                                                                                                                                         |
+| Deploy de Vercel                           | Producción (env vars propias del dashboard de Vercel, no lee ningún `.env*` local)                                | --                                                                                                                                                                                                                                                                                                 |
 
 **Por qué el seed tiene un candado duro y las migraciones no:** el seed
 borra y recarga TODO -- no hay ningún escenario legítimo en el que deba
@@ -1840,6 +2037,132 @@ recreó en el proyecto nuevo desde cero, vía Admin API con la service-role
 key de ESE proyecto -- es una cuenta distinta de la de producción, aunque
 comparta el mail, con un `id` distinto vinculado en el `app_users` de la
 base de desarrollo.
+
+### Incidente: `npm run start` local apuntó a producción a medias (paso 6.1)
+
+**Qué pasó, con fechas.** El 14 y el 15 de agosto de 2026, durante la
+etapa 5, y de nuevo el 19 de agosto durante el paso 6.1, correr
+`npm run build && npm run start` en una máquina de desarrollo (para medir
+performance "como en producción") hizo que la app sirviera páginas reales
+con **`DATABASE_URL` apuntando al proyecto de PRODUCCIÓN** mientras
+**`NEXT_PUBLIC_SUPABASE_URL` seguía apuntando a DESARROLLO**. El login
+funcionaba (autenticaba contra Auth de desarrollo), pero cada consulta de
+Drizzle -- incluida `recordLoginAttempt()`, que escribe en cada intento de
+login -- corría contra la base de PRODUCCIÓN. Encontrado auditando el
+paso 6.1 (una comparación de performance que llevó a correr `npm run start`
+localmente), no reportado ni notado en su momento: dejó **62 filas** en
+`login_attempts` de producción (`prueba-consofy-panel@example.com`, IP
+`::1`, todas exitosas -- confirmando que todas eran de pruebas locales, no
+de nadie externo), con fechas que muestran que pasó repetidas veces a lo
+largo de varios días sin que nadie lo notara. Las 62 filas se revisaron
+una por una con el usuario antes de borrarlas (`DELETE` físico contra
+producción, mismo criterio que ya rige `login_attempts` como log
+operativo, no entidad de negocio).
+
+**Por qué pasó -- causa raíz, confirmada contra la documentación oficial
+de Next.js, no de memoria:**
+
+> "Environment variables are looked up in the following places, in order,
+> stopping once the variable is found: 1. `process.env` 2.
+> `.env.$(NODE_ENV).local` 3. `.env.local` [...] If the environment
+> variable NODE_ENV is unassigned, Next.js automatically assigns
+> `development` when running the `next dev` command, **or `production`
+> for all other commands**."
+> (nextjs.org/docs/app/guides/environment-variables)
+
+Dos detalles de esa cita explican EXACTAMENTE la forma que tomó el
+incidente:
+
+1. La búsqueda es **por variable, no por archivo completo**. El viejo
+   `.env.production.local` solo definía `DATABASE_URL` y
+   `MIGRATION_DATABASE_URL` (nada de Supabase URL/keys) -- así que Next
+   tomaba esas dos de ahí, y para TODO lo demás (`NEXT_PUBLIC_SUPABASE_URL`,
+   las keys) caía a `.env.local` (desarrollo) porque ese archivo no las
+   tenía. El resultado no fue "todo apuntando a producción" -- fue la
+   combinación mitad y mitad que el usuario señaló como el estado
+   realmente peligroso: uno que parece que está en desarrollo.
+2. Es "producción" para **cualquier comando que no sea `next dev`** -- no
+   una particularidad de `next start`. Un `npm run build` local, incluso
+   sin llegar a correr `next start` después, ya evalúa módulos que leen
+   estas variables durante "Collecting page data" (confirmado
+   empíricamente al probar la protección nueva, ver abajo) -- podría
+   haber tocado producción en silencio sin servir un solo request.
+
+**Auditoría completa hecha antes de proponer nada** (cada script de
+`package.json`, más cualquier lugar del repo que fije `NODE_ENV`):
+`lint`/`test`/`test:watch`/`format`/`format:check` no pasan por el CLI de
+Next (eslint/vitest/prettier directo) y no leen `DATABASE_URL` --
+confirmado que `vitest.config.mts` no carga ningún `.env` y que los tests
+existentes no importan `@/db`. `db:generate`/`db:migrate`/`db:studio` usan
+`drizzle.config.ts`, que fija `.env.local` con `dotenv.config()`, ajeno a
+`NODE_ENV`. `db:migrate:prod`/`db:studio:prod` apuntan a producción a
+propósito, el único caso legítimo. `db:seed` fija `--env-file=.env.local`
+explícito más el candado de `ALLOWED_DEV_PROJECT_REF` -- doble protegido,
+no le llega esta clase de bug. Los únicos dos comandos expuestos eran
+`build` y `start`, por ser literalmente `next build`/`next start`.
+
+**La protección, dos capas, ninguna sola alcanzaba:**
+
+- **Se descartó "que el archivo no exista en la máquina" como protección
+  única.** Depende de que alguien se acuerde de borrarlo después de cada
+  uso puntual de `db:migrate:prod` -- exactamente el tipo de disciplina
+  manual que ya falló acá (el archivo quedó de una tarea legítima
+  anterior, sin que nadie lo notara, hasta morder tres veces en cinco
+  días).
+- **Capa 1 -- renombrar el archivo fuera de la convención de Next.**
+  `.env.production.local` pasó a llamarse **`.env.production-secrets.local`**
+  (`drizzle.config.production.ts` actualizado con la nueva ruta). Next.js
+  reconoce únicamente `.env.$(NODE_ENV).local` con `NODE_ENV` literal
+  (`development`/`production`/`test`) -- "production-secrets" no matchea
+  ese patrón, así que Next no lo carga NUNCA, sin importar qué comando
+  corra. Sigue cubierto por la regla `.env*.local` de `.gitignore` sin
+  necesitar una entrada nueva (termina en `.local` igual). Costo: cero
+  para quien usa `db:migrate:prod`/`db:studio:prod` -- mismos comandos,
+  misma forma de invocarlos, el archivo solo cambió de nombre.
+- **Capa 2 -- chequeo de consistencia al resolver `env` (`src/lib/
+env.ts`).** Extrae el project ref de Supabase de `DATABASE_URL` y de
+  `NEXT_PUBLIC_SUPABASE_URL` (los dos formatos de URL que usa Supabase,
+  pooler y conexión directa) y compara. Si no coinciden, `throw`
+  inmediato -- la app se niega a arrancar. Esta es la capa que cubre
+  cualquier OTRA forma de terminar con variables mezcladas que a nadie se
+  le ocurrió todavía (una variable exportada suelta en una shell, un
+  archivo nuevo con otro nombre, un copy-paste equivocado) -- no depende
+  de que el mecanismo sea el mismo que causó este incidente puntual. En
+  el flujo normal (dev, o Vercel con sus propias variables consistentes)
+  los dos refs siempre coinciden, así que el chequeo no le cuesta nada a
+  nadie -- solo actúa en el estado peligroso.
+
+  El mensaje está escrito para alguien que NO es programador -- explica
+  qué pasó y qué hacer, sin jerga:
+
+  ```
+  La aplicación detectó una configuración peligrosa y se detuvo antes de arrancar.
+
+  La conexión a la base de datos y el sistema de acceso de usuarios apuntan
+  a dos proyectos distintos (uno es "<ref>", el otro es "<ref>") --
+  deberían ser siempre el mismo. Si esto sigue así, la aplicación puede
+  leer o escribir datos en el lugar equivocado sin ningún aviso.
+
+  Qué hacer: revisá qué archivo de configuración se está usando
+  (.env.local para desarrollo, .env.production-secrets.local para
+  producción, o las variables cargadas en el panel de Vercel) y corregilo
+  para que los dos apunten al mismo proyecto antes de volver a intentar.
+  ```
+
+  **Probado en las dos direcciones, no solo que bloquea:** con un
+  `.env.production.local` armado a propósito (nombre viejo, project ref
+  distinto, credenciales falsas -- nunca las reales) presente junto al
+  resto, `npm run build` falló exactamente durante "Collecting page data"
+  con este mensaje -- confirmando en la práctica que hasta un build sin
+  servir nada queda cubierto, el caso que el punto 2 de la auditoría había
+  señalado como "hoy no pasa, pero es casualidad". Sacado ese archivo,
+  `npm run build` compiló limpio usando SOLO `.env.local`
+  (`.env.production-secrets.local`, con las credenciales reales, seguía
+  ahí al lado en el disco, ignorado por completo). `npm run dev`,
+  `db:migrate` y `db:migrate:prod` se probaron después del renombre y
+  siguen funcionando exactamente igual que antes.
+
+## Datos de prueba (seed)
 
 ## Datos de prueba (seed)
 

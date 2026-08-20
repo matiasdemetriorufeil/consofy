@@ -1,9 +1,31 @@
 import "server-only";
 
-import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gte,
+  inArray,
+  isNotNull,
+  isNull,
+  lte,
+  sql,
+} from "drizzle-orm";
 
 import { db } from "@/db";
-import { buildings, categories, ticketEvents, tickets } from "@/db/schema";
+import {
+  buildings,
+  categories,
+  people,
+  ticketEvents,
+  tickets,
+  units,
+} from "@/db/schema";
+import {
+  UNASSIGNED_ASSIGNEE_VALUE,
+  type TicketStatusFilterValue,
+} from "./ticket-inbox-schema";
 
 // N = 5 días: ni tan corto que marque como "estancado" un reclamo que
 // recién entró a la cola de trabajo normal de la semana (nadie revisa cada
@@ -269,4 +291,263 @@ export async function getTicketsForBuilding(
     )
     .orderBy(desc(tickets.reportedAt))
     .limit(limit);
+}
+
+// -----------------------------------------------------------------------
+// Bandeja de reclamos con filtros (paso 6.1)
+// -----------------------------------------------------------------------
+
+// "open"/"all" son estados del FILTRO (ver ticket-inbox-schema.ts), no del
+// enum de la base -- esto los traduce al array real que va al WHERE.
+// "open" = new + in_progress (mismo PENDING_STATUSES que ya usa el resto
+// del dashboard); "all" = sin filtro de estado (undefined); cualquier otro
+// valor = ESE estado puntual, nada más.
+export function getStatusesForFilter(
+  statusFilter: TicketStatusFilterValue,
+): Status[] | undefined {
+  if (statusFilter === "open") {
+    return PENDING_STATUSES;
+  }
+  if (statusFilter === "all") {
+    return undefined;
+  }
+  return [statusFilter];
+}
+
+export type TicketInboxFilters = {
+  buildingId?: string;
+  unitId?: string;
+  categoryId?: string;
+  statuses?: Status[];
+  priority?: Priority;
+  // UNASSIGNED_ASSIGNEE_VALUE (sentinel) filtra por assignee IS NULL --
+  // cualquier otro string filtra por igualdad exacta contra ese valor.
+  assignee?: string;
+  dateFrom?: Date;
+  dateTo?: Date;
+  search?: string;
+};
+
+export type TicketInboxRow = {
+  id: string;
+  publicCode: string;
+  title: string;
+  status: Status;
+  priority: Priority;
+  reportedAt: Date;
+  assignee: string | null;
+  buildingId: string;
+  buildingName: string;
+  categoryName: string;
+  unitLabel: string | null;
+  neighborName: string | null;
+};
+
+// La query central de la bandeja -- UNA sola consulta, con todos los joins
+// y todos los filtros combinados en el mismo WHERE (AND entre sí, ver el
+// reporte del paso sobre por qué AND y no OR: son filtros que ESTRECHAN la
+// búsqueda, no alternativas). Nada de N+1: los joins traen edificio,
+// categoría, unidad y vecino en la misma vuelta a la base, sin una consulta
+// por fila -- mismo criterio que getTicketsForBuilding()/
+// getAttentionTickets() de más arriba.
+//
+// Sin LIMIT todavía -- paso 6.2 (paginación) decide el techo real. Medido
+// contra 500 reclamos (ver el reporte del paso) para saber si esto es un
+// problema práctico antes de que 6.2 exista.
+export async function getTicketInbox(
+  organizationId: string,
+  filters: TicketInboxFilters,
+): Promise<TicketInboxRow[]> {
+  const conditions = [
+    eq(tickets.organizationId, organizationId),
+    isNull(tickets.deletedAt),
+  ];
+
+  if (filters.buildingId) {
+    conditions.push(eq(tickets.buildingId, filters.buildingId));
+  }
+  if (filters.unitId) {
+    conditions.push(eq(tickets.unitId, filters.unitId));
+  }
+  if (filters.categoryId) {
+    conditions.push(eq(tickets.categoryId, filters.categoryId));
+  }
+  if (filters.statuses && filters.statuses.length > 0) {
+    conditions.push(inArray(tickets.status, filters.statuses));
+  }
+  if (filters.priority) {
+    conditions.push(eq(tickets.priority, filters.priority));
+  }
+  if (filters.assignee === UNASSIGNED_ASSIGNEE_VALUE) {
+    conditions.push(isNull(tickets.assignee));
+  } else if (filters.assignee) {
+    conditions.push(eq(tickets.assignee, filters.assignee));
+  }
+  if (filters.dateFrom) {
+    conditions.push(gte(tickets.reportedAt, filters.dateFrom));
+  }
+  if (filters.dateTo) {
+    conditions.push(lte(tickets.reportedAt, filters.dateTo));
+  }
+  if (filters.search) {
+    // Trigram GIN (migración 0022) potencia cada uno de estos ILIKE --
+    // combinados con OR, Postgres puede resolverlos con un Bitmap Or de
+    // los índices individuales en vez de un seq scan. Busca sobre lo que
+    // el administrador recuerda de un reclamo: qué pasó (título/
+    // descripción), quién lo mandó (nombre del vecino), o el código si lo
+    // tiene a mano.
+    const pattern = `%${filters.search}%`;
+    conditions.push(
+      sql`(
+        ${tickets.title} ilike ${pattern}
+        or ${tickets.description} ilike ${pattern}
+        or ${tickets.publicCode} ilike ${pattern}
+        or ${people.firstName} ilike ${pattern}
+        or ${people.lastName} ilike ${pattern}
+      )`,
+    );
+  }
+
+  const rows = await db
+    .select({
+      id: tickets.id,
+      publicCode: tickets.publicCode,
+      title: tickets.title,
+      status: tickets.status,
+      priority: tickets.priority,
+      reportedAt: tickets.reportedAt,
+      assignee: tickets.assignee,
+      buildingId: buildings.id,
+      buildingName: buildings.name,
+      categoryName: categories.name,
+      unitTower: units.tower,
+      unitFloor: units.floor,
+      unitNumber: units.number,
+      unitLabelRaw: tickets.unitLabelRaw,
+      neighborFirstName: people.firstName,
+      neighborLastName: people.lastName,
+    })
+    .from(tickets)
+    .innerJoin(
+      buildings,
+      and(
+        eq(buildings.id, tickets.buildingId),
+        eq(buildings.organizationId, tickets.organizationId),
+      ),
+    )
+    .innerJoin(
+      categories,
+      and(
+        eq(categories.id, tickets.categoryId),
+        eq(categories.organizationId, tickets.organizationId),
+      ),
+    )
+    .leftJoin(
+      units,
+      and(
+        eq(units.id, tickets.unitId),
+        eq(units.organizationId, tickets.organizationId),
+      ),
+    )
+    .leftJoin(
+      people,
+      and(
+        eq(people.id, tickets.personId),
+        eq(people.organizationId, tickets.organizationId),
+      ),
+    )
+    .where(and(...conditions))
+    .orderBy(desc(tickets.reportedAt));
+
+  return rows.map((row) => ({
+    id: row.id,
+    publicCode: row.publicCode,
+    title: row.title,
+    status: row.status,
+    priority: row.priority,
+    reportedAt: row.reportedAt,
+    assignee: row.assignee,
+    buildingId: row.buildingId,
+    buildingName: row.buildingName,
+    categoryName: row.categoryName,
+    unitLabel: row.unitTower
+      ? `${row.unitTower} - ${row.unitFloor}°${row.unitNumber}`
+      : row.unitFloor && row.unitNumber
+        ? `${row.unitFloor}°${row.unitNumber}`
+        : row.unitLabelRaw,
+    neighborName:
+      [row.neighborFirstName, row.neighborLastName].filter(Boolean).join(" ") ||
+      null,
+  }));
+}
+
+// Filtro-vacío vs. org-vacía (ver el reporte del paso): esta consulta
+// puntual solo se dispara cuando getTicketInbox() ya devolvió cero filas,
+// para distinguir "esta organización nunca tuvo un reclamo" de "los
+// filtros no matchean nada". LIMIT 1, no un count -- no hace falta saber
+// CUÁNTOS, alcanza con saber si existe al menos uno.
+export async function organizationHasAnyTicket(
+  organizationId: string,
+): Promise<boolean> {
+  const [row] = await db
+    .select({ id: tickets.id })
+    .from(tickets)
+    .where(
+      and(
+        eq(tickets.organizationId, organizationId),
+        isNull(tickets.deletedAt),
+      ),
+    )
+    .limit(1);
+  return !!row;
+}
+
+export type CategoryFilterOption = {
+  id: string;
+  name: string;
+};
+
+// Para el filtro de categoría -- incluye categorías inactivas (mismo
+// criterio que getBuildingFilterOptions: un listado de historial tiene que
+// poder filtrar por una categoría que ya no se ofrece en el formulario
+// público, porque reclamos VIEJOS pueden seguir referenciándola).
+export async function getCategoryFilterOptions(
+  organizationId: string,
+): Promise<CategoryFilterOption[]> {
+  return db
+    .select({ id: categories.id, name: categories.name })
+    .from(categories)
+    .where(
+      and(
+        eq(categories.organizationId, organizationId),
+        isNull(categories.deletedAt),
+      ),
+    )
+    .orderBy(asc(categories.sortOrder), asc(categories.name));
+}
+
+// Responsables reales, no una lista fija: `assignee` es texto libre (ver
+// src/db/schema/tickets.ts -- todavía no existe una tabla de usuarios del
+// panel), así que las opciones del filtro son los valores DISTINCT que ya
+// se usaron en reclamos de esta organización, no un catálogo aparte.
+// `DISTINCT` sobre una sola columna, ya filtrada por organización y sin
+// borrados -- barato incluso con miles de reclamos (el conjunto de
+// responsables reales de un edificio chico es chico, aunque el historial
+// de reclamos sea grande).
+export async function getAssigneeFilterOptions(
+  organizationId: string,
+): Promise<string[]> {
+  const rows = await db
+    .selectDistinct({ assignee: tickets.assignee })
+    .from(tickets)
+    .where(
+      and(
+        eq(tickets.organizationId, organizationId),
+        isNull(tickets.deletedAt),
+        isNotNull(tickets.assignee),
+      ),
+    )
+    .orderBy(asc(tickets.assignee));
+
+  return rows.map((r) => r.assignee).filter((a): a is string => a !== null);
 }
