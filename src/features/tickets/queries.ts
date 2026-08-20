@@ -18,6 +18,7 @@ import {
   buildings,
   categories,
   people,
+  ticketAttachments,
   ticketEvents,
   tickets,
   units,
@@ -658,4 +659,216 @@ export async function getAssigneeFilterOptions(
     .orderBy(asc(tickets.assignee));
 
   return rows.map((r) => r.assignee).filter((a): a is string => a !== null);
+}
+
+// -----------------------------------------------------------------------
+// Vista de detalle de un reclamo (paso 6.3)
+// -----------------------------------------------------------------------
+
+export type TicketDetail = {
+  id: string;
+  publicCode: string;
+  title: string;
+  description: string;
+  status: Status;
+  priority: Priority;
+  source: (typeof tickets.$inferSelect)["source"];
+  assignee: string | null;
+  reportedAt: Date;
+  resolvedAt: Date | null;
+  closedAt: Date | null;
+  buildingId: string;
+  buildingName: string;
+  categoryName: string;
+  unitLabel: string | null;
+  // Vecino, si el reclamo tiene uno asociado (personId nullable -- ver
+  // src/db/schema/tickets.ts, un reclamo cargado por el administrador sobre
+  // un espacio común puede no tener detrás a una persona puntual). Trae los
+  // datos directo de `people`, SIN pasar por ninguna ocupación -- a
+  // propósito, ver CLAUDE.md > Pendientes ("un vecino sin ocupación es
+  // invisible en el panel"): esta es la primera pantalla que muestra a ese
+  // vecino sin exigirle tener una unidad asignada en ningún lado.
+  neighborId: string | null;
+  neighborName: string | null;
+  neighborPhoneE164: string | null;
+  neighborEmail: string | null;
+};
+
+// Único SELECT con todos los joins (mismo criterio que getTicketInbox): sin
+// N+1, y sin exigir que el vecino tenga ninguna ocupación (LEFT JOIN contra
+// people vía tickets.person_id, nunca contra unit_occupancies). `null` si
+// el id no es un reclamo real de ESTA organización (de otra organización,
+// uuid inventado, o dado de baja) -- el caller (page.tsx) lo traduce a
+// notFound(), mismo criterio de ambigüedad ya usado en
+// getBuildingDetail()/getTicketByAttachmentsToken() (no distinguir "no
+// existe" de "no es tuyo").
+export async function getTicketDetail(
+  organizationId: string,
+  ticketId: string,
+): Promise<TicketDetail | null> {
+  const [row] = await db
+    .select({
+      id: tickets.id,
+      publicCode: tickets.publicCode,
+      title: tickets.title,
+      description: tickets.description,
+      status: tickets.status,
+      priority: tickets.priority,
+      source: tickets.source,
+      assignee: tickets.assignee,
+      reportedAt: tickets.reportedAt,
+      resolvedAt: tickets.resolvedAt,
+      closedAt: tickets.closedAt,
+      buildingId: buildings.id,
+      buildingName: buildings.name,
+      categoryName: categories.name,
+      unitTower: units.tower,
+      unitFloor: units.floor,
+      unitNumber: units.number,
+      unitLabelRaw: tickets.unitLabelRaw,
+      neighborId: people.id,
+      neighborFirstName: people.firstName,
+      neighborLastName: people.lastName,
+      neighborPhoneE164: people.phoneE164,
+      neighborEmail: people.email,
+    })
+    .from(tickets)
+    .innerJoin(
+      buildings,
+      and(
+        eq(buildings.id, tickets.buildingId),
+        eq(buildings.organizationId, tickets.organizationId),
+      ),
+    )
+    .innerJoin(
+      categories,
+      and(
+        eq(categories.id, tickets.categoryId),
+        eq(categories.organizationId, tickets.organizationId),
+      ),
+    )
+    .leftJoin(
+      units,
+      and(
+        eq(units.id, tickets.unitId),
+        eq(units.organizationId, tickets.organizationId),
+      ),
+    )
+    .leftJoin(
+      people,
+      and(
+        eq(people.id, tickets.personId),
+        eq(people.organizationId, tickets.organizationId),
+      ),
+    )
+    .where(
+      and(
+        eq(tickets.id, ticketId),
+        eq(tickets.organizationId, organizationId),
+        isNull(tickets.deletedAt),
+      ),
+    );
+
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    publicCode: row.publicCode,
+    title: row.title,
+    description: row.description,
+    status: row.status,
+    priority: row.priority,
+    source: row.source,
+    assignee: row.assignee,
+    reportedAt: row.reportedAt,
+    resolvedAt: row.resolvedAt,
+    closedAt: row.closedAt,
+    buildingId: row.buildingId,
+    buildingName: row.buildingName,
+    categoryName: row.categoryName,
+    unitLabel: row.unitTower
+      ? `${row.unitTower} - ${row.unitFloor}°${row.unitNumber}`
+      : row.unitFloor && row.unitNumber
+        ? `${row.unitFloor}°${row.unitNumber}`
+        : row.unitLabelRaw,
+    neighborId: row.neighborId,
+    neighborName:
+      [row.neighborFirstName, row.neighborLastName].filter(Boolean).join(" ") ||
+      null,
+    neighborPhoneE164: row.neighborPhoneE164,
+    neighborEmail: row.neighborEmail,
+  };
+}
+
+export type TicketDetailAttachment = {
+  id: string;
+  storagePath: string;
+  mimeType: string;
+  originalFilename: string;
+  sizeBytes: number;
+};
+
+// Filtra por organizationId Y ticketId (no solo ticketId, aunque un uuid ya
+// es único por sí solo): mismo patrón que el resto del archivo -- el
+// filtro de organización va siempre en el WHERE de la query misma, nunca
+// confiado a que el caller ya haya verificado el ticketId por otro lado
+// (ver CLAUDE.md > Acceso a datos).
+export async function getTicketAttachments(
+  organizationId: string,
+  ticketId: string,
+): Promise<TicketDetailAttachment[]> {
+  return db
+    .select({
+      id: ticketAttachments.id,
+      storagePath: ticketAttachments.storagePath,
+      mimeType: ticketAttachments.mimeType,
+      originalFilename: ticketAttachments.originalFilename,
+      sizeBytes: ticketAttachments.sizeBytes,
+    })
+    .from(ticketAttachments)
+    .where(
+      and(
+        eq(ticketAttachments.ticketId, ticketId),
+        eq(ticketAttachments.organizationId, organizationId),
+      ),
+    )
+    .orderBy(asc(ticketAttachments.createdAt));
+}
+
+export type TicketTimelineEventRow = {
+  id: string;
+  type: (typeof ticketEvents.$inferSelect)["type"];
+  actorType: (typeof ticketEvents.$inferSelect)["actorType"];
+  actorLabel: string;
+  payload: unknown;
+  createdAt: Date;
+};
+
+// Orden cronológico ascendente (más viejo primero) -- una línea de tiempo
+// se lee de arriba a abajo como pasó en la realidad, al revés que la
+// bandeja (que ordena por más nuevo primero, ver CLAUDE.md > Bandeja de
+// reclamos): acá el "más nuevo primero" no ayuda a entender una secuencia.
+export async function getTicketTimeline(
+  organizationId: string,
+  ticketId: string,
+): Promise<TicketTimelineEventRow[]> {
+  return db
+    .select({
+      id: ticketEvents.id,
+      type: ticketEvents.type,
+      actorType: ticketEvents.actorType,
+      actorLabel: ticketEvents.actorLabel,
+      payload: ticketEvents.payload,
+      createdAt: ticketEvents.createdAt,
+    })
+    .from(ticketEvents)
+    .where(
+      and(
+        eq(ticketEvents.ticketId, ticketId),
+        eq(ticketEvents.organizationId, organizationId),
+      ),
+    )
+    .orderBy(asc(ticketEvents.createdAt));
 }

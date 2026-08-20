@@ -1911,6 +1911,153 @@ heapsort` para el `LIMIT` + `ORDER BY` combinados, y la función de
   criterio -- sin cambios respecto al 6.1, porque el trabajo real de la
   base no cambió.
 
+## Vista de detalle de un reclamo (paso 6.3)
+
+`/panel/tickets/[ticketId]` -- solo lectura (las acciones -- cambiar
+estado, asignar, notas -- son el paso 6.4). Cierra dos Pendientes reales
+anotados en pasos anteriores (ver CLAUDE.md > Pendientes, ambos resueltos
+acá):
+
+1. El administrador no tenía NINGUNA forma de ver los adjuntos de un
+   reclamo desde el panel -- dependía de encontrar el WhatsApp viejo
+   (paso 5.10).
+2. Un vecino sin ninguna `unit_occupancy` (todo vecino que carga por el
+   formulario público, ver paso 5.5) era invisible en cualquier pantalla
+   del panel -- `getOccupancyRowsForBuilding()` (people/queries.ts) hace
+   INNER JOIN contra ocupaciones, así que sin ninguna, no aparece.
+
+**URLs de fotos -- mismo criterio del paso 5.10 pese a haber sesión
+verificada, justificado, no asumido.** `createSignedAttachmentUrls()`
+(movida a `src/features/tickets/storage-objects.ts`, ver más abajo) se
+reusa TAL CUAL: URLs firmadas de una hora, generadas frescas en cada carga,
+nunca cacheadas. Que el visor tenga sesión no cambia la razón de fondo --
+el bucket sigue siendo privado (sin SELECT para `anon`/`authenticated`,
+migración 0019) y una URL con vencimiento sigue acotando el daño de una
+pestaña que queda abierta o un link que se comparte sin querer, algo que
+una sesión de panel no impide por sí sola. Se evaluó (y se descartó) servir
+sin vencimiento "ya que hay sesión": eso cambiaría la superficie de riesgo
+de "una URL que vence en una hora" a "una URL que vive para siempre
+mientras alguien la tenga guardada", sin ninguna ganancia real a cambio --
+la sesión ya protege QUIÉN llega a esta pantalla, no necesita además que
+las URLs de Storage vivan para siempre.
+
+**`createSignedAttachmentUrls()` se movió de `public-form/storage-objects.ts`
+a `tickets/storage-objects.ts`** en este paso, cuando apareció su segundo
+consumidor real (este detalle, junto con `/s/[token]`) -- mismo criterio de
+extracción ya usado en el proyecto (`AR_WHATSAPP_*`, `getClientIp`: se
+factoriza recién con el segundo consumidor real, no antes). Vive en
+`tickets/` y no en `public-form/`: firmar adjuntos de un reclamo es un
+concepto del dominio tickets, no del flujo de intake.
+`getExistingAttachmentPaths()` se queda en `public-form/` (su único
+consumidor sigue siendo `createTicketAction`). El grid de miniaturas en sí
+(`<ul>` con `<a target="_blank">` por adjunto) también se extrajo a
+`AttachmentGallery` (`tickets/components/attachment-gallery.tsx`), mismo
+motivo -- `/s/[token]` y este detalle ahora comparten exactamente el mismo
+componente en vez de dos copias del mismo JSX.
+
+**Qué muestra la línea de tiempo y cómo -- pensada para entender de un
+vistazo, no para leer JSON.** `describeTicketEvent()`
+(`tickets/ticket-event-description.ts`, función PURA con tests) traduce
+cada uno de los ocho tipos de `ticket_event_type` a una frase en español,
+con el `payload` (jsonb sin shape garantizado por la base -- ver el
+comentario de esa columna) revalidado con Zod del lado de LECTURA antes de
+confiar en su forma: un payload viejo o con otra forma cae a un texto
+genérico pero honesto para ESE evento puntual, nunca rompe el resto de la
+línea de tiempo. `TicketTimeline` (Server Component puro, sin `"use
+client"`) ordena ascendente (más viejo arriba -- al revés que la bandeja,
+que ordena por más nuevo primero: una secuencia se lee de arriba a abajo
+como pasó, no como en un feed).
+
+**El evento de handoff a WhatsApp -- el más delicado de los ocho, escrito
+con cuidado a propósito (pedido explícito del enunciado).** Significa que
+el vecino TOCÓ el botón, nunca que el mensaje se envió ni que llegó a la
+administración (ver CLAUDE.md > Evento de handoff, riesgo R8 del plan --
+esta pantalla es la primera que muestra este evento a un humano, así que
+es la primera vez que el texto importa de verdad). El texto exacto:
+
+> **{Vecino} abrió WhatsApp para avisar sobre este reclamo**
+> Esto confirma que tocó el botón, no que el mensaje se haya enviado ni
+> que haya llegado a la administración.
+
+El headline dice "abrió WhatsApp", nunca "avisó"/"envió"/"notificó" (un
+test de regresión en `ticket-event-description.test.ts` falla si alguien
+cambia el headline a alguno de esos verbos); la aclaración va en una
+SEGUNDA línea siempre visible, con el mismo tamaño y lugar que la nota de
+cualquier otro evento -- no un tooltip, no un ícono aparte, no un detalle
+escondido. Probado con un reclamo real (formulario público -> foto real
+subida -> click real en "Enviar por WhatsApp"): el evento aparece con ese
+texto exacto, sin ninguna palabra que dé a entender que el administrador
+recibió algo confirmado.
+
+**Vecino sin unidad -- visible ahora, con un aviso explícito de por qué
+antes no lo era.** La tarjeta "Vecino" sale de un LEFT JOIN directo contra
+`people` vía `tickets.person_id` (`getTicketDetail`, `tickets/queries.ts`),
+sin pasar por `unit_occupancies` en ningún momento -- a diferencia de la
+pestaña "Personas" de un edificio, este vecino no necesita tener ninguna
+unidad asignada para aparecer acá. Cuando `personHasAnyOccupancy()`
+(`people/queries.ts`, nueva -- mismo criterio de visibilidad exacto que
+`getOccupancyRowsForBuilding`: cualquier ocupación no borrada, vigente o
+ya finalizada) devuelve `false`, se muestra un aviso explícito: "Este
+vecino no tiene ninguna unidad asignada en el sistema -- no va a aparecer
+en la lista de Personas de ningún edificio hasta que se le cargue una." --
+no alcanza con mostrarlo en silencio, el aviso deja claro que esto es un
+estado real y conocido, no un dato faltante por error. Probado de punta a
+punta con un reclamo real del formulario público, marcando "No encuentro
+mi unidad" a propósito: el vecino aparece con nombre y teléfono, y el
+aviso se muestra. Un reclamo sin `person_id` en absoluto (ej. el
+administrador carga un reclamo propio sobre un espacio común) muestra
+"Este reclamo no tiene un vecino asociado." en vez de una tarjeta vacía.
+
+**Cómo se llega y cómo se vuelve sin perder filtros -- mismo principio de
+"la URL decide" que ya fijaron los pasos 6.1/6.2, aplicado a la navegación
+entre pantallas.** El título de cada fila (desktop) o tarjeta (mobile) de
+la bandeja es un `<Link>` hacia `/panel/tickets/[id]?from=<query actual
+codificada>` (`buildDetailHref()`, page.tsx de la bandeja;
+`ticketInboxQueryString()`, nueva en `ticket-inbox-schema.ts`). El detalle
+arma su link "Volver a la bandeja" como `/panel/tickets?${from}` tal cual
+-- sin validarlo como una URL completa, porque nunca lo es: `from` es
+literalmente la query string de la bandeja, nunca algo que el cliente
+pueda usar para armar una URL fuera de `/panel/tickets`, así que no hay
+superficie de open redirect que cuidar. Sin `from` (entrar por un link
+compartido o escrito a mano), cae a `/panel/tickets` a secas -- mismo
+criterio permisivo que el resto del proyecto. Probado en la práctica
+(desktop y mobile): estando en la bandeja con `status=all&q=...`, entrar a
+un reclamo y volver reconstruye exactamente esa misma URL, filtro y
+búsqueda incluidos.
+
+**Mobile -- una sola columna, sin rama de código separada.** A diferencia
+de la bandeja (que renderiza tabla Y tarjetas por CSS, paso 6.1), el
+detalle de un reclamo es naturalmente una sola columna de lectura de
+arriba a abajo -- el mismo layout sirve mobile y desktop, con `sm:` solo
+para acomodar el encabezado (título+código a la izquierda, badges a la
+derecha en pantallas anchas, apilados en angostas) y la grilla de datos
+(`sm:grid-cols-2 lg:grid-cols-3`). El teléfono del vecino es un
+`<a href="tel:...">` -- pensado explícitamente para el escenario del
+enunciado ("el administrador parado en el hall, con el vecino al lado"),
+tocarlo desde un celular abre el marcador directo. Probado con Playwright
+en viewport de 375px: sin scroll horizontal, el link `tel:` queda
+completamente dentro del viewport.
+
+**Cross-org y uuid inválido -- mismo criterio de ambigüedad ya fijado en
+`/panel/buildings/[buildingId]` (paso 4.2): `notFound()` para los dos
+casos, sin distinguir "no existe" de "no es tuyo".** `getTicketDetail()`
+filtra `organizationId` en el WHERE de la consulta misma (nunca después,
+en JS) -- un id real de OTRA organización no puede volver `null` por un
+camino distinto al de un uuid inventado, porque es literalmente la misma
+rama de código. Análisis de seguridad, probado con un ataque real (una
+segunda organización sintética, creada y borrada solo para esta prueba --
+ver el reporte del paso para el detalle): un administrador autenticado que
+visita `/panel/tickets/<id-de-otra-organización>` recibe 404 (`No
+encontramos ese reclamo`), con el layout del panel (sidebar, header,
+selector) intacto alrededor -- nunca ve título, descripción, ni ningún
+dato del reclamo ajeno. Un uuid con formato válido pero inexistente da el
+mismo 404 (control). `not-found.tsx` vive en el MISMO segmento que
+`page.tsx` (a diferencia de `/panel/buildings/not-found.tsx`, que tuvo que
+subir un nivel porque ahí es el `layout.tsx` el que llama `notFound()`) --
+acá no hay ningún `layout.tsx` propio para `[ticketId]`, así que el
+`page.tsx` del mismo segmento sí puede tirar `notFound()` y ser capturado
+por el `not-found.tsx` de esa misma carpeta.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
@@ -2641,13 +2788,22 @@ NOTHING`) queda disponible, no implementada, para archivos mucho más
   `tickets.person_id`/`unit_id`, no una `unit_occupancy` -- ver el
   reporte del paso 5.5, "qué es realmente necesario"), así que TODO
   vecino que llega por este flujo queda en esta situación por diseño, no
-  por accidente. Para limpiar los datos de prueba de este paso hubo que
-  dar de baja las personas directo por SQL, no había otro camino. Falta
-  decidir, en una etapa posterior (probablemente la que construya la
-  bandeja de reclamos del panel): ¿la ficha de un reclamo tiene que poder
-  abrir la ficha de la persona aunque no tenga ocupación? ¿"Personas" del
-  panel necesita un listado aparte (o el mismo, sin el INNER JOIN) para
-  estos casos?
+  por accidente.
+
+  **La mitad de "verse" se resolvió en el paso 6.3** (vista de detalle de
+  un reclamo, ver esa sección más arriba): la tarjeta "Vecino" del detalle
+  sale de un LEFT JOIN directo contra `people`, sin pasar por
+  `unit_occupancies`, con un aviso explícito cuando `personHasAnyOccupancy()`
+  da `false` -- ese vecino ahora se puede ver desde el reclamo que cargó,
+  aunque siga sin aparecer en la pestaña "Personas" de ningún edificio.
+  Lo que sigue sin existir es justamente eso: ni una ficha propia de
+  persona en el panel (¿la ficha de un reclamo abre la ficha de la
+  persona?), ni una forma de darla de baja desde ahí -- 6.3 es una
+  pantalla de solo lectura a propósito (las acciones son el paso 6.4), así
+  que ninguna de las dos podía resolverse en ese paso. Falta decidir, en
+  una etapa posterior: ¿"Personas" del panel necesita un listado aparte
+  (o el mismo, sin el INNER JOIN) para estos casos, o alcanza con lo que
+  ya muestra el detalle del reclamo?
 
 - ~~`wa.me` le rompe TODOS los emojis del mensaje al redirigir -- bloqueante
   para el diseño del paso 5.6.~~ **Resuelto en el paso 5.9b: cambiar de
@@ -2668,32 +2824,25 @@ com/send/` en desktop, `whatsapp://send/` en mobile) -- no solo la
   mensaje ya precargado) sin un teléfono real -- documentado como límite
   explícito de lo que este proyecto puede verificar por su cuenta.
 
-- **El administrador no tiene HOY ninguna forma de ver los adjuntos de un
+- ~~El administrador no tiene HOY ninguna forma de ver los adjuntos de un
   reclamo desde el panel -- depende enteramente de encontrar el WhatsApp
-  viejo.** Encontrado en el paso 5.10 (galería pública de adjuntos):
-  `/s/[token]` es la ÚNICA pantalla del proyecto que muestra las fotos de
-  un reclamo, y el único camino para llegar ahí es el link que viajó por
-  WhatsApp -- si el administrador borró esa conversación, cambió de
-  celular, o nunca llegó a tocar "Enviar por WhatsApp" (el reclamo se
-  guarda igual, ver CLAUDE.md > Pantalla de confirmación), no tiene
-  ninguna otra vía para ver esas fotos. Es un problema real, no
-  hipotético, a resolver en la etapa 6 (la que construye la bandeja de
-  reclamos del panel): esa pantalla necesita su propia forma de listar y
-  mostrar los adjuntos de un reclamo, generando sus propias URLs firmadas
-  server-side con la service-role key (mismo mecanismo que ya usa `/s/
-[token]`, ver CLAUDE.md > Galería pública de adjuntos).
+  viejo.~~ **Resuelto en el paso 6.3** (vista de detalle de un reclamo, ver
+  esa sección más arriba): `/panel/tickets/[ticketId]` tiene su propia
+  galería (`AttachmentGallery`, compartida con `/s/[token]`), con URLs
+  firmadas generadas server-side con la service-role key -- exactamente el
+  mecanismo que este Pendiente anticipaba. El administrador ya no depende
+  de encontrar el WhatsApp viejo para ver una foto.
 
 - **Reconsiderar si `/s/[token]` debería tener una ventana de acceso más
-  corta, una vez que exista la pantalla de adjuntos del panel (el
-  Pendiente de arriba).** Decisión del paso 5.10: el token y la página NO
-  expiran hoy, justificado porque hoy son la ÚNICA forma de ver esas
-  fotos -- expirar el link dejaría un reclamo viejo sin ninguna forma de
-  mostrar sus fotos a nadie. Ese argumento deja de aplicar en cuanto el
-  panel tenga su propia vista de adjuntos: en ese momento, `/s/[token]`
-  pasa a ser una vía de acceso ADICIONAL (no la única), y ahí sí se
-  justifica evaluar una ventana más corta -- por ejemplo, invalidar el
-  link unos días después de creado el reclamo, cuando ya cumplió su
-  propósito de aviso inmediato.
+  corta, ahora que el panel SÍ tiene su propia pantalla de adjuntos (paso
+  6.3, Pendiente resuelto arriba).** Decisión del paso 5.10: el token y la
+  página no expiran, justificado en su momento porque eran la ÚNICA forma
+  de ver esas fotos -- ese argumento ya no aplica: `/s/[token]` pasa a ser
+  una vía de acceso ADICIONAL, no la única. Sigue sin implementarse a
+  propósito -- el paso 6.3 fue deliberadamente de solo lectura (sin tocar
+  nada del flujo público), y decidir una ventana concreta (¿días? ¿se
+  invalida al resolver el reclamo?) es una decisión de producto que
+  todavía no se tomó, no algo que se coló por descuido.
 
 ## Qué NO hacer
 

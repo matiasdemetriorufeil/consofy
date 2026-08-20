@@ -3,7 +3,11 @@ import { cn } from "@/lib/utils";
 
 export type Priority = "urgente" | "alta" | "media" | "baja";
 
-const PRIORITY_LABEL: Record<Priority, string> = {
+// Exportado (paso 6.3): describeTicketEvent (ticket-event-description.ts)
+// reusa este mapa para traducir un payload de "priority_changed" al mismo
+// vocabulario que ya usa el badge, en vez de mantener una segunda copia de
+// estos cuatro strings.
+export const PRIORITY_LABEL: Record<Priority, string> = {
   urgente: "Urgente",
   alta: "Alta",
   media: "Media",

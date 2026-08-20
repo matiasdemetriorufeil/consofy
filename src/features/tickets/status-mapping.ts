@@ -38,3 +38,18 @@ export function toBadgeStatus(status: DbStatus): TicketStatus {
 export function toBadgePriority(priority: DbPriority): Priority {
   return PRIORITY_MAP[priority];
 }
+
+// Origen del reclamo (paso 6.3, vista de detalle -- "todos los datos del
+// reclamo" incluye de dónde entró). Sin badge propio: es un dato de
+// contexto, no un estado que necesite color.
+type DbSource = (typeof tickets.$inferSelect)["source"];
+
+const SOURCE_LABEL: Record<DbSource, string> = {
+  public_form: "Formulario público",
+  admin: "Cargado por administración",
+  whatsapp: "WhatsApp",
+};
+
+export function toSourceLabel(source: DbSource): string {
+  return SOURCE_LABEL[source];
+}

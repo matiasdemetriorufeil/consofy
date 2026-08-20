@@ -1,11 +1,11 @@
 import { notFound } from "next/navigation";
-import { File as FileIcon } from "lucide-react";
 import { z } from "zod";
 
 import { RelativeDate } from "@/components/relative-date";
 import { Card, CardContent } from "@/components/ui/card";
 import { getTicketByAttachmentsToken } from "@/features/public-form/queries";
-import { createSignedAttachmentUrls } from "@/features/public-form/storage-objects";
+import { AttachmentGallery } from "@/features/tickets/components/attachment-gallery";
+import { createSignedAttachmentUrls } from "@/features/tickets/storage-objects";
 
 // Ruta pública, sin sesión (paso 5.10) -- mismo criterio que /r/[token]
 // (ver CLAUDE.md > Qué es este proyecto): quien llega acá no tiene por qué
@@ -93,57 +93,11 @@ export default async function TicketAttachmentsGalleryPage({
             {ticket.description}
           </p>
 
-          {ticket.attachments.length === 0 ? (
-            <p className="text-ink-muted rounded-lg border border-dashed p-4 text-center text-sm">
-              Este reclamo no tiene fotos ni archivos adjuntos.
-            </p>
-          ) : (
-            <ul className="flex flex-col gap-3 sm:grid sm:grid-cols-2">
-              {ticket.attachments.map((attachment) => {
-                const url = signedUrls.get(attachment.storagePath);
-                if (!url) {
-                  return null;
-                }
-                const isImage = attachment.mimeType.startsWith("image/");
-                return (
-                  <li key={attachment.id}>
-                    {/* target="_blank" a un archivo YA cargado (no un
-                        <Image> de Next): la URL es firmada y de corta
-                        duración, cambia en cada carga de esta página --
-                        el optimizador de imágenes de Next intentaría
-                        cachear/proxear una URL pensada para vencer, así
-                        que una imagen simple es lo correcto acá, no un
-                        atajo. Abrir en una pestaña nueva le da al
-                        administrador el visor nativo del celular, con
-                        zoom real, sin construir un lightbox propio. */}
-                    <a
-                      href={url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="block"
-                    >
-                      {isImage ? (
-                        // eslint-disable-next-line @next/next/no-img-element -- URL firmada temporal, no un asset de Next
-                        <img
-                          src={url}
-                          alt={attachment.originalFilename}
-                          loading="lazy"
-                          className="border-border h-64 w-full rounded-lg border object-cover"
-                        />
-                      ) : (
-                        <div className="border-border bg-muted/40 flex h-64 w-full flex-col items-center justify-center gap-2 rounded-lg border">
-                          <FileIcon className="text-muted-foreground size-8" />
-                          <span className="text-ink-muted px-4 text-center text-sm">
-                            {attachment.originalFilename}
-                          </span>
-                        </div>
-                      )}
-                    </a>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
+          <AttachmentGallery
+            attachments={ticket.attachments}
+            signedUrls={signedUrls}
+            emptyMessage="Este reclamo no tiene fotos ni archivos adjuntos."
+          />
         </CardContent>
       </Card>
     </div>

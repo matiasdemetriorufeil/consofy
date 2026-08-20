@@ -177,6 +177,27 @@ export function buildTicketInboxHref(
   return query ? `${pathname}?${query}` : pathname;
 }
 
+// Query string actual de la bandeja (paso 6.3), para volver desde el
+// detalle de un reclamo sin perder los filtros/página/orden que traía el
+// administrador -- ver el link "Volver a la bandeja" en
+// /panel/tickets/[ticketId]/page.tsx. Se arma UNA vez en la lista
+// (page.tsx) y viaja como el parámetro `from` de cada link a un reclamo
+// (`?from=${encodeURIComponent(...)}`) -- el propio `from` nunca se valida
+// como una URL completa (no lo es, ver el uso en el detalle: siempre se le
+// antepone "/panel/tickets?" a mano), así que no hay superficie de open
+// redirect que cuidar acá.
+export function ticketInboxQueryString(
+  currentParams: Record<string, string | undefined>,
+): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(currentParams)) {
+    if (value !== undefined) {
+      params.set(key, value);
+    }
+  }
+  return params.toString();
+}
+
 // Qué números de página mostrar en la paginación (paso 6.2) -- primera,
 // última, la actual y una vecina de cada lado, con "…" para los huecos.
 // Con pocas páginas (≤7) muestra todas, sin huecos -- el caso común dado

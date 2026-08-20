@@ -30,6 +30,7 @@ import {
   hasExplicitFilters,
   normalizeSearchParams,
   TICKET_INBOX_PAGE_SIZE,
+  ticketInboxQueryString,
   ticketInboxSearchParamsSchema,
   type TicketSortColumn,
   type TicketSortDirection,
@@ -208,6 +209,22 @@ export default async function TicketsPage({
     });
   }
 
+  // Cómo se llega al detalle y cómo se vuelve sin perder filtros (paso
+  // 6.3): el título de cada fila/tarjeta linkea a /panel/tickets/[id] con
+  // la query actual codificada en `from` -- el detalle arma su link
+  // "Volver a la bandeja" con ese valor tal cual, así que cambiar de
+  // filtro/página/orden y después entrar a un reclamo y volver deja al
+  // administrador exactamente donde estaba, nunca reseteado a la vista por
+  // default. Mismo criterio de "la URL decide" que ya fijaron los pasos
+  // 6.1/6.2, aplicado acá a la navegación entre pantallas en vez de a un
+  // control dentro de la misma.
+  const backQuery = ticketInboxQueryString(normalizedParams);
+  function buildDetailHref(ticketId: string): string {
+    return backQuery
+      ? `/panel/tickets/${ticketId}?from=${encodeURIComponent(backQuery)}`
+      : `/panel/tickets/${ticketId}`;
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <TicketFiltersBar
@@ -298,7 +315,12 @@ export default async function TicketsPage({
                 </TableCell>
                 <TableCell>{ticket.categoryName}</TableCell>
                 <TableCell className="max-w-64 truncate">
-                  {ticket.title}
+                  <Link
+                    href={buildDetailHref(ticket.id)}
+                    className="outline-none hover:underline focus-visible:underline"
+                  >
+                    {ticket.title}
+                  </Link>
                 </TableCell>
                 <TableCell>
                   <PriorityBadge priority={toBadgePriority(ticket.priority)} />
@@ -332,9 +354,12 @@ export default async function TicketsPage({
                 className="text-ink-muted text-xs"
               />
             </div>
-            <p className="text-ink truncate text-sm font-medium">
+            <Link
+              href={buildDetailHref(ticket.id)}
+              className="text-ink truncate text-sm font-medium hover:underline"
+            >
               {ticket.title}
-            </p>
+            </Link>
             <p className="text-ink-muted truncate text-xs">
               {showBuildingColumn ? `${ticket.buildingName} · ` : ""}
               {ticket.unitLabel ?? "Sin unidad"} · {ticket.categoryName}

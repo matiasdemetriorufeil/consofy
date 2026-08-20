@@ -331,3 +331,32 @@ export async function getPersonDependencyCounts(
     pendingTicketsCount: pendingTickets?.count ?? 0,
   };
 }
+
+// Para la vista de detalle de un reclamo (paso 6.3, resuelve el Pendiente
+// "un vecino sin ocupación es invisible en el panel" -- ver CLAUDE.md):
+// esta pregunta puntual (¿esta persona tiene AL MENOS una ocupación en
+// algún lado, vigente o ya finalizada?) es exactamente el mismo criterio
+// que hace que alguien aparezca o no en getOccupancyRowsForBuilding() de
+// arriba (que no filtra por `ended_on`, solo por `deleted_at` -- una
+// ocupación finalizada sigue haciendo visible a la persona en esa
+// pestaña). Sirve para mostrar un aviso honesto en el detalle del reclamo
+// cuando la respuesta es "no, ninguna" -- el caso real que dejó a este
+// vecino sin ninguna pantalla que lo mostrara hasta este paso.
+export async function personHasAnyOccupancy(
+  organizationId: string,
+  personId: string,
+): Promise<boolean> {
+  const [row] = await db
+    .select({ id: unitOccupancies.id })
+    .from(unitOccupancies)
+    .where(
+      and(
+        eq(unitOccupancies.organizationId, organizationId),
+        eq(unitOccupancies.personId, personId),
+        isNull(unitOccupancies.deletedAt),
+      ),
+    )
+    .limit(1);
+
+  return !!row;
+}

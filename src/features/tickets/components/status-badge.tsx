@@ -4,7 +4,11 @@ import { cn } from "@/lib/utils";
 export type TicketStatus =
   "abierto" | "en_progreso" | "resuelto" | "cerrado" | "descartado";
 
-const STATUS_LABEL: Record<TicketStatus, string> = {
+// Exportado (paso 6.3): describeTicketEvent (ticket-event-description.ts)
+// reusa este mapa para traducir un payload de "status_changed" (from/to en
+// inglés, valores reales del enum) al mismo vocabulario que ya usa el
+// badge, en vez de mantener una segunda copia de estos cinco strings.
+export const STATUS_LABEL: Record<TicketStatus, string> = {
   abierto: "Abierto",
   en_progreso: "En progreso",
   resuelto: "Resuelto",
