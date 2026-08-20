@@ -23,7 +23,10 @@ import {
   units,
 } from "@/db/schema";
 import {
+  TICKET_INBOX_PAGE_SIZE,
   UNASSIGNED_ASSIGNEE_VALUE,
+  type TicketSortColumn,
+  type TicketSortDirection,
   type TicketStatusFilterValue,
 } from "./ticket-inbox-schema";
 
@@ -326,6 +329,12 @@ export type TicketInboxFilters = {
   dateFrom?: Date;
   dateTo?: Date;
   search?: string;
+  // Paso 6.2 -- paginación y orden. `page` es 1-based (el mismo número que
+  // ve el admin en la URL/UI, sin traducir a offset 0-based fuera de esta
+  // función).
+  sortBy?: TicketSortColumn;
+  sortDir?: TicketSortDirection;
+  page?: number;
 };
 
 export type TicketInboxRow = {
@@ -343,21 +352,25 @@ export type TicketInboxRow = {
   neighborName: string | null;
 };
 
-// La query central de la bandeja -- UNA sola consulta, con todos los joins
-// y todos los filtros combinados en el mismo WHERE (AND entre sí, ver el
-// reporte del paso sobre por qué AND y no OR: son filtros que ESTRECHAN la
-// búsqueda, no alternativas). Nada de N+1: los joins traen edificio,
-// categoría, unidad y vecino en la misma vuelta a la base, sin una consulta
-// por fila -- mismo criterio que getTicketsForBuilding()/
-// getAttentionTickets() de más arriba.
-//
-// Sin LIMIT todavía -- paso 6.2 (paginación) decide el techo real. Medido
-// contra 500 reclamos (ver el reporte del paso) para saber si esto es un
-// problema práctico antes de que 6.2 exista.
-export async function getTicketInbox(
+export type TicketInboxResult = {
+  rows: TicketInboxRow[];
+  // Total de filas que matchean los filtros, SIN el LIMIT de la página --
+  // hace falta para "Página X de Y" y para saber cuándo deshabilitar
+  // "Siguiente". Sale de la MISMA consulta (`count(*) over()`, ver abajo),
+  // no de un segundo round-trip -- ver CLAUDE.md > Bandeja de reclamos con
+  // filtros para la medición que compara la cantidad de consultas contra
+  // el paso 6.1.
+  totalCount: number;
+};
+
+// Compartido entre getTicketInbox() y getTicketInboxCount() (paso 6.2, ver
+// el comentario de esa segunda función sobre por qué hace falta) -- las
+// mismas condiciones de filtro, sin repetirlas en dos lugares que se
+// podrían desincronizar.
+function buildTicketInboxConditions(
   organizationId: string,
   filters: TicketInboxFilters,
-): Promise<TicketInboxRow[]> {
+) {
   const conditions = [
     eq(tickets.organizationId, organizationId),
     isNull(tickets.deletedAt),
@@ -408,6 +421,64 @@ export async function getTicketInbox(
     );
   }
 
+  return conditions;
+}
+
+// La query central de la bandeja -- UNA sola consulta, con todos los joins
+// y todos los filtros combinados en el mismo WHERE (AND entre sí, ver el
+// reporte del paso sobre por qué AND y no OR: son filtros que ESTRECHAN la
+// búsqueda, no alternativas). Nada de N+1: los joins traen edificio,
+// categoría, unidad y vecino en la misma vuelta a la base, sin una consulta
+// por fila -- mismo criterio que getTicketsForBuilding()/
+// getAttentionTickets() de más arriba.
+//
+// LIMIT/OFFSET (paso 6.2, TICKET_INBOX_PAGE_SIZE) + `count(*) over()` para
+// el total -- una función de ventana, no una segunda consulta `COUNT(*)`
+// aparte: se computa ANTES de aplicar el LIMIT (el orden lógico de
+// ejecución de SQL aplica funciones de ventana antes que LIMIT), así que
+// cada fila devuelta ya trae el total real de la búsqueda completa, sin
+// pagar un round-trip extra a una base que -- ver la medición del paso
+// 6.1 -- ya es el costo dominante de esta pantalla.
+//
+// LÍMITE de este truco, encontrado probando el paso: `count(*) over()`
+// SOLO viaja en filas DEVUELTAS -- con un `page` tan alto que el OFFSET
+// salta más allá de todas las filas que matchean, la consulta devuelve
+// CERO filas y, con ellas, ningún total tampoco (quedaría en 0, como si no
+// hubiera resultados, aunque sí los haya en páginas anteriores). Por eso
+// existe getTicketInboxCount() más abajo -- el caller (page.tsx) la usa
+// SOLO en esa rama puntual para recuperar el total real y corregir la
+// página, nunca en el camino normal.
+export async function getTicketInbox(
+  organizationId: string,
+  filters: TicketInboxFilters,
+): Promise<TicketInboxResult> {
+  const conditions = buildTicketInboxConditions(organizationId, filters);
+
+  // Página 1-based -- se traduce a offset acá adentro, no en el caller
+  // (page.tsx trabaja siempre con el número que ve el admin). Sin
+  // filters.page o con un valor no positivo, cae a la página 1 -- mismo
+  // criterio permisivo que el resto de los filtros con una URL escrita a
+  // mano.
+  const page = filters.page && filters.page > 0 ? filters.page : 1;
+  const offset = (page - 1) * TICKET_INBOX_PAGE_SIZE;
+
+  // Tiebreaker SIEMPRE presente (tickets.id): sin esto, dos reclamos con
+  // exactamente la misma prioridad (lo normal -- son 4 valores para
+  // potencialmente cientos de filas) o, más raro, el mismo reportedAt al
+  // segundo, quedarían en un orden no determinista entre una página y la
+  // siguiente -- Postgres no garantiza estabilidad de por sí. Ordenar por
+  // prioridad usa reportedAt como SEGUNDO criterio (más reciente primero
+  // dentro de la misma prioridad, la pregunta natural siguiente), no el id.
+  const sortDirFn = filters.sortDir === "asc" ? asc : desc;
+  const orderByClauses =
+    filters.sortBy === "priority"
+      ? [
+          sortDirFn(tickets.priority),
+          desc(tickets.reportedAt),
+          desc(tickets.id),
+        ]
+      : [sortDirFn(tickets.reportedAt), desc(tickets.id)];
+
   const rows = await db
     .select({
       id: tickets.id,
@@ -426,6 +497,10 @@ export async function getTicketInbox(
       unitLabelRaw: tickets.unitLabelRaw,
       neighborFirstName: people.firstName,
       neighborLastName: people.lastName,
+      // Función de ventana, no un segundo SELECT COUNT(*) -- ver el
+      // comentario de arriba, en getTicketInbox. Se computa sobre el
+      // resultado COMPLETO de filtros, antes del LIMIT de abajo.
+      totalCount: sql<number>`count(*) over ()`.mapWith(Number),
     })
     .from(tickets)
     .innerJoin(
@@ -457,28 +532,61 @@ export async function getTicketInbox(
       ),
     )
     .where(and(...conditions))
-    .orderBy(desc(tickets.reportedAt));
+    .orderBy(...orderByClauses)
+    .limit(TICKET_INBOX_PAGE_SIZE)
+    .offset(offset);
 
-  return rows.map((row) => ({
-    id: row.id,
-    publicCode: row.publicCode,
-    title: row.title,
-    status: row.status,
-    priority: row.priority,
-    reportedAt: row.reportedAt,
-    assignee: row.assignee,
-    buildingId: row.buildingId,
-    buildingName: row.buildingName,
-    categoryName: row.categoryName,
-    unitLabel: row.unitTower
-      ? `${row.unitTower} - ${row.unitFloor}°${row.unitNumber}`
-      : row.unitFloor && row.unitNumber
-        ? `${row.unitFloor}°${row.unitNumber}`
-        : row.unitLabelRaw,
-    neighborName:
-      [row.neighborFirstName, row.neighborLastName].filter(Boolean).join(" ") ||
-      null,
-  }));
+  return {
+    totalCount: rows[0]?.totalCount ?? 0,
+    rows: rows.map((row) => ({
+      id: row.id,
+      publicCode: row.publicCode,
+      title: row.title,
+      status: row.status,
+      priority: row.priority,
+      reportedAt: row.reportedAt,
+      assignee: row.assignee,
+      buildingId: row.buildingId,
+      buildingName: row.buildingName,
+      categoryName: row.categoryName,
+      unitLabel: row.unitTower
+        ? `${row.unitTower} - ${row.unitFloor}°${row.unitNumber}`
+        : row.unitFloor && row.unitNumber
+          ? `${row.unitFloor}°${row.unitNumber}`
+          : row.unitLabelRaw,
+      neighborName:
+        [row.neighborFirstName, row.neighborLastName]
+          .filter(Boolean)
+          .join(" ") || null,
+    })),
+  };
+}
+
+// Fallback puntual para el caso límite de getTicketInbox() (paso 6.2, ver
+// el comentario de esa función): un `page` pedido más allá del total real
+// hace que `count(*) over()` no viaje en ninguna fila (cero filas
+// devueltas), así que el caller no puede saber si "cero filas" significa
+// "no hay resultados" o "hay resultados, pero no en esta página". Esta
+// consulta SÍ es una segunda `COUNT(*)` de verdad -- pero solo se dispara
+// en esa rama puntual (bookmark viejo, filtro que acaba de reducir el
+// resultado), nunca en el camino normal de la pantalla.
+export async function getTicketInboxCount(
+  organizationId: string,
+  filters: TicketInboxFilters,
+): Promise<number> {
+  const conditions = buildTicketInboxConditions(organizationId, filters);
+  const [row] = await db
+    .select({ count: sql<number>`count(*)`.mapWith(Number) })
+    .from(tickets)
+    .leftJoin(
+      people,
+      and(
+        eq(people.id, tickets.personId),
+        eq(people.organizationId, tickets.organizationId),
+      ),
+    )
+    .where(and(...conditions));
+  return row?.count ?? 0;
 }
 
 // Filtro-vacío vs. org-vacía (ver el reporte del paso): esta consulta

@@ -1552,7 +1552,7 @@ de Córdoba sin datos de valor de reventa, ese es el balance correcto hoy
 -- no gastar presupuesto (de dinero o de complejidad) en el escenario
 menos probable de la lista.
 
-## Bandeja de reclamos con filtros (paso 6.1)
+## Bandeja de reclamos con filtros, paginación y orden (pasos 6.1 y 6.2)
 
 `/panel/tickets` (`src/app/panel/tickets/page.tsx`) es la pantalla donde el
 administrador vive todos los días (etapa 6) -- reemplaza el placeholder
@@ -1746,6 +1746,170 @@ duplicadas en tabla + tarjetas, ver arriba) es una cantidad considerable
 para desplazarse -- la paginación del paso 6.2 sigue siendo necesaria por
 UX (nadie quiere scrollear 500 filas), no por un problema de performance
 que este paso haya encontrado.
+
+### Paginación y orden (paso 6.2)
+
+**25 reclamos por página -- no un número redondo elegido al azar.**
+Derivado del medio más restrictivo (mobile, ver el punto de abajo sobre
+por qué): una tarjeta mide ~114px con su espacio (medido sobre la captura
+real del paso 6.1), y un viewport típico deja ~550-600px visibles para
+tarjetas después del header/buscador/contador -- unas 5 tarjetas por
+"pantalla" de scroll. 25 reclamos son unas 5 pantallas: ni tan poco que
+repagine todo el tiempo, ni tanto que pierda de vista dónde está en la
+lista. En desktop, con filas mucho más compactas, 25 entra cómodo sin
+scroll excesivo tampoco.
+
+**Paginación por NÚMEROS de página, no "cargar más" ni scroll infinito.**
+Esta pantalla ya vive con la URL como fuente de verdad (paso 6.1: "los
+filtros se guardan en la URL, para compartir o guardar una vista
+concreta") -- números de página extienden esa misma idea (`?page=3` es
+tan compartible/bookmarkeable como cualquier otro filtro), mientras que
+"cargar más" o scroll infinito necesitan acumular estado en el cliente
+(qué páginas ya se cargaron) y rompen exactamente esa propiedad: una URL
+con scroll infinito no puede reconstruir "dónde estabas" al abrirla de
+nuevo. Un panel de administración además se beneficia de la
+PREDICTIBILIDAD que da saber cuántas páginas hay y poder saltar a una en
+particular -- el patrón de "feed casual" que scroll infinito sirve bien
+no es el de este trabajo (triage, no scrolleo pasivo).
+
+**Server Components puros para paginación y orden -- sin JS de cliente.**
+Los links de página y los encabezados ordenables (`Reportado`, `Prioridad`
+en desktop) son `<Link>` de Next.js con el href ya resuelto del lado del
+servidor (`buildTicketInboxHref()`, `ticket-inbox-schema.ts`) -- el
+servidor ya sabe el estado actual (página, orden) al renderizar la
+respuesta, así que puede calcular el próximo estado sin ningún
+`onClick` ni Client Component nuevo. Mismo criterio que ya hizo simple el
+paso 6.1 con los filtros: la URL entera decide, nunca un estado de React
+que se pueda perder.
+
+**Cómo conviven con los filtros -- cambiar cualquier cosa vuelve a la
+página 1, siempre.** Estar en la página 5 de un resultado que ya no es el
+mismo (cambió un filtro, cambió el orden) no tiene sentido: esa "página 5"
+puede no existir más, o mostrar algo completamente distinto de lo que el
+admin espera ver. `TicketFiltersBar` borra `page` de la URL en
+CUALQUIER cambio que pase por su `updateParams()` (filtro, búsqueda,
+orden desde el select) -- una sola línea, al principio de esa función,
+cubre los ocho controles distintos sin tener que acordarse de agregarlo
+en cada uno por separado. Los links de encabezado ordenable (server-side)
+hacen lo mismo explícitamente al construir su href. Verificado en la
+práctica: estando en la página 2, cambiar "Prioridad" a "Urgente" lleva a
+`?status=all&priority=urgent` (sin `page=`, es decir, página 1) -- no a
+`?status=all&priority=urgent&page=2`.
+
+**Orden inicial: `reportedAt desc` (más nuevo primero) -- misma pregunta
+que ya resolvía el paso 6.1 sin ordenamiento explícito.** Cuando el
+administrador abre el panel, lo que quiere ver primero es lo más reciente,
+mismo criterio que ya fijó el estado inicial "abiertos" del paso 6.1. Sin
+escribir `sort`/`dir` en la URL cuando coinciden con el default -- mismo
+patrón que `status=open`.
+
+**Solo DOS columnas ordenables: `reportedAt` y `priority` -- el resto se
+evaluó y se descartó a propósito:**
+
+- **Reportado** (elegida): "¿qué es más nuevo?" -- la pregunta central de
+  cualquier bandeja.
+- **Prioridad** (elegida): "¿qué es más urgente?" -- la otra pregunta real
+  de triage. El enum de la base (`low < medium < high < urgent`, por
+  ORDEN DE DECLARACIÓN -- ver el comentario de `ticket_priority` en
+  `src/db/schema/categories.ts`) ya ordena de forma nativa en Postgres sin
+  necesitar un `CASE WHEN` ni una columna numérica aparte.
+- **Estado**: descartada -- es nominal, no una escala real. "new →
+  in_progress → resolved → closed" casi cuenta una historia de flujo de
+  trabajo, pero "discarded" no encaja en esa línea, y de todos modos el
+  ESTADO ya es un filtro (paso 6.1), no algo que un admin quiera "ordenar"
+  -- filtra por el estado que le importa en vez de ordenar por él.
+- **Código**: descartada -- ya es esencialmente secuencial por
+  edificio+año, ordenar por código es casi lo mismo que ordenar por
+  edificio y después por fecha, sin agregar una lente nueva.
+- **Edificio / Unidad / Categoría**: descartadas -- son dimensiones para
+  FILTRAR (ya lo son, paso 6.1), no para ordenar: con "todos los
+  edificios" mezclados, agrupar por edificio ordenando no ayuda tanto como
+  filtrar directamente a UNO. Unidad además mezcla valores catalogados y
+  texto libre (`unitLabelRaw`), sin un orden natural entre los dos.
+- **Título**: descartada -- texto libre, un orden alfabético no ayuda a
+  decidir qué mirar primero.
+
+**Mobile, sin encabezados de tabla para tocar -- un `<Select>` "Ordenar
+por" en la barra de filtros.** Mismo componente client-side que ya
+maneja el resto de los filtros (`TicketFiltersBar`), con las 4
+combinaciones útiles como frases completas ("Prioridad: urgente
+primero"), no dos selects separados de columna+dirección que el admin
+tendría que combinar mentalmente. Vive TAMBIÉN en desktop (dentro de la
+barra de filtros), como alternativa a clickear el encabezado -- las dos
+vías escriben los mismos `sort`/`dir`, así que nunca se desincronizan.
+
+**Total de resultados sin una segunda consulta -- `count(*) over()`, una
+función de ventana, no `SELECT COUNT(*)` aparte.** Se computa ANTES del
+`LIMIT` (orden lógico de ejecución de SQL), así que cada fila que
+`getTicketInbox()` devuelve ya trae el total real de la búsqueda completa
+sin pagar un round-trip extra -- confirmado con `EXPLAIN ANALYZE`, ver la
+medición más abajo.
+
+**Límite real encontrado de esa técnica, y el fix:** `count(*) over()`
+SOLO viaja en filas DEVUELTAS. Con una página pedida tan alta que el
+`OFFSET` salta más allá de todas las filas que matchean, la consulta
+devuelve CERO filas -- y con ellas, ningún total tampoco. Probado en la
+práctica: `?page=999` con 500 reclamos (20 páginas reales) mostraba **el
+empty state equivocado** ("No encontramos reclamos con estos filtros") en
+vez de corregir a la página 20, porque el código leía `totalCount = 0` de
+un resultado vacío que en realidad no significaba "cero resultados" --
+significaba "cero resultados EN ESTA PÁGINA". Encontrado probando este
+mismo paso, no en producción. Arreglado con `getTicketInboxCount()`
+(`queries.ts`), un `SELECT COUNT(*)` real que SOLO se dispara cuando
+`page.tsx` ve cero filas Y se pidió una página mayor que 1 -- ahí sí hace
+falta preguntar aparte cuál es el total real, para decidir si corregir a
+la última página válida o aceptar que de verdad no hay resultados. Nunca
+se dispara en el camino normal (página 1, o cualquier página que
+efectivamente tenga filas) -- solo en el caso límite de un bookmark viejo
+o un filtro que acaba de reducir el resultado mientras el admin estaba en
+una página alta.
+
+**Consultas por carga de página -- comparado contra el 6.1, con una
+corrección honesta:** el reporte del 6.1 contó "5-6 consultas" mirando
+solo lo que `page.tsx` pide directamente -- un recuento incompleto, no
+contaba `getActiveBuildings()` que el LAYOUT de `/panel` ya pedía en cada
+carga (para el selector de edificio del header, paso 3.4). Contando bien
+las dos capas, el total real en el camino normal es **6 consultas**
+(`requireUser` + `getActiveBuildings` del layout + las tres opciones de
+filtro del paso 6.1 + `getTicketInbox`), y ya era así DESDE el paso 6.1 --
+el paso 6.2 no le agrega ninguna, gracias a `count(*) over()`. Sube a 7-8
+SOLO en el caso límite de página fuera de rango (una consulta más de
+`getTicketInboxCount`, y una repetición de `getTicketInbox` si hay que
+corregir la página) -- una rama rara, no el camino normal.
+
+**Medición real, comparada contra el 6.1:**
+
+- **Costo de la consulta aislada (`EXPLAIN ANALYZE`), con `LIMIT`/`OFFSET`/
+  `ORDER BY`/`count(*) over()` sumados: 1.78ms** -- prácticamente idéntico
+  a los 1.6ms del 6.1 (sin paginar). Confirma que agregar paginación y
+  orden no le costó nada real a la base -- el plan usa un `top-N
+heapsort` para el `LIMIT` + `ORDER BY` combinados, y la función de
+  ventana se computa en la misma pasada.
+- **Tiempo de respuesta HTTP completo, medido de nuevo contra desarrollo,
+  con `npm run start` (ya seguro de usar en local -- ver CLAUDE.md >
+  Separación dev/producción, la protección del incidente cerrado antes de
+  este paso): 2.2-2.4 segundos**, consistente en los seis escenarios
+  probados (página 1, página 10, última página, orden por prioridad,
+  filtros+orden+página combinados) -- por encima de los 500ms del
+  criterio, igual que en el 6.1, y por el mismo motivo ya documentado ahí
+  (latencia de red hacia la base de desarrollo, no el costo del query).
+- **Corrección importante sobre el número que reportaba el 6.1 (1.1-1.9s):**
+  esa medición se hizo con `npm run start` corriendo ANTES de descubrir y
+  cerrar el incidente de `.env.production.local` -- es decir, es
+  perfectamente posible que esa corrida haya estado consultando la base
+  de PRODUCCIÓN (sin los 500 reclamos sintéticos) en vez de desarrollo,
+  lo que explicaría números más bajos sin que reflejen de verdad el costo
+  de 500 filas. La medición de ESTE paso es la primera hecha con la
+  certeza de estar contra desarrollo (protección ya activa, confirmada
+  antes de medir) -- por eso el número absoluto no es directamente
+  comparable al del 6.1, pero el COSTO DE QUERY (la métrica que sí importa
+  para el criterio de producción) es consistente entre los dos: ~1.6-1.8ms
+  sea cual sea la base.
+- **Estimado en producción, misma base numérica que el 6.1** (multiplicador
+  ~57x ya medido, `SELECT 1`: 172ms dev vs. 3ms prod): 6-8 round-trips a
+  ~3-4ms cada uno dan **20-30ms totales**, cómodamente bajo los 500ms del
+  criterio -- sin cambios respecto al 6.1, porque el trabajo real de la
+  base no cambió.
 
 ## Reglas de seguridad (no negociables)
 

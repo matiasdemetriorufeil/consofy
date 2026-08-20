@@ -1,4 +1,5 @@
-import { Inbox, SearchX } from "lucide-react";
+import { ArrowDown, ArrowUp, Inbox, SearchX } from "lucide-react";
+import Link from "next/link";
 
 import { EmptyState } from "@/components/empty-state";
 import { RelativeDate } from "@/components/relative-date";
@@ -15,17 +16,23 @@ import { PriorityBadge } from "@/features/tickets/components/priority-badge";
 import { StatusBadge } from "@/features/tickets/components/status-badge";
 import { TicketCode } from "@/features/tickets/components/ticket-code";
 import { TicketFiltersBar } from "@/features/tickets/components/ticket-filters-bar";
+import { TicketPagination } from "@/features/tickets/components/ticket-pagination";
 import {
   getAssigneeFilterOptions,
   getCategoryFilterOptions,
   getStatusesForFilter,
   getTicketInbox,
+  getTicketInboxCount,
   organizationHasAnyTicket,
 } from "@/features/tickets/queries";
 import {
+  buildTicketInboxHref,
   hasExplicitFilters,
   normalizeSearchParams,
+  TICKET_INBOX_PAGE_SIZE,
   ticketInboxSearchParamsSchema,
+  type TicketSortColumn,
+  type TicketSortDirection,
 } from "@/features/tickets/ticket-inbox-schema";
 import {
   toBadgePriority,
@@ -35,11 +42,9 @@ import { getUnitsForBuilding } from "@/features/units/queries";
 import { requireUser } from "@/lib/auth";
 import { zonedDayBoundsToUtc } from "@/lib/format-date";
 
-// Bandeja de reclamos con filtros (paso 6.1) -- la pantalla donde el
-// administrador vive todos los días (ver CLAUDE.md > Qué es este
-// proyecto). Sin paginación todavía: eso es el paso 6.2, ver CLAUDE.md >
-// Bandeja de reclamos con filtros para la medición que justifica dejarla
-// para ese paso en vez de adelantarla acá.
+// Bandeja de reclamos con filtros, paginación y orden (pasos 6.1 y 6.2) --
+// la pantalla donde el administrador vive todos los días (ver CLAUDE.md >
+// Qué es este proyecto).
 export default async function TicketsPage({
   searchParams,
 }: PageProps<"/panel/tickets">) {
@@ -82,7 +87,7 @@ export default async function TicketsPage({
     ? zonedDayBoundsToUtc(filters.to, organization.timezone).end
     : undefined;
 
-  const tickets = await getTicketInbox(organization.id, {
+  const inboxFilters = {
     buildingId: filters.building,
     unitId: filters.unit,
     categoryId: filters.category,
@@ -92,7 +97,40 @@ export default async function TicketsPage({
     dateFrom,
     dateTo,
     search: filters.q || undefined,
+    sortBy: filters.sort,
+    sortDir: filters.dir,
+  };
+
+  let { rows: tickets, totalCount } = await getTicketInbox(organization.id, {
+    ...inboxFilters,
+    page: filters.page,
   });
+
+  let totalPages = Math.max(1, Math.ceil(totalCount / TICKET_INBOX_PAGE_SIZE));
+  let effectivePage = filters.page;
+
+  // Cero filas Y se pidió una página más allá de la primera: puede ser un
+  // bookmark viejo o un filtro que acaba de reducir el resultado mientras
+  // el admin estaba en una página alta -- pero `count(*) over()` (ver el
+  // comentario de getTicketInbox) NO viaja en ninguna fila cuando el
+  // offset pedido salta más allá del total real, así que acá no hay forma
+  // de distinguir "no hay resultados de verdad" de "hay resultados, nomás
+  // que no en esta página" sin preguntar aparte. getTicketInboxCount()
+  // resuelve la duda -- SOLO en esta rama puntual, nunca en el camino
+  // normal (page 1, o una página que sí tiene filas).
+  if (tickets.length === 0 && filters.page > 1) {
+    const realTotal = await getTicketInboxCount(organization.id, inboxFilters);
+    totalPages = Math.max(1, Math.ceil(realTotal / TICKET_INBOX_PAGE_SIZE));
+    if (realTotal > 0) {
+      effectivePage = totalPages;
+      ({ rows: tickets, totalCount } = await getTicketInbox(organization.id, {
+        ...inboxFilters,
+        page: effectivePage,
+      }));
+    } else {
+      totalCount = 0;
+    }
+  }
 
   const showBuildingColumn = !filters.building;
 
@@ -129,6 +167,47 @@ export default async function TicketsPage({
     );
   }
 
+  // Encabezados ordenables (paso 6.2) -- Link de Next.js puro, sin
+  // Client Component: el servidor ya sabe el orden actual (filters.sort/
+  // dir) y puede calcular el próximo estado (toggle si ya es esta columna,
+  // "desc" si se cambia de columna) sin JS del lado del cliente. Cambiar
+  // de orden también resetea la página a 1 -- mismo motivo que cualquier
+  // otro cambio de filtro (ver TicketFiltersBar).
+  function buildSortHref(column: TicketSortColumn): string {
+    const nextDir: TicketSortDirection =
+      filters.sort === column
+        ? filters.dir === "desc"
+          ? "asc"
+          : "desc"
+        : "desc";
+    return buildTicketInboxHref("/panel/tickets", normalizedParams, {
+      sort: column === "reportedAt" ? null : column,
+      dir: nextDir === "desc" ? null : nextDir,
+      page: null,
+    });
+  }
+
+  // Función común (no un componente -- ver el lint react-hooks/
+  // static-components: declarar un componente adentro del render de otro
+  // resetea su estado en cada render) que devuelve el ícono de dirección,
+  // o null si esta columna no es la que está ordenando ahora.
+  function sortIndicator(column: TicketSortColumn) {
+    if (filters.sort !== column) {
+      return null;
+    }
+    return filters.dir === "desc" ? (
+      <ArrowDown aria-hidden="true" className="size-3.5" />
+    ) : (
+      <ArrowUp aria-hidden="true" className="size-3.5" />
+    );
+  }
+
+  function buildPageHref(page: number): string {
+    return buildTicketInboxHref("/panel/tickets", normalizedParams, {
+      page: page === 1 ? null : String(page),
+    });
+  }
+
   return (
     <div className="flex flex-col gap-4">
       <TicketFiltersBar
@@ -146,6 +225,8 @@ export default async function TicketsPage({
           from: filters.from ?? null,
           to: filters.to ?? null,
           q: filters.q || null,
+          sort: filters.sort,
+          dir: filters.dir,
         }}
         activeFilterCount={
           [
@@ -163,7 +244,8 @@ export default async function TicketsPage({
       />
 
       <p className="text-ink-muted text-sm">
-        {tickets.length === 1 ? "1 reclamo" : `${tickets.length} reclamos`}
+        {totalCount === 1 ? "1 reclamo" : `${totalCount} reclamos`}
+        {totalPages > 1 && ` · página ${effectivePage} de ${totalPages}`}
       </p>
 
       {/* Desktop: tabla. Mobile: tarjetas apiladas -- una tabla de 7-8
@@ -179,9 +261,25 @@ export default async function TicketsPage({
               <TableHead>Unidad</TableHead>
               <TableHead>Categoría</TableHead>
               <TableHead>Título</TableHead>
-              <TableHead>Prioridad</TableHead>
+              <TableHead>
+                <Link
+                  href={buildSortHref("priority")}
+                  className="hover:text-ink inline-flex items-center gap-1"
+                >
+                  Prioridad
+                  {sortIndicator("priority")}
+                </Link>
+              </TableHead>
               <TableHead>Estado</TableHead>
-              <TableHead>Reportado</TableHead>
+              <TableHead>
+                <Link
+                  href={buildSortHref("reportedAt")}
+                  className="hover:text-ink inline-flex items-center gap-1"
+                >
+                  Reportado
+                  {sortIndicator("reportedAt")}
+                </Link>
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -248,6 +346,12 @@ export default async function TicketsPage({
           </li>
         ))}
       </ul>
+
+      <TicketPagination
+        currentPage={effectivePage}
+        totalPages={totalPages}
+        buildHref={buildPageHref}
+      />
     </div>
   );
 }

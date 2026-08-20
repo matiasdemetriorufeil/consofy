@@ -30,6 +30,8 @@ import {
   TICKET_PRIORITY_FILTER_VALUES,
   TICKET_STATUS_FILTER_VALUES,
   UNASSIGNED_ASSIGNEE_VALUE,
+  type TicketSortColumn,
+  type TicketSortDirection,
 } from "../ticket-inbox-schema";
 
 // Sentinel para "todas las opciones" en cada <Select> -- Radix Select no
@@ -61,6 +63,47 @@ const PRIORITY_LABELS: Record<
   urgent: "Urgente",
 };
 
+// Un solo <Select> con las 4 combinaciones útiles de columna+dirección
+// (paso 6.2), no dos selects separados de "columna" y "dirección" -- en
+// mobile no hay encabezados de tabla para tocar (ver CLAUDE.md > Bandeja
+// de reclamos con filtros), así que este control es el ÚNICO camino para
+// ordenar ahí, y una frase completa ("Prioridad: urgente primero") se
+// entiende sin tener que combinar mentalmente dos selects. En desktop
+// convive con los encabezados clickeables de la tabla (Server Component,
+// ver ticket-pagination.tsx y page.tsx) -- las dos vías escriben los
+// mismos dos parámetros de la URL, así que siempre quedan sincronizadas.
+const SORT_OPTIONS: {
+  value: string;
+  sort: TicketSortColumn;
+  dir: TicketSortDirection;
+  label: string;
+}[] = [
+  {
+    value: "reportedAt-desc",
+    sort: "reportedAt",
+    dir: "desc",
+    label: "Más recientes primero",
+  },
+  {
+    value: "reportedAt-asc",
+    sort: "reportedAt",
+    dir: "asc",
+    label: "Más antiguos primero",
+  },
+  {
+    value: "priority-desc",
+    sort: "priority",
+    dir: "desc",
+    label: "Prioridad: urgente primero",
+  },
+  {
+    value: "priority-asc",
+    sort: "priority",
+    dir: "asc",
+    label: "Prioridad: baja primero",
+  },
+];
+
 type Props = {
   buildingOptions: BuildingFilterOption[];
   unitOptions: BuildingUnitRow[];
@@ -76,6 +119,8 @@ type Props = {
     from: string | null;
     to: string | null;
     q: string | null;
+    sort: TicketSortColumn;
+    dir: TicketSortDirection;
   };
   activeFilterCount: number;
 };
@@ -118,6 +163,13 @@ export function TicketFiltersBar({
     options?: { push?: boolean },
   ) {
     const params = new URLSearchParams(searchParams.toString());
+    // Cualquier cambio que pase por acá (filtro, búsqueda, u orden) resetea
+    // la página a 1 -- estar en la página 5 de un conjunto de resultados
+    // que ya no es el mismo (cambió el filtro o el orden) no tiene sentido:
+    // esa "página 5" puede no existir más, o mostrar algo totalmente
+    // distinto de lo que el admin espera. Ver CLAUDE.md > Bandeja de
+    // reclamos con filtros para el razonamiento completo.
+    params.delete("page");
     for (const [key, value] of Object.entries(updates)) {
       if (value === null || value === ALL_VALUE || value === "") {
         params.delete(key);
@@ -325,6 +377,34 @@ export function TicketFiltersBar({
           />
         </Field>
       </div>
+
+      <Field className="md:w-56">
+        <FieldLabel htmlFor="filter-sort">Ordenar por</FieldLabel>
+        <Select
+          value={`${current.sort}-${current.dir}`}
+          onValueChange={(value) => {
+            const option = SORT_OPTIONS.find((o) => o.value === value);
+            if (!option) {
+              return;
+            }
+            updateParams({
+              sort: option.sort === "reportedAt" ? null : option.sort,
+              dir: option.dir === "desc" ? null : option.dir,
+            });
+          }}
+        >
+          <SelectTrigger id="filter-sort">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {SORT_OPTIONS.map((o) => (
+              <SelectItem key={o.value} value={o.value}>
+                {o.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </Field>
 
       {activeFilterCount > 0 && (
         <Button
