@@ -8,9 +8,11 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { AttachmentGallery } from "@/features/tickets/components/attachment-gallery";
 import { PriorityBadge } from "@/features/tickets/components/priority-badge";
 import { StatusBadge } from "@/features/tickets/components/status-badge";
+import { TicketActionsPanel } from "@/features/tickets/components/ticket-actions-panel";
 import { TicketCode } from "@/features/tickets/components/ticket-code";
 import { TicketTimeline } from "@/features/tickets/components/ticket-timeline";
 import {
+  getAssigneeFilterOptions,
   getTicketAttachments,
   getTicketDetail,
   getTicketTimeline,
@@ -72,13 +74,15 @@ export default async function TicketDetailPage({
     notFound();
   }
 
-  const [attachments, timeline, neighborHasOccupancy] = await Promise.all([
-    getTicketAttachments(organization.id, ticket.id),
-    getTicketTimeline(organization.id, ticket.id),
-    ticket.neighborId
-      ? personHasAnyOccupancy(organization.id, ticket.neighborId)
-      : Promise.resolve(true),
-  ]);
+  const [attachments, timeline, neighborHasOccupancy, assigneeOptions] =
+    await Promise.all([
+      getTicketAttachments(organization.id, ticket.id),
+      getTicketTimeline(organization.id, ticket.id),
+      ticket.neighborId
+        ? personHasAnyOccupancy(organization.id, ticket.neighborId)
+        : Promise.resolve(true),
+      getAssigneeFilterOptions(organization.id),
+    ]);
 
   // URLs firmadas de corta duración, generadas EN CADA CARGA -- mismo
   // criterio que /s/[token] (ver CLAUDE.md > Galería pública de adjuntos):
@@ -131,6 +135,14 @@ export default async function TicketDetailPage({
         </div>
       </div>
 
+      <TicketActionsPanel
+        ticketId={ticket.id}
+        currentStatus={ticket.status}
+        currentPriority={ticket.priority}
+        currentAssignee={ticket.assignee}
+        assigneeOptions={assigneeOptions}
+      />
+
       <Card>
         <CardContent>
           <dl className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -144,10 +156,6 @@ export default async function TicketDetailPage({
               }
             />
             <DetailField label="Origen" value={toSourceLabel(ticket.source)} />
-            <DetailField
-              label="Responsable"
-              value={ticket.assignee ?? "Sin asignar"}
-            />
             {ticket.resolvedAt && (
               <DetailField
                 label="Resuelto"

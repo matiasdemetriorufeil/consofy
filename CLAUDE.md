@@ -2058,6 +2058,194 @@ acá no hay ningún `layout.tsx` propio para `[ticketId]`, así que el
 `page.tsx` del mismo segmento sí puede tirar `notFound()` y ser capturado
 por el `not-found.tsx` de esa misma carpeta.
 
+## Acciones sobre un reclamo (paso 6.4)
+
+`src/features/tickets/actions.ts` -- hasta el paso 6.3 el panel solo
+miraba; desde acá el administrador trabaja: cambiar estado, cambiar
+prioridad, asignar responsable, agregar una nota interna. Las cuatro pasan
+por `authorizedAction()` (ver CLAUDE.md > Autorización de rutas y Server
+Actions) y filtran SIEMPRE por `organizationId` en el WHERE de la consulta
+misma -- mismo patrón que `buildings`/`units`/`people` actions.ts, nada
+nuevo en cuanto a aislamiento.
+
+**Transiciones de estado -- pensadas contra lo que pasa de verdad en un
+consorcio, no contra "cualquiera a cualquiera".** El mapa completo vive en
+`ticket-actions-schema.ts` (`TICKET_STATUS_TRANSITIONS`), con el
+razonamiento de cada flecha en el propio comentario del código. Resumen:
+
+| Desde \ Hacia | new | in_progress | resolved | closed | discarded |
+| -------------- | --- | ----------- | -------- | ------ | --------- |
+| **new**         | -   | ✅          | ✅       | ❌     | ✅        |
+| **in_progress** | ❌  | -           | ✅       | ❌     | ✅        |
+| **resolved**    | ❌  | ✅ (reabrir)| -        | ✅     | ❌        |
+| **closed**      | ❌  | ✅ (reabrir)| ❌       | -      | ❌        |
+| **discarded**   | ✅ (reabrir) | ❌ | ❌       | ❌     | -         |
+
+Ideas centrales: `new`/`in_progress` pueden resolverse directo (un arreglo
+inmediato no necesita el paso intermedio) o descartarse directo (duplicado,
+spam); `closed` SOLO es alcanzable desde `resolved` (así "cerrado" siempre
+significa "se arregló, y ahora se cierra formalmente" -- permitir
+`new -> closed` directo sería redundante con `discarded`, que ya cubre "no
+hace falta arreglar nada"); reabrir un `resolved`/`closed` vuelve a
+`in_progress` (ya se le dedicó trabajo, no es "nuevo" de nuevo); reabrir un
+`discarded` vuelve a `new` (nunca se trabajó, arranca de cero). Ningún
+estado transiciona a sí mismo (no es una transición real, se rechaza con
+un mensaje propio). 13 tests en `ticket-actions-schema.test.ts` cubren el
+mapa completo, incluidas las bloqueadas.
+
+**La UI nunca ofrece una transición inválida -- un botón por acción
+posible, no un `<select>` con los 5 estados.** `getTicketStatusActions()`
+calcula, para el estado ACTUAL, qué botones mostrar y con qué verbo
+("Marcar en progreso", "Cerrar", "Descartar") -- "Reabrir" es el mismo
+texto sin importar el destino exacto (`in_progress` o `new`), porque el
+administrador piensa "esto necesita atención de nuevo", no en el enum.
+Aun así, la Server Action revalida la transición de forma independiente
+(ver más abajo) -- nunca confía en que la UI ya filtró.
+
+**Qué ve el administrador al intentar una transición inválida, probado
+directo contra la Server Action (sin pasar por los botones, con una ruta
+de diagnóstico temporal -- mismo patrón que el paso 5.5, borrada
+después):**
+
+```
+new -> closed directo:      {"ok":false,"error":"No se puede pasar de \"Abierto\" a \"Cerrado\"."}
+in_progress -> new directo: {"ok":false,"error":"No se puede pasar de \"En progreso\" a \"Abierto\"."}
+```
+
+**Concurrencia -- protegida con compare-and-swap SOLO donde importa
+(estado), auditada en todos lados.** `changeTicketStatusAction` recibe
+`fromStatus` (el estado que la UI ya tenía renderizado) y lo usa como
+condición del propio `UPDATE ... WHERE status = fromStatus` -- si la fila
+real ya no está ahí (otro administrador la cambió mientras esta pantalla
+seguía abierta), el `UPDATE` no toca ninguna fila, y una consulta aparte
+(solo en esa rama de error, mismo criterio que `getTicketInboxCount` del
+paso 6.2) busca el estado REAL para devolver un mensaje preciso:
+
+```
+"El reclamo cambió mientras tanto: ahora está en \"Abierto\". Recargá la página para ver el estado actual."
+```
+
+Probado con un `fromStatus` mentiroso (la Server Action invocada
+directamente, afirmando que el ticket está en `resolved` cuando en
+realidad está en `new`): el mismo mecanismo lo detecta y devuelve el
+estado real, sin aplicar nada a ciegas. Prioridad y responsable NO llevan
+este mismo compare-and-swap -- no tienen concepto de "transición
+inválida" (cualquier prioridad es válida desde cualquier prioridad), así
+que un `UPDATE` directo alcanza, mismo criterio que el resto del proyecto
+(`buildings`/`units`): bajo una carrera real, gana la última escritura,
+pero **nada se pierde para auditoría** -- `ticket_events` registra las dos
+acciones igual, cada una con su actor real y su hora real, así que
+cualquier cambio "raro" se puede reconstruir mirando el historial. Las
+notas son un INSERT puro (sin UPDATE de por medio): dos notas concurrentes
+son dos filas independientes, Postgres las serializa sin que se pisen.
+
+**`resolved_at`/`closed_at`, calculados por la Server Action, nunca
+dejados en manos del cliente** (`timestampFieldsForStatus`, actions.ts):
+entrar a `resolved` marca `resolvedAt = ahora` y limpia `closedAt`; entrar
+a `closed` marca `closedAt = ahora` SIN tocar `resolvedAt` (preserva
+CUÁNDO se resolvió de verdad, no lo pisa con el momento del cierre, ya que
+`closed` solo es alcanzable desde `resolved`); reabrir (a `in_progress` o
+`new`) limpia los dos -- pierde la marca de tiempo de haber estado
+resuelto/cerrado, pero el historial completo sigue entero en
+`ticket_events` (append-only), que es el registro permanente, no las
+columnas de `tickets`. Este cálculo es lo que hace IMPOSIBLE violar los
+CHECK de `tickets.ts` (`tickets_resolved_at_requires_resolved_or_closed`,
+`tickets_closed_at_requires_closed`) sin importar desde qué estado se
+venga.
+
+**Quién puede ser responsable -- se investigó el esquema real antes de
+decidir, no se asumió.** `tickets.assignee` sigue siendo `text` libre (ver
+el comentario de esa columna en `src/db/schema/tickets.ts`): "todavía no
+existe una tabla de usuarios del panel [...] cuando exista, este campo se
+reemplaza por una FK". `app_users` confirma por qué no existe todavía --
+su enum `app_user_role` tiene HOY un solo valor (`"admin"`), y su propio
+comentario anticipa el mismo cambio "en el paso de invitación de usuarios
+que venga después" (que no existe: no hay ningún flujo para crear un
+segundo `app_user`, solo el seed a mano con `SEED_ADMIN_USER_ID`). Sin esa
+tabla real, no hay a qué apuntar una FK -- este paso mantiene `assignee`
+como texto libre, sin cambiar el modelo de datos. Costo real de esa
+decisión, mitigado sin agregar infraestructura: `getAssigneeFilterOptions()`
+(ya existía desde el paso 6.1) alimenta un `<datalist>` nativo del input
+de responsable -- sugiere nombres ya usados para evitar que "Juan"/"Juan
+Pérez"/"juan perez" fragmenten el filtro, pero sigue aceptando cualquier
+texto nuevo.
+
+**Qué es una nota interna y quién la ve -- nunca el vecino, verificado
+contra las dos superficies públicas reales, no solo declarado.** Una nota
+es un evento más de `ticket_events` (`type: "note_added"`, `payload:
+{note}`) -- no hay una tabla ni columna aparte, la nota ES el evento, y ya
+se renderiza en la Línea de tiempo (paso 6.3, `describeTicketEvent`) sin
+tocar nada de ese código. `ticket_events` tiene `denyAnonAuthenticated()`
++ RLS (ver CLAUDE.md > Políticas RLS) -- `anon`/`authenticated` no pueden
+leerla nunca, ni con la anon key del navegador; la única lectura de esta
+tabla en TODO el proyecto es `getTicketTimeline()`
+(`tickets/queries.ts`), y su único consumidor es
+`/panel/tickets/[ticketId]` (confirmado con grep: cero resultados fuera
+de esa página). Probado en la práctica: se cargó una nota interna real en
+un reclamo con adjuntos, y se abrió `/s/[token]` (la galería pública de
+ESE MISMO reclamo, criterio de aceptación de la etapa 11) -- ni el texto
+de la nota, ni la palabra "nota", ni el actor ("Administrador") aparecen
+en la página, ni en el texto visible ni en el HTML crudo de la respuesta.
+`/r/[token]` (el formulario) ni siquiera conoce `ticket_events` en
+absoluto.
+
+**Avisarle algo al vecino cuando se resuelve -- analizado, NO
+implementado en este paso (pedido explícito del enunciado).** Hoy no
+existe ningún canal de salida hacia el vecino: `MessagingProvider` (ver
+CLAUDE.md > Reglas de WhatsApp) solo cubre el handoff que el VECINO
+inicia, nunca un mensaje que la app mande por su cuenta -- eso necesitaría
+la Cloud API de WhatsApp Business (pago, aprobación, la app decidió no
+usarla a propósito) o email (no hay infraestructura de envío de mails en
+todo el proyecto, ni siquiera para recuperar contraseña -- ver CLAUDE.md >
+Pendientes, "no existe ninguna ruta de callback de Supabase Auth"). Nada
+de eso es barato. Lo que SÍ es barato, porque la distribución ya existe:
+`/s/[token]` (paso 5.10) ya viaja en el mensaje de WhatsApp original Y en
+el link de seguimiento de la pantalla de confirmación (paso 5.8, "Ver el
+estado de tu reclamo" -- un texto que YA anticipaba esto, ver ese
+comentario), así que agregarle el estado actual del reclamo a esa misma
+página sería una mejora de "pull" (el vecino vuelve a mirar) sin construir
+ningún mecanismo de "push" nuevo. No se implementa acá -- toca una ruta
+pública fuera del alcance de este paso (que es sobre las acciones del
+panel), y el enunciado pide explícitamente no construirlo todavía. Queda
+como candidato concreto para un paso chico futuro, distinto de un sistema
+de notificaciones real (eso sí es la etapa de avisos/comunicados,
+etapa 8).
+
+**Bug real encontrado probando este mismo paso, no en producción: sin
+`router.refresh()`, la pantalla quedaba mintiendo después de cada acción
+exitosa.** `revalidatePath()` (del lado del servidor, en cada action) no
+alcanzaba por sí solo para que ESTA pantalla -- ya montada, sin ninguna
+navegación de por medio -- volviera a pedir los Server Components
+actualizados: una prueba real (cambiar el estado, confirmar por SQL que la
+base quedaba en `resolved`) mostró los botones de acción todavía ofreciendo
+las opciones de `in_progress`, hasta un F5 manual. `router.refresh()`
+(`next/navigation`), llamado del lado del CLIENTE dentro de la misma
+`startTransition`, es lo que efectivamente fuerza a Next.js a volver a
+traer los Server Components de la ruta actual. Sin este fix, cada acción
+"funcionaba" (la base y el evento quedaban bien) pero la pantalla mentía
+sobre el estado real hasta que alguien la recargara a mano -- confirmado
+el arreglo con la misma prueba (cambio de estado en vivo, sin recargar,
+los botones se actualizan solos).
+
+**Análisis de seguridad, probado contra la Server Action directa (ruta de
+diagnóstico temporal, borrada después):**
+
+1. **Sin sesión:** `authorizedAction()` -> `requireUser()` corta con
+   `NEXT_REDIRECT` antes de tocar nada -- confirmado con una request sin
+   cookie de sesión.
+2. **Reclamo de otra organización** (organización sintética creada y
+   borrada solo para esta prueba): las cuatro acciones (estado, prioridad,
+   responsable, nota) devuelven `"No encontramos ese reclamo."` -- mismo
+   mensaje ambiguo en las cuatro, y confirmado por SQL que la fila de la
+   otra organización no cambió ni un campo, ni se escribió ningún evento.
+3. **uuid con formato válido pero inexistente:** mismo mensaje que el
+   caso anterior -- no hay forma de distinguir "no existe" de "no es
+   tuyo" desde afuera.
+4. **Notas mal formadas:** vacía (solo espacios) rechazada
+   ("La nota no puede estar vacía."); de 2001 caracteres rechazada
+   ("Como máximo 2000 caracteres.") -- validado con Zod antes de tocar la
+   base.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
