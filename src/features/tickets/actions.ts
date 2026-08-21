@@ -4,7 +4,7 @@ import { and, eq, inArray, isNull } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 
 import { db } from "@/db";
-import { ticketEvents, tickets } from "@/db/schema";
+import { ticketEvents, ticketSimilarityCandidates, tickets } from "@/db/schema";
 import { authorizedAction } from "@/lib/auth";
 
 import { toBadgeStatus } from "./status-mapping";
@@ -20,6 +20,7 @@ import {
   changeTicketPriorityInputSchema,
   changeTicketStatusInputSchema,
   isValidStatusTransition,
+  resolveSimilarityCandidateInputSchema,
   type TicketActionResult,
   type TicketStatusValue,
 } from "./ticket-actions-schema";
@@ -340,6 +341,128 @@ export const addTicketNoteAction = authorizedAction(
     });
 
     revalidateTicketPaths(ticketId, current.buildingId);
+    return { ok: true };
+  },
+);
+
+// -----------------------------------------------------------------------
+// Resolución de candidatos a duplicado (paso 7.3)
+// -----------------------------------------------------------------------
+
+// Agrupar/descartar UN candidato puntual (banner del detalle, paso 7.3) --
+// actualiza SOLO la fila de ticket_similarity_candidates identificada por
+// `candidateId`, nunca otras filas de otros pares (ni siquiera otras filas
+// del MISMO ticket): dos candidatos del mismo reclamo se resuelven cada
+// uno por su cuenta, a propósito (ver el comentario de la tabla en
+// ticket-similarity-candidates.ts).
+//
+// "Agrupar" en este paso SOLO cambia `status` a "grouped" -- no crea
+// ningún incidente (eso es el paso 7.4, que va a tomar los candidatos ya
+// agrupados como insumo). No hay nada de incidentes en este archivo.
+//
+// Compare-and-swap contra `status = 'pending'` (mismo criterio que
+// changeTicketStatusAction, paso 6.4): si el candidato ya se resolvió por
+// otro lado (doble click, dos pestañas), el UPDATE no toca ninguna fila y
+// se devuelve un error claro en vez de aplicar una resolución sobre algo
+// que ya no está pendiente.
+export const resolveSimilarityCandidateAction = authorizedAction(
+  async (context, input: unknown): Promise<TicketActionResult> => {
+    const parsed = resolveSimilarityCandidateInputSchema.safeParse(input);
+    if (!parsed.success) {
+      return { ok: false, error: "Datos inválidos." };
+    }
+    const { candidateId, resolution } = parsed.data;
+
+    const [updated] = await db
+      .update(ticketSimilarityCandidates)
+      .set({ status: resolution })
+      .where(
+        and(
+          eq(ticketSimilarityCandidates.id, candidateId),
+          eq(
+            ticketSimilarityCandidates.organizationId,
+            context.organization.id,
+          ),
+          eq(ticketSimilarityCandidates.status, "pending"),
+          isNull(ticketSimilarityCandidates.deletedAt),
+        ),
+      )
+      .returning({
+        ticketId: ticketSimilarityCandidates.ticketId,
+        candidateTicketId: ticketSimilarityCandidates.candidateTicketId,
+      });
+
+    if (!updated) {
+      return {
+        ok: false,
+        error:
+          "Este candidato ya no está pendiente -- recargá la página para ver el estado actual.",
+      };
+    }
+
+    // Los DOS tickets del par, para el evento (necesita el public_code del
+    // OTRO ticket en cada payload) y para revalidar las dos rutas de
+    // detalle -- un solo SELECT con inArray, no dos round-trips.
+    const bothTickets = await db
+      .select({
+        id: tickets.id,
+        publicCode: tickets.publicCode,
+        buildingId: tickets.buildingId,
+      })
+      .from(tickets)
+      .where(
+        and(
+          inArray(tickets.id, [updated.ticketId, updated.candidateTicketId]),
+          eq(tickets.organizationId, context.organization.id),
+        ),
+      );
+    const newTicket = bothTickets.find((t) => t.id === updated.ticketId);
+    const oldTicket = bothTickets.find(
+      (t) => t.id === updated.candidateTicketId,
+    );
+    if (!newTicket || !oldTicket) {
+      // No debería pasar (las FK compuestas de ticket_similarity_candidates
+      // garantizan que las dos filas existen en ESTA organización), pero si
+      // pasara, la fila ya quedó resuelta en la base -- no tiene sentido
+      // fingir que la acción falló.
+      return { ok: true };
+    }
+
+    const eventType =
+      resolution === "grouped"
+        ? ("similar_ticket_grouped" as const)
+        : ("similar_ticket_discarded" as const);
+
+    // Un evento en CADA ticket del par -- mismo criterio que
+    // similar_ticket_detected (paso 7.2): cada reclamo tiene que poder
+    // explicar, mirando SOLO su propia línea de tiempo, qué pasó con esto.
+    await db.insert(ticketEvents).values([
+      {
+        organizationId: context.organization.id,
+        ticketId: newTicket.id,
+        type: eventType,
+        actorType: "admin",
+        actorLabel: context.appUser.displayName,
+        payload: {
+          otherTicketId: oldTicket.id,
+          otherPublicCode: oldTicket.publicCode,
+        },
+      },
+      {
+        organizationId: context.organization.id,
+        ticketId: oldTicket.id,
+        type: eventType,
+        actorType: "admin",
+        actorLabel: context.appUser.displayName,
+        payload: {
+          otherTicketId: newTicket.id,
+          otherPublicCode: newTicket.publicCode,
+        },
+      },
+    ]);
+
+    revalidateTicketPaths(newTicket.id, newTicket.buildingId);
+    revalidateTicketPaths(oldTicket.id, oldTicket.buildingId);
     return { ok: true };
   },
 );

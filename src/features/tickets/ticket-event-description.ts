@@ -72,6 +72,15 @@ const similarTicketDetectedPayloadSchema = z.object({
   similarity: z.number().min(0).max(1),
 });
 
+// Paso 7.3 -- payload que escribe resolveSimilarityCandidateAction() en
+// CADA uno de los dos tickets del par (actions.ts). Mismo shape para
+// similar_ticket_grouped y similar_ticket_discarded -- lo único que
+// cambia entre los dos es el `type` del evento, no la forma del payload.
+const similarTicketResolvedPayloadSchema = z.object({
+  otherTicketId: z.uuid(),
+  otherPublicCode: z.string().trim().min(1),
+});
+
 function statusText(
   dbStatus: z.infer<typeof statusChangedPayloadSchema>["from"],
 ): string {
@@ -218,6 +227,38 @@ function describeSimilarTicketDetected(
   };
 }
 
+// Paso 7.3 -- el administrador resuelve un candidato desde el banner del
+// detalle. Texto DISTINTO del de merged_into_incident a propósito ("marcó
+// como posible duplicado", no "agrupó") -- aunque el botón que dispara
+// esto se llama "Agrupar" (mismo verbo que el enunciado pide), este evento
+// todavía NO agrupa nada de verdad: "grouped" acá solo es el estado de
+// revisión del candidato, el incidente real recién lo arma el paso 7.4.
+// Compartir la palabra "agrupó" con merged_into_incident hubiera sugerido
+// que ya existe un problema en común armado, cosa que este paso
+// explícitamente NO hace.
+function describeSimilarTicketResolved(
+  event: TicketTimelineEventInput,
+  resolution: "grouped" | "discarded",
+): TicketEventDescription {
+  const parsed = similarTicketResolvedPayloadSchema.safeParse(event.payload);
+  if (!parsed.success) {
+    return {
+      headline:
+        resolution === "grouped"
+          ? `${event.actorLabel} marcó este reclamo como posible duplicado`
+          : `${event.actorLabel} descartó un posible duplicado`,
+      detail: null,
+    };
+  }
+  return {
+    headline:
+      resolution === "grouped"
+        ? `${event.actorLabel} marcó este reclamo como posible duplicado de ${parsed.data.otherPublicCode}`
+        : `${event.actorLabel} descartó a ${parsed.data.otherPublicCode} como posible duplicado`,
+    detail: null,
+  };
+}
+
 export function describeTicketEvent(
   event: TicketTimelineEventInput,
 ): TicketEventDescription {
@@ -240,5 +281,9 @@ export function describeTicketEvent(
       return describeWhatsappHandoff(event.actorLabel);
     case "similar_ticket_detected":
       return describeSimilarTicketDetected(event);
+    case "similar_ticket_grouped":
+      return describeSimilarTicketResolved(event, "grouped");
+    case "similar_ticket_discarded":
+      return describeSimilarTicketResolved(event, "discarded");
   }
 }

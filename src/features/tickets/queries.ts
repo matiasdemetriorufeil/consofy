@@ -21,6 +21,7 @@ import {
   ticketAttachments,
   ticketEvents,
   tickets,
+  ticketSimilarityCandidates,
   ticketStatus,
   units,
 } from "@/db/schema";
@@ -1114,4 +1115,92 @@ export async function getTicketTimeline(
       ),
     )
     .orderBy(asc(ticketEvents.createdAt));
+}
+
+// -----------------------------------------------------------------------
+// Banner de posible duplicado (paso 7.3)
+// -----------------------------------------------------------------------
+
+export type PendingSimilarityCandidate = {
+  // id de la fila en ticket_similarity_candidates -- lo que
+  // resolveSimilarityCandidateAction() necesita para agrupar/descartar
+  // ESTA fila puntual, ninguna otra.
+  candidateId: string;
+  similarity: number;
+  otherTicketId: string;
+  otherPublicCode: string;
+};
+
+// Candidatos PENDIENTES que involucran a `ticketId`, buscando en las DOS
+// direcciones -- pedido explícito del paso: un administrador mirando
+// CUALQUIERA de los dos tickets del par se tiene que enterar, no solo el
+// que quedó marcado como `ticket_id` (el "nuevo") en la detección del 7.2.
+// Dos SELECT chicos + merge en JS, no un UNION con CASE -- cada fila de
+// ticket_similarity_candidates ya sabe cuál de las dos columnas es "este
+// ticket" y cuál es "el otro" según de qué lado se lo busque, así que cada
+// mitad es un join directo y sin ambigüedad (nunca hace falta un alias de
+// autojoin sobre `tickets`, cada SELECT solo lo toca una vez).
+//
+// Filtra `status = 'pending'` en las dos direcciones -- un candidato ya
+// agrupado o descartado no vuelve a aparecer acá (por eso desaparece del
+// banner sin recargar: revalidatePath + router.refresh() en
+// resolveSimilarityCandidateAction ya alcanza, esta consulta hace el resto
+// simplemente no devolviendo la fila resuelta).
+export async function getPendingSimilarityCandidatesForTicket(
+  organizationId: string,
+  ticketId: string,
+): Promise<PendingSimilarityCandidate[]> {
+  const asNewTicket = await db
+    .select({
+      candidateId: ticketSimilarityCandidates.id,
+      similarity: ticketSimilarityCandidates.similarity,
+      otherTicketId: tickets.id,
+      otherPublicCode: tickets.publicCode,
+    })
+    .from(ticketSimilarityCandidates)
+    .innerJoin(
+      tickets,
+      and(
+        eq(tickets.id, ticketSimilarityCandidates.candidateTicketId),
+        eq(tickets.organizationId, ticketSimilarityCandidates.organizationId),
+      ),
+    )
+    .where(
+      and(
+        eq(ticketSimilarityCandidates.organizationId, organizationId),
+        eq(ticketSimilarityCandidates.ticketId, ticketId),
+        eq(ticketSimilarityCandidates.status, "pending"),
+        isNull(ticketSimilarityCandidates.deletedAt),
+        isNull(tickets.deletedAt),
+      ),
+    );
+
+  const asCandidateTicket = await db
+    .select({
+      candidateId: ticketSimilarityCandidates.id,
+      similarity: ticketSimilarityCandidates.similarity,
+      otherTicketId: tickets.id,
+      otherPublicCode: tickets.publicCode,
+    })
+    .from(ticketSimilarityCandidates)
+    .innerJoin(
+      tickets,
+      and(
+        eq(tickets.id, ticketSimilarityCandidates.ticketId),
+        eq(tickets.organizationId, ticketSimilarityCandidates.organizationId),
+      ),
+    )
+    .where(
+      and(
+        eq(ticketSimilarityCandidates.organizationId, organizationId),
+        eq(ticketSimilarityCandidates.candidateTicketId, ticketId),
+        eq(ticketSimilarityCandidates.status, "pending"),
+        isNull(ticketSimilarityCandidates.deletedAt),
+        isNull(tickets.deletedAt),
+      ),
+    );
+
+  return [...asNewTicket, ...asCandidateTicket].sort(
+    (a, b) => b.similarity - a.similarity,
+  );
 }

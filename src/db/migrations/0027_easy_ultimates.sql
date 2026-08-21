@@ -1,0 +1,3 @@
+ALTER TYPE "public"."ticket_event_type" ADD VALUE 'similar_ticket_grouped';--> statement-breakpoint
+ALTER TYPE "public"."ticket_event_type" ADD VALUE 'similar_ticket_discarded';--> statement-breakpoint
+CREATE INDEX "ticket_similarity_candidates_candidate_ticket_id_pending_idx" ON "ticket_similarity_candidates" USING btree ("candidate_ticket_id") WHERE "ticket_similarity_candidates"."status" = 'pending';

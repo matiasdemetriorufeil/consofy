@@ -118,6 +118,16 @@ export const ticketSimilarityCandidates = pgTable(
     index("ticket_similarity_candidates_organization_id_pending_idx")
       .on(t.organizationId)
       .where(sql`${t.status} = 'pending'`),
+    // El banner del detalle (paso 7.3) busca en las DOS direcciones: este
+    // ticket como `ticket_id` (cubierto por el índice único de arriba,
+    // que ya tiene `ticket_id` como columna líder) O como
+    // `candidate_ticket_id` (el caso "otro ticket se parece A ESTE") --
+    // sin este índice, esa segunda dirección haría Seq Scan. Parcial sobre
+    // `pending` por el mismo motivo que el índice de organización: es la
+    // única consulta real (el banner solo muestra candidatos pendientes).
+    index("ticket_similarity_candidates_candidate_ticket_id_pending_idx")
+      .on(t.candidateTicketId)
+      .where(sql`${t.status} = 'pending'`),
     // Invariantes que propongo, mismo criterio que las de tickets.ts:
     check(
       "ticket_similarity_candidates_not_self",

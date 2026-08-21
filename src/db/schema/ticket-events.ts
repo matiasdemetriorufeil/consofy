@@ -31,6 +31,20 @@ export const ticketEventType = pgEnum("ticket_event_type", [
   // enum (existía desde antes en ticket_event_actor_type, sin ningún
   // evento que lo usara todavía).
   "similar_ticket_detected",
+  // Paso 7.3 -- el administrador resuelve un candidato pendiente desde el
+  // banner del detalle. Dos valores, no uno solo con un campo "resolution"
+  // en el payload: son dos hechos de negocio distintos ("esto SÍ es un
+  // duplicado" vs. "esto NO es un duplicado"), y la línea de tiempo ya
+  // tiene el precedente de separar hechos distintos en tipos distintos
+  // (status_changed vs. priority_changed, no un "field_changed" genérico).
+  // actorType siempre "admin" acá (a diferencia de similar_ticket_detected,
+  // que es "system") -- resolver un candidato es una decisión humana, no
+  // algo que corra solo. Se escribe UNA fila de cada tipo en CADA uno de
+  // los dos tickets del par (ver actions.ts) -- mismo motivo que
+  // similar_ticket_detected: cada reclamo tiene que poder explicar por su
+  // cuenta, mirando SU propia línea de tiempo, qué pasó con esto.
+  "similar_ticket_grouped",
+  "similar_ticket_discarded",
 ]);
 
 export const ticketEventActorType = pgEnum("ticket_event_actor_type", [

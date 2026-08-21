@@ -2922,6 +2922,129 @@ navegador real vía Playwright, contra `/r/[token]` de Torre Central):
   similares entre sí. Confirma que el umbral filtra de verdad, no que
   "cualquier cosa en la ventana" se marca.
 
+## Banner de posible duplicado en el detalle (paso 7.3)
+
+Banner en `/panel/tickets/[ticketId]` (paso 6.3) que muestra los
+candidatos PENDIENTES de `ticket_similarity_candidates` (paso 7.2) que
+involucran a este ticket, con botones "Agrupar"/"Descartar" por
+candidato.
+
+**Busca en las DOS direcciones, pedido explícito del paso.**
+`getPendingSimilarityCandidatesForTicket()` (`tickets/queries.ts`) hace
+dos SELECT chicos -- uno con este ticket como `ticket_id` (el "nuevo" que
+disparó la detección), otro como `candidate_ticket_id` (el "viejo" al que
+otro se pareció) -- y los mezcla en JS. Un administrador mirando
+CUALQUIERA de los dos tickets del par se entera, no solo el que quedó
+marcado como `ticket_id` en el 7.2. Nuevo índice de soporte para la
+dirección inversa (`ticket_similarity_candidates_candidate_ticket_id_pending_idx`,
+parcial sobre `status = 'pending'`) -- sin él, esa dirección haría Seq
+Scan; la dirección `ticket_id` ya la cubre el índice único del 7.2 (que
+ya tiene `ticket_id` como columna líder).
+
+**"Agrupar" en este paso SOLO cambia `status` a `"grouped"` -- no crea
+ningún incidente.** Eso es el paso 7.4, que va a tomar los candidatos ya
+agrupados como insumo. `resolveSimilarityCandidateAction()`
+(`tickets/actions.ts`) es UNA acción parametrizada por `resolution`
+(`"grouped" | "discarded"`), no dos acciones separadas -- mismo criterio
+ya usado en `changeTicketStatusAction` (paso 6.4, parametrizada por
+`toStatus`). Compare-and-swap contra `status = 'pending'` en el UPDATE:
+si el candidato ya se resolvió por otro lado (doble click, dos pestañas),
+la acción no aplica una resolución sobre algo que ya no está pendiente.
+
+**Dos valores de enum nuevos en `ticket_event_type`, no un campo
+"resolution" en el payload de uno solo** -- "esto SÍ es un duplicado" y
+"esto NO es un duplicado" son dos hechos de negocio distintos, mismo
+criterio que ya separa `status_changed` de `priority_changed` en vez de
+un "field_changed" genérico. Texto del evento (`describeTicketEvent`)
+DELIBERADAMENTE distinto del de `merged_into_incident` ("marcó como
+posible duplicado", no "agrupó") -- aunque el botón que lo dispara se
+llama "Agrupar" (mismo verbo que pide el enunciado), este evento todavía
+NO agrupa nada de verdad; compartir la palabra con `merged_into_incident`
+hubiera sugerido que ya existe un problema en común armado, cosa que este
+paso explícitamente no hace (eso es 7.4).
+
+**Un evento en CADA uno de los dos tickets del par** -- mismo criterio
+que `similar_ticket_detected` (7.2): cada reclamo tiene que poder
+explicar, mirando SOLO su propia línea de tiempo, qué pasó. `actorType`
+siempre `"admin"` acá (a diferencia de `similar_ticket_detected`, que es
+`"system"`) -- resolver un candidato es una decisión humana.
+
+**Migración real aplicada:**
+
+```sql
+-- 0027_easy_ultimates.sql
+ALTER TYPE "public"."ticket_event_type" ADD VALUE 'similar_ticket_grouped';
+ALTER TYPE "public"."ticket_event_type" ADD VALUE 'similar_ticket_discarded';
+CREATE INDEX "ticket_similarity_candidates_candidate_ticket_id_pending_idx" ON "ticket_similarity_candidates" USING btree ("candidate_ticket_id") WHERE "ticket_similarity_candidates"."status" = 'pending';
+```
+
+**Desaparece sin recargar -- dos capas, no solo una.** La Server Action
+revalida las rutas de detalle de los DOS tickets del par
+(`revalidateTicketPaths()`, ya existente desde el 6.4) + el componente
+(`SimilarTicketBanner`, único Client Component nuevo de esta pantalla,
+mismo motivo que `TicketActionsPanel`) además oculta el candidato
+resuelto LOCALMENTE apenas la acción devuelve `ok: true`, antes de que
+`router.refresh()` termine -- evita el parpadeo de esperar el round-trip.
+Un `<Alert>` POR candidato (no una lista adentro de uno solo): cada uno
+tiene su propio `useTransition`, así que resolver uno nunca bloquea a
+otro que siga cargando.
+
+**Verificado con sesión real, no solo a nivel de datos.** Se creó un
+usuario admin de prueba DEDICADO (Auth + `app_users`), nunca se tocó la
+cuenta real -- ver CLAUDE.md > Reglas para cuidar cuentas/credenciales.
+Se generaron 4 tickets reales vía el formulario público (`/r/[token]` de
+Torre Central, Playwright): dos redactados a propósito para ser
+similares entre sí (A=`TC-2026-1774`, B=`TC-2026-1775`), un tercero
+(C=`TC-2026-1777`) con texto similar a los dos anteriores, y un cuarto
+(D=`TC-2026-1776`) que surgió solo -- un intento anterior de crear C
+falló del lado del cliente por un error transitorio de red/DB, pero la
+Server Action YA había hecho commit del lado del servidor antes de que
+el error apareciera, así que el ticket quedó creado igual (consistente
+con la regla del 5.5: "el ticket se guarda siempre"). El resultado fue
+un cluster de 4 con 6 relaciones de candidato entre sí (C y D con texto
+IDÉNTICO, similarity=1).
+
+- **Positivo (banner en ambos):** el detalle de A mostró 3 banners reales
+  ("Posible duplicado de TC-2026-1775, 64%", "...1777, 63%", "...1776,
+  63%"); el detalle de D mostró 3 banners (vs. 1777 al 100%, vs. 1774 al
+  63%, vs. 1775 al 59%) -- confirmado con capturas de pantalla reales, no
+  solo la consulta.
+- **Descartar (ambas direcciones + eventos + independencia):** se
+  descartó desde el detalle de D el candidato hacia C (100%). Confirmado
+  en la base: `status: "discarded"`, `updatedAt` distinto de `createdAt`
+  (trigger disparó). Dos eventos `similar_ticket_discarded`, mismo
+  `createdAt` (mismo INSERT), cada uno con el código del OTRO ticket en
+  su payload (`{otherPublicCode: "TC-2026-1777"}` en el evento de D,
+  `{otherPublicCode: "TC-2026-1776"}` en el de C). El banner de ESE
+  candidato desapareció en las dos pantallas (confirmado navegando a
+  D y a C después de la acción); D y C conservaron sus otros 2 banners
+  cada uno.
+- **Sin candidatos, sin banner:** `TC-2026-0002` (reclamo real del seed,
+  sin ningún candidato pendiente) no muestra ningún banner -- la pantalla
+  pasa directo del encabezado a "Acciones", sin rastro de "posible
+  duplicado" ni un mensaje de "sin duplicados".
+- **Independencia confirmada:** después de descartar el par C-D, los
+  otros 5 candidatos (`A↔B`, `A↔C`, `A↔D`, `B↔C`, `B↔D`) siguieron en
+  `status: "pending"` -- confirmado por SQL directo. Los banners de A y B
+  (recargados después de la acción) siguieron mostrando sus 3 candidatos
+  originales sin cambios.
+
+**Limpieza -- borrado LÓGICO, no físico, corrigiendo el criterio de
+sesiones anteriores.** Releyendo CLAUDE.md > Reglas para cuidar cuentas y
+credenciales con más cuidado en este paso: "la limpieza es siempre
+borrado lógico en tablas de negocio (`deleted_at`)... la misma regla que
+ya rige el código de la aplicación rige también cómo se prueba" -- a
+diferencia de pasos anteriores de esta conversación, que hicieron
+`DELETE` físico de los tickets/personas sintéticos. Los 4 tickets, los 6
+candidatos de similitud y las 3 personas de prueba de esta verificación
+se soft-borraron (`deleted_at`), no se eliminaron físicamente. La
+excepción es el usuario admin de prueba (Auth + `app_users`): una
+credencial de acceso descartable creada solo para esta sesión, no un
+registro de negocio -- se borró por completo (Auth vía Admin API +
+`DELETE` en `app_users`), porque dejar viva una cuenta de acceso que
+nadie va a usar ni monitorear es un riesgo real, distinto de "borrar un
+dato de negocio".
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.

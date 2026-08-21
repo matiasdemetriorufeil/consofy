@@ -157,6 +157,63 @@ describe("describeTicketEvent", () => {
     expect(result.detail).toBeNull();
   });
 
+  it("similar_ticket_grouped: nombra el código del otro ticket, texto distinto de merged_into_incident", () => {
+    const result = describeTicketEvent({
+      type: "similar_ticket_grouped",
+      actorType: "admin",
+      actorLabel: "Administración",
+      payload: {
+        otherTicketId: "a1111111-1111-4111-8111-111111111111",
+        otherPublicCode: "TC-2026-0001",
+      },
+    });
+    expect(result.headline).toBe(
+      "Administración marcó este reclamo como posible duplicado de TC-2026-0001",
+    );
+    // No puede compartir la palabra "agrupó" con merged_into_incident --
+    // este evento (paso 7.3) todavía no arma ningún problema en común de
+    // verdad, eso es el paso 7.4.
+    expect(result.headline).not.toContain("agrupó");
+    expect(result.detail).toBeNull();
+  });
+
+  it("similar_ticket_discarded: nombra el código del otro ticket", () => {
+    const result = describeTicketEvent({
+      type: "similar_ticket_discarded",
+      actorType: "admin",
+      actorLabel: "Administración",
+      payload: {
+        otherTicketId: "a1111111-1111-4111-8111-111111111111",
+        otherPublicCode: "TC-2026-0002",
+      },
+    });
+    expect(result.headline).toBe(
+      "Administración descartó a TC-2026-0002 como posible duplicado",
+    );
+    expect(result.detail).toBeNull();
+  });
+
+  it("similar_ticket_grouped/discarded con payload inválido: cae a un texto genérico, no rompe", () => {
+    const grouped = describeTicketEvent({
+      type: "similar_ticket_grouped",
+      actorType: "admin",
+      actorLabel: "Administración",
+      payload: { algoRaro: true },
+    });
+    expect(grouped.headline).toBe(
+      "Administración marcó este reclamo como posible duplicado",
+    );
+    const discarded = describeTicketEvent({
+      type: "similar_ticket_discarded",
+      actorType: "admin",
+      actorLabel: "Administración",
+      payload: { algoRaro: true },
+    });
+    expect(discarded.headline).toBe(
+      "Administración descartó un posible duplicado",
+    );
+  });
+
   it("evento sin payload en absoluto (columna con su default {}): no rompe ningún tipo", () => {
     const types = [
       "created",
@@ -168,6 +225,8 @@ describe("describeTicketEvent", () => {
       "merged_into_incident",
       "whatsapp_handoff_opened",
       "similar_ticket_detected",
+      "similar_ticket_grouped",
+      "similar_ticket_discarded",
     ] as const;
     for (const type of types) {
       expect(() =>

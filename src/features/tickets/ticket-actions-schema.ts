@@ -167,3 +167,20 @@ export const addTicketNoteInputSchema = z.object({
 });
 
 export type TicketActionResult = { ok: true } | { ok: false; error: string };
+
+// -----------------------------------------------------------------------
+// Resolución de candidatos a duplicado (paso 7.3)
+// -----------------------------------------------------------------------
+
+// "grouped"/"discarded" -- nunca "pending" acá (a eso vuelve un candidato
+// solo al crearse, ver el default de la columna en
+// ticket-similarity-candidates.ts): esta acción es SIEMPRE una resolución,
+// nunca puede "despendientizar" algo ya resuelto.
+export const SIMILARITY_RESOLUTION_VALUES = ["grouped", "discarded"] as const;
+export type SimilarityResolution =
+  (typeof SIMILARITY_RESOLUTION_VALUES)[number];
+
+export const resolveSimilarityCandidateInputSchema = z.object({
+  candidateId: z.uuid(),
+  resolution: z.enum(SIMILARITY_RESOLUTION_VALUES),
+});
