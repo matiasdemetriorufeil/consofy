@@ -45,9 +45,14 @@ import {
 export const STALE_TICKET_DAYS = 5;
 
 type Priority = (typeof tickets.$inferSelect)["priority"];
-type Status = (typeof tickets.$inferSelect)["status"];
+export type Status = (typeof tickets.$inferSelect)["status"];
 
-const PENDING_STATUSES: Status[] = ["new", "in_progress"];
+// Exportado (paso 7.1): findSimilarTickets (find-similar-tickets.ts) reusa
+// esta misma definición de "abierto" para buscar candidatos a duplicado --
+// mismo criterio de reuso ya aplicado en el proyecto (STATUS_LABEL,
+// PRIORITY_LABEL): un solo lugar define qué estados cuentan como
+// "pendiente de acción", no una tercera copia del array.
+export const PENDING_STATUSES: Status[] = ["new", "in_progress"];
 
 export type BuildingTicketSummary = {
   buildingId: string;

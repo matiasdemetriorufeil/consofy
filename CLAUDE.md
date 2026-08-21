@@ -2587,6 +2587,130 @@ comillas/salto de línea** (persona "María José" con apellido
 (`""la portera""`) y conserva el salto de línea LITERAL dentro del campo
 entrecomillado -- ver el reporte del paso para el fragmento crudo completo.
 
+## Detección de reclamos repetidos -- findSimilarTickets (paso 7.1)
+
+`src/features/tickets/find-similar-tickets.ts` -- servicio que busca
+candidatos a duplicado de un reclamo, con `pg_trgm`. Este paso construye
+SOLO el servicio, testeable en aislamiento; no se conecta todavía al alta
+de un ticket (eso es el paso 7.2, que decide qué hacer con el resultado:
+avisar al administrador, sugerir agrupar en un incidente, etc.).
+
+**`pg_trgm` verificado contra la base real antes de escribir una sola
+línea, no asumido** -- `extversion 1.6`, esquema `extensions`, ya
+habilitado desde el paso 6.1 (búsqueda de la bandeja). También se
+verificó `unaccent`: **NO está instalada** -- por eso la normalización
+"sin tildes" no usa esa extensión (ver más abajo), y no se instaló nada
+nuevo sin avisar.
+
+**Firma elegida -- parámetros explícitos, NO `findSimilarTickets(ticketId)`:**
+
+```ts
+findSimilarTickets(organizationId, {
+  buildingId, categoryId, title, description,
+  excludeTicketId?, referenceReportedAt?, windowHours?,
+})
+```
+
+El paso 7.2 va a necesitar llamar a esto ANTES de insertar el reclamo
+nuevo (el vecino todavía completando el formulario, o justo antes de
+guardarlo) -- en ese momento el ticket todavía no existe como fila, así
+que una firma que exigiera un id ya guardado no serviría para el caso
+real que motiva este servicio. Ventaja secundaria: trivial de probar
+aislado (pedido explícito del paso) sin insertar un ticket real primero.
+
+**División en dos archivos, encontrada probando este mismo paso.**
+`normalize-ticket-text.ts` (puro, SIN `import "server-only"`) +
+`find-similar-tickets.ts` (toca la base, CON `import "server-only"`).
+La primera versión tenía todo junto en un archivo con `import
+"server-only"` al principio -- Vitest no define la condición
+`react-server` que sí define Next.js al bundlear, así que ese import
+explota apenas el archivo se importa en un test, **incluida la función
+pura** que no toca la base para nada. Mismo criterio que ya usa
+`formatTicketMessage` (paso 5.6): la lógica de texto pura vive en su
+propio módulo, testeable sin infraestructura de servidor/DB.
+`find-similar-tickets.ts` reexporta `normalizeTicketText` para
+conveniencia de callers reales, pero cualquier test tiene que importarla
+directo de `normalize-ticket-text.ts` -- importar cualquier cosa del
+otro archivo ejecuta igual el `import "server-only"`.
+
+**Normalización -- minúsculas, sin tildes, espacios colapsados, nada
+más.** Implementada a mano (mapeo de las siete letras acentuadas reales
+del español: á é í ó ú ñ ü), no con `unaccent` (no instalada, ver
+arriba). Dos implementaciones que tienen que dar EXACTAMENTE el mismo
+resultado: `normalizeTicketText()` en JS (para el texto de referencia) y
+un `regexp_replace(trim(translate(lower(...))))` en SQL (para cada
+candidato, campo por campo) -- comparten las mismas constantes
+`ACCENTED_CHARS`/`PLAIN_CHARS` para que nunca se desincronicen.
+
+**Bug real encontrado probando este paso: un template literal de JS
+resuelve escapes ANTES de que Drizzle vea el string.** `\s` no es una
+secuencia de escape reconocida por JS -- en un string/template literal
+común el backslash se descarta en silencio, así que `'\s+'` escrito tal
+cual en el código fuente le llegaba a Postgres como `'s+'` (un patrón que
+borra cada 's' suelta del texto, no los espacios). Probado en la
+práctica: "ascensor" salía convertido en "a cen or". Fix: `'\\s+'`, con
+la barra invertida DUPLICADA en el código fuente -- es lo que hace que
+Postgres reciba el backslash real que necesita `\s+` como clase de
+espacio en su regex.
+
+**Título + descripción concatenados en un solo texto de comparación, no
+dos scores separados** -- un texto más largo le da a `pg_trgm` más
+trigramas para trabajar (menos ruido que títulos cortos sueltos), y el
+enunciado del paso pide "el score real" en singular.
+
+**Ventana temporal SIMÉTRICA (72hs default, configurable), no solo hacia
+atrás** -- un candidato puede estar antes O después de
+`referenceReportedAt`. El caso real (paso 7.2, un ticket que se está por
+crear "ahora") solo va a encontrar candidatos en el pasado, pero la
+simetría es lo que permite probar la función contra PARES de tickets ya
+existentes (como el cluster del seed) sin importar cuál de los dos se
+pase como referencia.
+
+**Ningún índice GIN nuevo -- confirmado con `EXPLAIN ANALYZE` contra
+datos reales, no asumido.** Ya existen índices GIN trigram sobre
+`tickets.title`/`tickets.description` (paso 6.1), pero son sobre las
+columnas CRUDAS -- no aceleran una comparación sobre texto normalizado.
+Se evaluó agregar un índice funcional sobre la expresión normalizada y se
+descartó: esta consulta filtra PRIMERO por organización + edificio +
+categoría + estado + ventana, usando los índices btree que YA existen
+(`tickets_building_id_category_id_reported_at_idx`), y RECIÉN calcula
+`similarity()` sobre ese conjunto ya angosto. Medido contra el cluster
+real del ascensor (Torre Central + Ascensores, sobre una tabla con 1205
+filas totales -- incluidos ~1175 tickets sintéticos de pruebas de carga
+de pasos anteriores, soft-deleted pero igual presentes en el índice):
+`Bitmap Index Scan` sobre ese índice btree trae 41 filas candidatas,
+`similarity()` corre sobre esas 41 (no sobre las 1205), **Execution
+Time: 6.25ms**. Un GIN trigram acelera un `%`/`similarity()` cuando hace
+falta escanear TODA la tabla (el caso de la búsqueda libre del paso
+6.1); acá nunca se llega a escanear la tabla completa.
+
+**Verificado con los 4 reclamos reales del cluster del ascensor del
+seed** (Torre Central, categoría Ascensores, redactados por 4 vecinos
+distintos, `reportedAt` entre 6 y 68 horas antes de "ahora" -- todos
+dentro de la ventana de 72hs entre sí): scores de similitud entre
+0.2073 y 0.3654 par a par, los 6 pares. Ver el reporte del paso para la
+matriz completa.
+
+**Verificado en la dirección negativa** con tickets sintéticos creados y
+borrados solo para la prueba: texto IDÉNTICO en un edificio distinto
+-- 0 candidatos; texto idéntico en una categoría distinta -- 0
+candidatos; texto idéntico fuera de la ventana de 72hs (100hs de
+diferencia) -- 0 candidatos con la ventana default, SÍ aparece
+(score 1.0) ampliando `windowHours` a 150 (confirma que la exclusión es
+por la ventana, no por otra condición); texto sin ninguna relación
+temática, mismo edificio+categoría+ventana -- score 0.1853, más bajo que
+cualquiera de los 6 pares reales del cluster pero no por mucho margen.
+
+**Propuesta de umbral (no una decisión tomada -- queda para que se
+decida con estos números):** el margen real entre el par MÁS DÉBIL del
+cluster genuino (0.2073) y el único control negativo probado (0.1853) es
+angosto, ~0.02. Un umbral único en esa zona arriesga falsos negativos o
+falsos positivos con poco margen. Alternativa a considerar: un esquema
+de dos niveles (ej. ≥0.30 "probable duplicado", 0.20-0.30 "revisar
+manualmente", <0.20 "no marcar") en vez de un solo corte, y sumar más
+casos negativos reales antes de fijar cualquier número -- un solo control
+negativo no alcanza para calibrar con confianza.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
