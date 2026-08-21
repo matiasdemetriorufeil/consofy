@@ -2396,6 +2396,105 @@ rápido. Medido:
   proyecto (multiplicador ~57x ya medido): 3-4 round-trips a ~3-4ms cada
   uno dan **12-16ms totales**, sin importar si el lote es de 5 o de 500.
 
+## Chips de estado en la bandeja (paso 6.6, redefinido)
+
+**El enunciado original pedía un tablero Kanban por estado, con arrastrar y
+soltar. Se descartó antes de implementarlo, en consulta con una sesión
+anterior -- razones documentadas acá para no tener que redescubrirlas:**
+
+- Un Kanban con drag-and-drop resuelve coordinación entre VARIAS personas
+  moviendo trabajo. `app_user_role` tiene hoy un solo valor (`"admin"`), sin
+  flujo de invitación (ver CLAUDE.md > Acciones sobre un reclamo) -- no hay
+  "cuello de botella entre personas" que visualizar con un solo
+  administrador.
+- Todo lo que el Kanban daría ya existe: conteos por estado (dashboard,
+  paso 3.5), cambio de estado individual en 2 toques (paso 6.4), cambio en
+  lote (paso 6.5).
+- El drag-and-drop nativo del navegador no funciona en touch -- haría falta
+  una librería nueva (`@dnd-kit` o similar), y el administrador de este
+  producto usa el celular seguido. Agregar una dependencia nueva sin una
+  necesidad real que los mecanismos existentes no cubran no se justifica.
+- Cada drop igual tendría que revalidar server-side contra
+  `TICKET_STATUS_TRANSITIONS` (paso 6.4), duplicando una superficie de UX
+  que el 6.5 ya resuelve mejor (confirmación explícita, aplicación parcial
+  sobre selección mixta).
+
+**Alternativa construida, bajo el mismo número de paso:** una fila de chips
+de solo lectura (`TicketStatusChips`,
+`tickets/components/ticket-status-chips.tsx`) arriba de la tabla de la
+bandeja, con el conteo de tickets por estado (`nuevo`, `en_proceso`,
+`resuelto`, `cerrado`, `descartado`) más un chip "Todos". Tocar un chip
+aplica el filtro de estado existente (paso 6.1) sobre la URL -- el MISMO
+mecanismo que ya usan `TicketFiltersBar`/`buildTicketInboxHref`, no uno
+aparte. Server Component puro (como `buildSortHref`/`buildPageHref` en
+`page.tsx`): el servidor ya conoce filtros y conteos al renderizar, así que
+cada chip es un `<Link>` con el href ya resuelto -- sin Client Component ni
+librería nueva.
+
+**Los conteos ignoran SIEMPRE el filtro de estado, nunca los demás.**
+`getTicketStatusCounts()` (`tickets/queries.ts`) reusa
+`buildTicketInboxConditions()` -- el mismo `WHERE` que arma la bandeja y que
+ya reusan `getTicketInboxCount()`/`getTicketIdsForFilters()` (paso 6.5) --
+pero fuerza `statuses: undefined` de forma incondicional, sin importar qué
+traiga `filters.statuses`: así el caller nunca puede pasar por alto este
+comportamiento sin querer. Con eso, cada chip responde "¿cuántos hay en
+este estado, dado lo demás que ya elegí (edificio, unidad, categoría,
+prioridad, responsable, fechas, búsqueda)?", nunca "cuántos hay en total
+sin ningún filtro". El chip "Todos" limpia el filtro de estado (`status=
+all`, la misma opción explícita que ya ofrecía el `<select>` del paso 6.1)
+sin tocar los demás parámetros de la URL.
+
+**UNA sola consulta agrupada, no una por chip:**
+
+```sql
+select "status", count(*) as "count"
+from "tickets"
+left join "people"
+  on "people"."id" = "tickets"."person_id"
+  and "people"."organization_id" = "tickets"."organization_id"
+where (
+  "tickets"."organization_id" = $1
+  and "tickets"."deleted_at" is null
+  -- + cualquier otro filtro activo (building_id, unit_id, category_id,
+  --   priority, assignee, reported_at, búsqueda ILIKE) -- nunca status
+)
+group by "tickets"."status"
+```
+
+(El `LEFT JOIN` contra `people` solo importa cuando hay búsqueda de texto
+activa, igual que en `getTicketInboxCount()` -- se incluye siempre porque
+`buildTicketInboxConditions()` es compartida, no porque el conteo por
+estado necesite el vecino.) Un estado sin ninguna fila que matchee no sale
+en las filas del `GROUP BY` -- `getTicketStatusCounts()` arranca los cinco
+estados reales (`ticketStatus.enumValues`) en 0 antes de volcar el
+resultado, para que el chip correspondiente muestre "0" en vez de faltar.
+
+**Verificado con 500 tickets reales** (30 del seed + 470 sintéticos
+generados y limpiados en este mismo paso, prefijo identificable "Prueba
+carga 6.6" -- mismo patrón que "Prueba carga 6.1"/"Prueba carga 6.5"):
+
+- Sin filtros, la suma de los 5 chips (103+101+102+98+96 = 500) coincide
+  exactamente con `getTicketInboxCount()` sin filtro de estado (500).
+- Cada chip por separado coincide con aplicar ESE mismo estado a mano vía
+  `getTicketInboxCount({ statuses: [status] })` -- probado para los 5
+  estados, sin ninguna diferencia.
+- Combinando edificio + categoría + chip (`building=Los Álamos,
+  category=Plomería`): la suma de los 5 chips (15) coincide con el total
+  filtrado sin estado (15), y cada chip individual coincide con aplicar el
+  filtro completo (edificio + categoría + estado) a mano -- confirma
+  intersección real (AND), no que un filtro pisa al otro.
+
+**Responsive -- scroll horizontal, no wrap, mismo patrón ya usado en
+`BuildingDetailTabs`** (`buildings/components/building-detail-tabs.tsx`,
+paso 4.2): `-mx-4 overflow-x-auto px-4` en el `<nav>`, `flex w-max
+min-w-full` en la lista para que los chips no se compriman. En pantallas
+`sm:` y mayores pasa a `flex-wrap` (entran cómodos sin scroll). Cada chip
+es un `<Link>` de `px-3 py-2` -- mismo alto que ya usan las pestañas de
+`BuildingDetailTabs` para el mismo problema (pulgar en mobile).
+
+**Sin dependencias nuevas** -- `package.json`/`package-lock.json` sin
+tocar, confirmado con `git diff --stat` antes de cerrar el paso.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.

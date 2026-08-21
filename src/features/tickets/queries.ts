@@ -21,6 +21,7 @@ import {
   ticketAttachments,
   ticketEvents,
   tickets,
+  ticketStatus,
   units,
 } from "@/db/schema";
 import { zonedDayBoundsToUtc } from "@/lib/format-date";
@@ -625,6 +626,60 @@ export async function getTicketInboxCount(
     )
     .where(and(...conditions));
   return row?.count ?? 0;
+}
+
+export type TicketStatusCounts = Record<Status, number>;
+
+// Chips de conteo por estado, arriba de la bandeja (paso 6.6, redefinido --
+// ver CLAUDE.md > Chips de estado sobre por qué se reemplazó el Kanban con
+// drag-and-drop del enunciado original). UNA sola consulta agrupada
+// (GROUP BY status), nunca una por chip -- mismo criterio que
+// getTicketSummaryByBuilding (paso 3.5): un COUNT(*) FILTER o un GROUP BY
+// sobre la misma pasada, no N consultas.
+//
+// Ignora SIEMPRE `filters.statuses` (lo pise el caller o no) -- los chips
+// responden "¿cuántos hay en cada estado, dado lo demás que ya elegí?", así
+// que cuentan con TODOS los filtros activos EXCEPTO el de estado. Reusa
+// buildTicketInboxConditions (el mismo WHERE que arma la bandeja) para que
+// "lo demás que ya elegí" nunca pueda desincronizarse de lo que la pantalla
+// muestra -- mismo criterio ya aplicado en getTicketIdsForFilters (paso
+// 6.5).
+export async function getTicketStatusCounts(
+  organizationId: string,
+  filters: TicketInboxFilters,
+): Promise<TicketStatusCounts> {
+  const conditions = buildTicketInboxConditions(organizationId, {
+    ...filters,
+    statuses: undefined,
+  });
+
+  const rows = await db
+    .select({
+      status: tickets.status,
+      count: sql<number>`count(*)`.mapWith(Number),
+    })
+    .from(tickets)
+    .leftJoin(
+      people,
+      and(
+        eq(people.id, tickets.personId),
+        eq(people.organizationId, tickets.organizationId),
+      ),
+    )
+    .where(and(...conditions))
+    .groupBy(tickets.status);
+
+  // Arranca en 0 para los cinco estados reales -- un estado sin ningún
+  // ticket que matchee no aparece en las filas del GROUP BY (a diferencia
+  // de un LEFT JOIN, un estado sin filas simplemente no sale), así que sin
+  // esto el chip correspondiente quedaría sin conteo en vez de en "0".
+  const counts = Object.fromEntries(
+    ticketStatus.enumValues.map((status) => [status, 0]),
+  ) as TicketStatusCounts;
+  for (const row of rows) {
+    counts[row.status] = row.count;
+  }
+  return counts;
 }
 
 // Tope de una acción masiva (paso 6.5) -- ver ticket-bulk-schema.ts para

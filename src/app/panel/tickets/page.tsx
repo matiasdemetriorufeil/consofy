@@ -5,11 +5,13 @@ import { getBuildingFilterOptions } from "@/features/buildings/queries";
 import { TicketFiltersBar } from "@/features/tickets/components/ticket-filters-bar";
 import { TicketInboxList } from "@/features/tickets/components/ticket-inbox-list";
 import { TicketPagination } from "@/features/tickets/components/ticket-pagination";
+import { TicketStatusChips } from "@/features/tickets/components/ticket-status-chips";
 import {
   getAssigneeFilterOptions,
   getCategoryFilterOptions,
   getTicketInbox,
   getTicketInboxCount,
+  getTicketStatusCounts,
   organizationHasAnyTicket,
   resolveTicketInboxFilters,
 } from "@/features/tickets/queries";
@@ -20,6 +22,7 @@ import {
   TICKET_INBOX_PAGE_SIZE,
   ticketInboxQueryString,
   ticketInboxSearchParamsSchema,
+  type TicketStatusFilterValue,
 } from "@/features/tickets/ticket-inbox-schema";
 import { getUnitsForBuilding } from "@/features/units/queries";
 import { requireUser } from "@/lib/auth";
@@ -162,6 +165,29 @@ export default async function TicketsPage({
     });
   }
 
+  // Chips de estado (paso 6.6, redefinido) -- mismo mecanismo de URL que el
+  // resto de los filtros (buildTicketInboxHref), nunca uno aparte. `page`
+  // siempre a null: tocar un chip es un cambio de filtro, y cambiar
+  // cualquier filtro vuelve a la página 1 (mismo criterio que
+  // buildSortHref de arriba y que TicketFiltersBar.updateParams).
+  function buildStatusChipHref(
+    status: Exclude<TicketStatusFilterValue, "open">,
+  ): string {
+    return buildTicketInboxHref("/panel/tickets", normalizedParams, {
+      status,
+      page: null,
+    });
+  }
+
+  // Conteos por estado con TODOS los filtros activos EXCEPTO el de estado
+  // (getTicketStatusCounts los ignora siempre, ver queries.ts) -- una sola
+  // consulta agrupada, disparada solo acá (no en las ramas de empty state
+  // de arriba, que ya cortan antes de mostrar la tabla y los chips).
+  const statusCounts = await getTicketStatusCounts(
+    organization.id,
+    inboxFilters,
+  );
+
   // Cómo se llega al detalle y cómo se vuelve sin perder filtros (paso
   // 6.3): viaja como string a TicketInboxList, que arma cada link de
   // título con esto -- ver el comentario original de esta idea en el
@@ -201,6 +227,12 @@ export default async function TicketsPage({
             filters.q,
           ].filter(Boolean).length
         }
+      />
+
+      <TicketStatusChips
+        counts={statusCounts}
+        activeStatus={filters.status}
+        buildHref={buildStatusChipHref}
       />
 
       <p className="text-ink-muted text-sm">
