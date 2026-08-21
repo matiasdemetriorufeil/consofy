@@ -2495,6 +2495,98 @@ es un `<Link>` de `px-3 py-2` -- mismo alto que ya usan las pestañas de
 **Sin dependencias nuevas** -- `package.json`/`package-lock.json` sin
 tocar, confirmado con `git diff --stat` antes de cerrar el paso.
 
+## Exportación a CSV de la bandeja (paso 6.7)
+
+Botón "Exportar CSV" en `TicketFiltersBar` (mismo nivel que los filtros del
+paso 6.1) que descarga los tickets que matchean los filtros ACTUALMENTE
+activos -- edificio, unidad, categoría, estado, prioridad, responsable,
+rango de fechas, búsqueda de texto -- sin paginar.
+
+**Route Handler, no Server Action -- mismo criterio ya usado para el QR del
+paso 4.6** (`public-link/qr/route.ts`, ver el comentario de ese archivo):
+una descarga de archivo es una respuesta HTTP con `Content-Disposition`,
+algo que una Server Action no puede devolver (solo devuelve el resultado
+serializado de invocar la función, no controla headers de la respuesta).
+`src/app/panel/tickets/export/route.ts` resuelve su PROPIA autorización con
+`requireUser()`, sin depender del layout de `/panel` -- ver CLAUDE.md >
+Autorización de rutas y Server Actions. La ruta estática `export/` convive
+sin conflicto con el segmento dinámico `[ticketId]/` del mismo nivel: Next.js
+prioriza segmentos estáticos sobre dinámicos, confirmado sirviendo
+`/panel/tickets/export` contra el dev server real (devuelve el CSV/redirect
+esperado, nunca intenta resolver "export" como un `ticketId`).
+
+**Aislamiento por organización -- el mismo mecanismo de siempre, ninguno
+nuevo.** `getTicketsForExport()` (`tickets/queries.ts`) reusa
+`buildTicketInboxConditions()`, el MISMO `WHERE` que arma la bandeja
+(`getTicketInbox`) y que ya comparten `getTicketInboxCount()`/
+`getTicketIdsForFilters()` (paso 6.5)/`getTicketStatusCounts()` (paso 6.6) --
+`organizationId` sale SIEMPRE de `requireUser()` (la sesión real), nunca de
+un parámetro de la URL; los filtros que sí vienen de la URL solo AGREGAN
+condiciones al WHERE, nunca lo reemplazan. Probado en la práctica con una
+organización sintética creada y borrada solo para la prueba (mismo criterio
+que el análisis de seguridad del paso 6.4): pedir la exportación de la
+organización real con `?building=<uuid de la otra organización>` -- **0
+filas**, no un error ni datos de la otra organización; sin ningún filtro,
+los 231 tickets devueltos nunca incluyeron el ticket exclusivo de la
+organización sintética.
+
+**Sin `.limit()`/`.offset()` a propósito** -- a diferencia de
+`getTicketInbox()` (paginado para la tabla), el CSV trae TODOS los tickets
+que matchean, en una sola consulta con los mismos JOINs (edificio,
+categoría, unidad, vecino) más dos columnas que la bandeja no muestra en
+pantalla pero sí exporta (descripción completa, teléfono del vecino).
+
+**`papaparse` ya estaba instalado (paso 4.5, importación CSV) -- se
+reusó `Papa.unparse()` para escribir, sin agregar ninguna dependencia
+nueva.** Confirmado con `git diff --stat package.json package-lock.json`
+antes de cerrar el paso (sin cambios). `Papa.unparse({ fields, data })`,
+la forma explícita (no un array de objetos): con CERO filas, un array de
+objetos no tiene de dónde sacar las claves del encabezado -- pasando
+`fields` a mano, el CSV sale con SOLO el encabezado en ese caso (probado:
+`getTicketsForExport` con un filtro que no matchea nada da un CSV de una
+sola línea, el encabezado, nunca un archivo vacío ni un error). Esa fue la
+decisión elegida para "cero resultados" (de las dos que ofrecía el
+enunciado): la UI ni siquiera llega a mostrar el botón en ese caso (mismo
+patrón que los chips del paso 6.6 -- sin filas, toda la pantalla cae a un
+`EmptyState`, y ni `TicketFiltersBar` se renderiza), pero el Route Handler
+se banca igual una URL de exportación pegada a mano después de que el
+filtro cambió, sin romper.
+
+**BOM UTF-8** (`Papa.BYTE_ORDER_MARK`, la constante de la propia librería)
+antepuesto al CSV -- sin esto, Excel en Windows abre acentos/ñ como
+caracteres corruptos. Comas, comillas y saltos de línea dentro de un campo
+de texto libre: `Papa.unparse` ya los escapa por default (encierra el
+campo entre comillas dobles, duplica las comillas internas) sin necesitar
+`quotes: true` -- verificado contra el código fuente de la librería
+(`needsQuotes` en `papaparse.js`), no asumido.
+
+**Bug real encontrado probando este mismo paso: `escapeFormulae` de
+Papa.unparse es una opción GLOBAL, sin forma de acotarla a columnas
+puntuales.** La primera versión de este paso activaba
+`escapeFormulae: true` a nivel de toda la tabla (defensa contra CSV
+injection: un campo de texto libre que empiece con `=`, `+`, `-` o `@` se
+antepone con un `'` para que Excel/LibreOffice no lo interprete como
+fórmula al abrir el archivo -- no estaba pedido explícitamente, pero es el
+mismo tipo de defensa en profundidad barata que ya aplica el resto del
+proyecto, ver CLAUDE.md > Reglas de seguridad). Con esa opción global, la
+columna Teléfono (que SIEMPRE arranca con "+" en formato E.164 válido, ver
+CLAUDE.md > Acceso a datos) también quedaba marcada como "fórmula" y salía
+con un `'` pegado adelante (`'+5491122334455`) -- un formato validado por
+la base, no texto libre. Arreglado con `guardAgainstFormulaInjection()`
+(`export-tickets-csv.ts`), aplicado A MANO solo a los tres campos que un
+vecino/administrador tipea sin ninguna validación de formato (vecino,
+responsable, descripción) -- Teléfono/Código/fechas quedan sin tocar.
+Confirmado con la misma prueba real (ticket con teléfono `+5491122334455`):
+antes del fix salía `'+5491122334455` en el CSV, después sale limpio.
+
+**Columnas y encoding, verificado con un caso real de tildes/ñ/comas/
+comillas/salto de línea** (persona "María José" con apellido
+`Muñoz Núñez, "la portera"`, descripción con coma, comillas dobles Y un
+`\n` interno): el CSV generado abre los primeros 3 bytes como `EF BB BF`
+(BOM), preserva tildes/ñ intactas, duplica las comillas internas
+(`""la portera""`) y conserva el salto de línea LITERAL dentro del campo
+entrecomillado -- ver el reporte del paso para el fragmento crudo completo.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.

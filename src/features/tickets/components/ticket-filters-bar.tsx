@@ -1,6 +1,6 @@
 "use client";
 
-import { ListFilter, Search, X } from "lucide-react";
+import { Download, ListFilter, Search, X } from "lucide-react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
@@ -109,6 +109,12 @@ type Props = {
   unitOptions: BuildingUnitRow[];
   categoryOptions: CategoryFilterOption[];
   assigneeOptions: string[];
+  // Paso 6.7 -- href ya resuelto server-side (mismo criterio que
+  // buildSortHref/buildPageHref en page.tsx: el servidor arma la URL con
+  // buildTicketInboxHref, este componente solo la usa). Siempre apunta a
+  // /panel/tickets/export con los mismos filtros activos (sin page/sort/
+  // dir, que no afectan el WHERE de la exportación).
+  exportHref: string;
   current: {
     building: string | null;
     unit: string | null;
@@ -136,6 +142,7 @@ export function TicketFiltersBar({
   unitOptions,
   categoryOptions,
   assigneeOptions,
+  exportHref,
   current,
   activeFilterCount,
 }: Props) {
@@ -419,6 +426,16 @@ export function TicketFiltersBar({
           Limpiar filtros
         </Button>
       )}
+
+      {/* Paso 6.7 -- siempre visible (a diferencia de "Limpiar filtros"),
+          incluso sin ningún filtro explícito puesto: el default implícito
+          "abiertos" (paso 6.1) también es una selección exportable. */}
+      <Button asChild variant="outline" className="md:self-end">
+        <a href={exportHref} download>
+          <Download aria-hidden="true" />
+          Exportar CSV
+        </a>
+      </Button>
     </div>
   );
 

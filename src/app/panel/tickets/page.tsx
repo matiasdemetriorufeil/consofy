@@ -188,6 +188,18 @@ export default async function TicketsPage({
     inboxFilters,
   );
 
+  // Exportación CSV (paso 6.7) -- mismos filtros activos que la bandeja
+  // (edificio, unidad, categoría, estado, prioridad, responsable, fechas,
+  // búsqueda), apuntando a la ruta de descarga en vez de a /panel/tickets.
+  // `page`/`sort`/`dir` fuera: no afectan el WHERE que arma
+  // getTicketsForExport (ver el comentario de esa función), así que no
+  // tiene sentido que viajen en la URL de descarga.
+  const exportHref = buildTicketInboxHref(
+    "/panel/tickets/export",
+    normalizedParams,
+    { page: null, sort: null, dir: null },
+  );
+
   // Cómo se llega al detalle y cómo se vuelve sin perder filtros (paso
   // 6.3): viaja como string a TicketInboxList, que arma cada link de
   // título con esto -- ver el comentario original de esta idea en el
@@ -201,6 +213,7 @@ export default async function TicketsPage({
         unitOptions={unitOptions}
         categoryOptions={categoryOptions}
         assigneeOptions={assigneeOptions}
+        exportHref={exportHref}
         current={{
           building: filters.building ?? null,
           unit: filters.unit ?? null,

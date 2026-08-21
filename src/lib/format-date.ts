@@ -43,6 +43,22 @@ function getTimezoneOffsetMinutes(date: Date, timeZone: string): number {
   return sign * (Number(match[2]) * 60 + Number(match[3]));
 }
 
+// "YYYY-MM-DD" en la zona horaria de la organización -- para nombres de
+// archivo que necesitan una fecha civil corta (paso 6.7, exportación CSV:
+// "reclamos-2026-08-21.csv"), sin agregar date-fns-tz (mismo criterio que
+// el resto del archivo: Intl ya alcanza). El locale "en-CA" es el truco ya
+// conocido para que Intl.DateTimeFormat devuelva directo el orden
+// año-mes-día con guiones, sin parsear a mano el resultado de "es-AR"
+// (que da día/mes/año).
+export function formatDateSlug(date: Date, timezone: string): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
+}
+
 // Convierte una fecha CIVIL ("YYYY-MM-DD", tal como la tipea el
 // administrador en un filtro de rango) al instante UTC real de "inicio" y
 // "fin" de ese día EN LA ZONA DE LA ORGANIZACIÓN -- nunca UTC ni la del

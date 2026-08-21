@@ -628,6 +628,115 @@ export async function getTicketInboxCount(
   return row?.count ?? 0;
 }
 
+export type TicketExportRow = {
+  publicCode: string;
+  buildingName: string;
+  unitLabel: string | null;
+  categoryName: string;
+  priority: Priority;
+  status: Status;
+  assignee: string | null;
+  reportedAt: Date;
+  resolvedAt: Date | null;
+  neighborName: string | null;
+  neighborPhoneE164: string | null;
+  description: string;
+};
+
+// Exportación a CSV de la bandeja (paso 6.7) -- reusa
+// buildTicketInboxConditions(), el MISMO WHERE que arma la bandeja
+// (getTicketInbox) y que ya reusan getTicketInboxCount()/
+// getTicketIdsForFilters()/getTicketStatusCounts() -- así el archivo
+// exportado no puede desincronizarse de lo que la pantalla filtra, y el
+// aislamiento por organización es el mismo de siempre (organizationId
+// SIEMPRE en el WHERE, ver CLAUDE.md > Acceso a datos): no hay una segunda
+// query que alguien pueda escribir mal y saltarse el filtro.
+//
+// SIN `.limit()`/`.offset()` a propósito -- a diferencia de getTicketInbox
+// (paginado, para la tabla en pantalla), el CSV tiene que traer TODOS los
+// tickets que matchean, no una página. Trae dos columnas que la bandeja no
+// necesita mostrar en pantalla pero sí en el archivo (descripción completa,
+// teléfono del vecino) -- por eso no reusa el SELECT de getTicketInbox tal
+// cual, aunque comparte todos los JOINs.
+export async function getTicketsForExport(
+  organizationId: string,
+  filters: TicketInboxFilters,
+): Promise<TicketExportRow[]> {
+  const conditions = buildTicketInboxConditions(organizationId, filters);
+
+  const rows = await db
+    .select({
+      publicCode: tickets.publicCode,
+      description: tickets.description,
+      status: tickets.status,
+      priority: tickets.priority,
+      reportedAt: tickets.reportedAt,
+      resolvedAt: tickets.resolvedAt,
+      assignee: tickets.assignee,
+      buildingName: buildings.name,
+      categoryName: categories.name,
+      unitTower: units.tower,
+      unitFloor: units.floor,
+      unitNumber: units.number,
+      unitLabelRaw: tickets.unitLabelRaw,
+      neighborFirstName: people.firstName,
+      neighborLastName: people.lastName,
+      neighborPhoneE164: people.phoneE164,
+    })
+    .from(tickets)
+    .innerJoin(
+      buildings,
+      and(
+        eq(buildings.id, tickets.buildingId),
+        eq(buildings.organizationId, tickets.organizationId),
+      ),
+    )
+    .innerJoin(
+      categories,
+      and(
+        eq(categories.id, tickets.categoryId),
+        eq(categories.organizationId, tickets.organizationId),
+      ),
+    )
+    .leftJoin(
+      units,
+      and(
+        eq(units.id, tickets.unitId),
+        eq(units.organizationId, tickets.organizationId),
+      ),
+    )
+    .leftJoin(
+      people,
+      and(
+        eq(people.id, tickets.personId),
+        eq(people.organizationId, tickets.organizationId),
+      ),
+    )
+    .where(and(...conditions))
+    .orderBy(desc(tickets.reportedAt), desc(tickets.id));
+
+  return rows.map((row) => ({
+    publicCode: row.publicCode,
+    buildingName: row.buildingName,
+    unitLabel: row.unitTower
+      ? `${row.unitTower} - ${row.unitFloor}°${row.unitNumber}`
+      : row.unitFloor && row.unitNumber
+        ? `${row.unitFloor}°${row.unitNumber}`
+        : row.unitLabelRaw,
+    categoryName: row.categoryName,
+    priority: row.priority,
+    status: row.status,
+    assignee: row.assignee,
+    reportedAt: row.reportedAt,
+    resolvedAt: row.resolvedAt,
+    neighborName:
+      [row.neighborFirstName, row.neighborLastName].filter(Boolean).join(" ") ||
+      null,
+    neighborPhoneE164: row.neighborPhoneE164,
+    description: row.description,
+  }));
+}
+
 export type TicketStatusCounts = Record<Status, number>;
 
 // Chips de conteo por estado, arriba de la bandeja (paso 6.6, redefinido --
