@@ -1,0 +1,2 @@
+ALTER TABLE "ticket_similarity_candidates" DROP CONSTRAINT "ticket_similarity_candidates_ticket_candidate_unique";--> statement-breakpoint
+CREATE UNIQUE INDEX "ticket_similarity_candidates_ticket_candidate_unique" ON "ticket_similarity_candidates" USING btree ("ticket_id","candidate_ticket_id") WHERE "ticket_similarity_candidates"."deleted_at" is null;

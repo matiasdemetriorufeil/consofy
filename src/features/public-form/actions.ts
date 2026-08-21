@@ -11,6 +11,7 @@ import {
   unitBelongsToBuilding,
 } from "@/features/people/queries";
 import { PHONE_UNIQUE_CONSTRAINT } from "@/features/people/constraints";
+import { detectAndFlagSimilarTickets } from "@/features/tickets/detect-similar-tickets-on-create";
 import { getClientIp } from "@/lib/request-ip";
 import { UNIQUE_VIOLATION, unwrapPostgresError } from "@/lib/postgres-errors";
 
@@ -84,7 +85,9 @@ async function attemptCreateTicket(
     ? null
     : await findDeletedPersonByPhone(building.organizationId, data.phoneE164);
 
-  return db.transaction(async (tx) => {
+  const ticketTitle = deriveTicketTitle(data.description);
+
+  const ticket = await db.transaction(async (tx) => {
     let personId: string;
 
     if (activeMatch) {
@@ -151,7 +154,7 @@ async function attemptCreateTicket(
         unitLabelRaw: data.unitNotListed ? data.unitLabelRaw : null,
         personId,
         categoryId: category.id,
-        title: deriveTicketTitle(data.description),
+        title: ticketTitle,
         description: data.description,
         // Sale de la categoría, no de un campo del formulario -- ver
         // CLAUDE.md > Fotos y adjuntos... no, ver el paso 5.2: "sin
@@ -164,10 +167,15 @@ async function attemptCreateTicket(
       // -- .returning() lo trae de vuelta para poder mostrárselo al
       // vecino. attachments_token (paso 5.10) sale igual, de
       // defaultRandom() en la base -- ver src/db/schema/tickets.ts.
+      // reportedAt (paso 7.2): la detección de posibles duplicados,
+      // DESPUÉS de esta transacción, necesita el instante real que puso
+      // defaultNow() -- no vale aproximarlo con `new Date()` del lado de
+      // JS después del commit, por poco que difieran en la práctica.
       .returning({
         id: tickets.id,
         publicCode: tickets.publicCode,
         attachmentsToken: tickets.attachmentsToken,
+        reportedAt: tickets.reportedAt,
       });
     if (!ticket) {
       throw new Error("TICKET_CREATE_FAILED");
@@ -197,6 +205,27 @@ async function attemptCreateTicket(
 
     return ticket;
   });
+
+  // Detección de posibles duplicados (paso 7.2) -- DESPUÉS de que la
+  // transacción de arriba ya hizo commit, nunca adentro de ella: el
+  // enunciado exige que una falla acá NUNCA impida que el alta se
+  // complete, y detectAndFlagSimilarTickets() ya garantiza (con su propio
+  // try/catch interno) que nunca tira -- pero mantenerla afuera de la
+  // transacción del ticket es una segunda capa de la misma garantía, no
+  // solo confiar en esa función: aunque alguien rompiera esa garantía en
+  // el futuro, un error acá ya no podría hacer rollback de un ticket que
+  // el vecino ya ve confirmado.
+  await detectAndFlagSimilarTickets({
+    organizationId: building.organizationId,
+    ticketId: ticket.id,
+    buildingId: building.id,
+    categoryId: category.id,
+    title: ticketTitle,
+    description: data.description,
+    reportedAt: ticket.reportedAt,
+  });
+
+  return ticket;
 }
 
 // true si el error es EXACTAMENTE la carrera de teléfono (dos envíos casi

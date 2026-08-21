@@ -64,6 +64,14 @@ const mergedIntoIncidentPayloadSchema = z.object({
   incidentTitle: z.string().trim().min(1).optional(),
 });
 
+// Paso 7.2 -- payload que escribe detectAndFlagSimilarTickets() por cada
+// candidato sobre el umbral (ticket-similarity-candidates.ts).
+const similarTicketDetectedPayloadSchema = z.object({
+  candidateTicketId: z.uuid(),
+  candidatePublicCode: z.string().trim().min(1),
+  similarity: z.number().min(0).max(1),
+});
+
 function statusText(
   dbStatus: z.infer<typeof statusChangedPayloadSchema>["from"],
 ): string {
@@ -189,6 +197,27 @@ function describeMergedIntoIncident(
   };
 }
 
+// Paso 7.2 -- detectAndFlagSimilarTickets() siempre escribe este evento
+// con actorType "system" (primer escritor real de ese valor del enum, ver
+// el comentario de ticket-events.ts). El headline no usa actorLabel a
+// propósito, mismo criterio que el branch "system" de describeCreated.
+function describeSimilarTicketDetected(
+  event: TicketTimelineEventInput,
+): TicketEventDescription {
+  const parsed = similarTicketDetectedPayloadSchema.safeParse(event.payload);
+  if (!parsed.success) {
+    return {
+      headline: "Se detectó un posible reclamo duplicado",
+      detail: null,
+    };
+  }
+  const percent = Math.round(parsed.data.similarity * 100);
+  return {
+    headline: `Posible duplicado detectado: ${parsed.data.candidatePublicCode}`,
+    detail: `${percent}% de similitud con este reclamo.`,
+  };
+}
+
 export function describeTicketEvent(
   event: TicketTimelineEventInput,
 ): TicketEventDescription {
@@ -209,5 +238,7 @@ export function describeTicketEvent(
       return describeMergedIntoIncident(event);
     case "whatsapp_handoff_opened":
       return describeWhatsappHandoff(event.actorLabel);
+    case "similar_ticket_detected":
+      return describeSimilarTicketDetected(event);
   }
 }

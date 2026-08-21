@@ -11,6 +11,7 @@ export * from "./tickets";
 export * from "./ticket-attachments";
 export * from "./ticket-events";
 export * from "./ticket-code-counters";
+export * from "./ticket-similarity-candidates";
 export * from "./announcements";
 export * from "./announcement-recipients";
 export * from "./reminders";

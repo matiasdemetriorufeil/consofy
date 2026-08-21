@@ -2701,15 +2701,226 @@ por la ventana, no por otra condición); texto sin ninguna relación
 temática, mismo edificio+categoría+ventana -- score 0.1853, más bajo que
 cualquiera de los 6 pares reales del cluster pero no por mucho margen.
 
-**Propuesta de umbral (no una decisión tomada -- queda para que se
-decida con estos números):** el margen real entre el par MÁS DÉBIL del
-cluster genuino (0.2073) y el único control negativo probado (0.1853) es
-angosto, ~0.02. Un umbral único en esa zona arriesga falsos negativos o
-falsos positivos con poco margen. Alternativa a considerar: un esquema
-de dos niveles (ej. ≥0.30 "probable duplicado", 0.20-0.30 "revisar
-manualmente", <0.20 "no marcar") en vez de un solo corte, y sumar más
-casos negativos reales antes de fijar cualquier número -- un solo control
-negativo no alcanza para calibrar con confianza.
+**Propuesta de umbral -- DECIDIDO en 0.20** (ver CLAUDE.md > Alta de
+tickets con detección de posibles duplicados, paso 7.2, para el
+razonamiento completo y su implementación): el margen real entre el par
+MÁS DÉBIL del cluster genuino (0.2073) y el único control negativo
+probado (0.1853) es angosto, ~0.02 -- documentado así antes de decidir,
+no a ciegas. Configurable por parámetro desde el día uno (paso 7.2 lo
+expone como constante nombrada, el paso 7.6 lo va a exponer editable
+desde el panel).
+
+**Addendum -- `EXPLAIN ANALYZE` real, pedido antes de aprobar este paso
+(no incluido en el reporte original, corregido acá):**
+
+- **Con los 30 tickets reales de hoy:** `Bitmap Index Scan` sobre
+  `tickets_building_id_category_id_reported_at_idx` trae 41 filas
+  candidatas (de una tabla con 1205 filas totales, contando ~1175
+  tickets sintéticos soft-deleted de pruebas de carga anteriores), el
+  `Filter` los reduce a las 4 reales, **Execution Time: 9.77ms**. Nunca
+  aparece ningún índice GIN trigram en el plan, ni `Seq Scan`.
+- **Con volumen sintético (5.000 tickets repartidos entre los 5
+  edificios × 8 categorías reales + 500 CONCENTRADOS a propósito en
+  Torre Central+Ascensores, estado abierto, dentro de la ventana de
+  72hs -- escenario de estrés poco realista elegido para forzar un
+  candidate set grande):** 506 candidatos reales procesados,
+  **Execution Time: 31.5ms** -- sigue usando el mismo índice btree, sigue
+  sin `Seq Scan`. El aumento de tiempo es proporcional a la cantidad de
+  candidatos DENTRO del bucket filtrado, no al tamaño total de la tabla
+  (que pasó de 30 a 5.530 filas reales sin cambiar el plan elegido).
+- **Confirmado explícitamente:** los índices GIN trigram existentes
+  (`tickets_title_trgm_idx`/`tickets_description_trgm_idx`, paso 6.1)
+  NUNCA se usan para esta consulta, en ningún volumen probado -- son
+  sobre columnas crudas, y la consulta llama a `similarity()` sobre una
+  expresión normalizada dentro del `ORDER BY`, no en un `WHERE ... %`.
+  Un GIN trigram acelera el operador `%` (o `ILIKE`), no una llamada
+  directa a `similarity()` en el `ORDER BY` -- estructuralmente no hay
+  forma de que el planner lo use tal como está escrita la consulta, con
+  o sin un índice sobre la expresión normalizada.
+- **Si hiciera falta acelerar esto en el futuro** (no está justificado
+  hoy): un índice de expresión NO alcanzaría solo -- hace falta además
+  reescribir la consulta para filtrar primero con el operador `%` (o
+  `word_similarity`) contra un umbral, dejando que ESE filtro use el
+  índice, y recién ahí calcular `similarity()` exacto sobre el resultado
+  ya chico para ordenar. Y ahí habría que confirmar contra la
+  documentación de `pg_trgm` si el índice correcto es GIN o GiST para
+  ese patrón (de memoria, GiST es el que soporta ordenamiento por
+  `<->`/KNN; no se tomó como asumido, queda para cuando haga falta de
+  verdad).
+
+**Conclusión, con números concretos:** no hace falta ningún índice nuevo.
+El filtro edificio+categoría+estado+ventana ya reduce el trabajo real de
+`similarity()` a un puñado de filas usando el índice btree que ya
+existe -- confirmado a volumen normal Y a volumen de estrés.
+
+## Alta de tickets con detección de posibles duplicados (paso 7.2)
+
+Conecta `findSimilarTickets()` (paso 7.1) al alta pública de un ticket
+(paso 5.5, `createTicketAction`/`attemptCreateTicket` en
+`src/features/public-form/actions.ts`) -- justo después de que el
+`INSERT` del ticket hace commit, nunca antes (necesita el `id` real) ni
+adentro de esa misma transacción.
+
+**Regla dura del enunciado, verificada en vivo, no solo argumentada:**
+una falla del servicio de similitud NUNCA puede impedir que el alta se
+complete. `detectAndFlagSimilarTickets()`
+(`src/features/tickets/detect-similar-tickets-on-create.ts`) envuelve
+TODO su cuerpo en un try/catch que loguea (`console.error`) y devuelve
+`{checked: false}` -- nunca re-lanza. Se llama, además, DESPUÉS de que
+la transacción del ticket ya cerró (no adentro): dos capas de la misma
+garantía, no una sola. Probado con una falla forzada REAL (no solo un
+mock aislado): se pisó temporalmente el `findCandidates` inyectado en el
+call site real de `attemptCreateTicket` para que tirara una excepción
+siempre, se envió un reclamo real por el formulario público (navegador
+real, Playwright, contra el dev server), y:
+- El vecino vio la pantalla de éxito normal, con su código real
+  (`TC-2026-1773`).
+- El log del servidor (`(.next/dev/logs/next-development.log`) registró
+  el error real: `"[detectAndFlagSimilarTickets] Falló la detección de
+  posibles duplicados para el ticket bdd18baa-...: Error: FALLO FORZADO
+  -- verificación 7.2"`.
+- La base confirma el ticket creado (`status: "new"`), sin ninguna fila
+  en `ticket_similarity_candidates` ni ningún evento
+  `similar_ticket_detected` -- el catch cortó ANTES de escribir nada,
+  sin dejar un estado a medias.
+El cambio temporal se revirtió apenas terminó la prueba (confirmado con
+`git diff` antes de seguir) -- el código que queda en el repo nunca tuvo
+la inyección de falla.
+
+**Tabla nueva (`ticket_similarity_candidates`), no una columna en
+`tickets` -- decisión de este paso.** El enunciado pide soportar más de
+un candidato por ticket (el cluster real del ascensor del 7.1 ya prueba
+que un ticket nuevo puede matchear con hasta 3 a la vez) y un estado de
+revisión POR CANDIDATO (`pending`/`grouped`/`discarded`, editable en el
+7.3) -- una columna en `tickets` solo alcanza para un candidato y un
+estado, se queda corta el día uno. La tabla nueva referencia DOS
+`tickets` a la vez (el nuevo -- `ticket_id` -- y el candidato existente
+-- `candidate_ticket_id`), así que lleva su propia `organization_id`
+denormalizada y DOS FK compuestas hacia `tickets(id, organization_id)`,
+mismo patrón que exige CLAUDE.md > Integridad entre organizaciones.
+`similarity` es `real` (float4), el mismo tipo que devuelve
+`similarity()` de Postgres, sin redondear. Lleva `updated_at` (con
+trigger `set_updated_at`) y `deleted_at` -- NO es append-only como
+`ticket_events`, el 7.3 sí muta `status` -- mismo criterio ya documentado
+para `notifications.read_at` frente a `ticket_events`.
+
+**Migraciones reales aplicadas** (`npm run db:generate` +
+`npm run db:migrate`, contra la base de desarrollo real):
+
+```sql
+-- 0023_sloppy_korg.sql
+CREATE TYPE "public"."ticket_similarity_status" AS ENUM('pending', 'grouped', 'discarded');
+CREATE TABLE "ticket_similarity_candidates" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"organization_id" uuid NOT NULL,
+	"ticket_id" uuid NOT NULL,
+	"candidate_ticket_id" uuid NOT NULL,
+	"similarity" real NOT NULL,
+	"status" "ticket_similarity_status" DEFAULT 'pending' NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"deleted_at" timestamp with time zone,
+	CONSTRAINT "ticket_similarity_candidates_ticket_candidate_unique" UNIQUE("ticket_id","candidate_ticket_id"),
+	CONSTRAINT "ticket_similarity_candidates_not_self" CHECK ("ticket_id" != "candidate_ticket_id"),
+	CONSTRAINT "ticket_similarity_candidates_similarity_range" CHECK ("similarity" >= 0 and "similarity" <= 1)
+);
+ALTER TABLE "ticket_similarity_candidates" ENABLE ROW LEVEL SECURITY;
+-- + 3 FK (organization_id simple; ticket_id y candidate_ticket_id compuestas hacia tickets(id, organization_id))
+-- + índice parcial (organization_id) WHERE status = 'pending'
+-- + policy deny_anon_authenticated (RESTRICTIVE)
+
+-- 0024_ticket_similarity_candidates_updated_at_trigger.sql (custom)
+CREATE TRIGGER set_updated_at
+BEFORE UPDATE ON "ticket_similarity_candidates"
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
+-- 0025_wet_luminals.sql
+ALTER TYPE "public"."ticket_event_type" ADD VALUE 'similar_ticket_detected';
+```
+
+**Corrección de rumbo sobre el UNIQUE de arriba (migración 0026, aplicada
+después de un review, antes del primer commit del paso).** La 0023
+original creaba `UNIQUE("ticket_id","candidate_ticket_id")` como
+CONSTRAINT de tabla -- inconsistente con la convención ya congelada del
+proyecto (ver `people_organization_id_phone_e164_unique` en people.ts, o
+el slug/code_prefix de buildings.ts): toda unicidad que compite con
+`deleted_at` tiene que ser un ÍNDICE único PARCIAL (`WHERE deleted_at IS
+NULL`), nunca una CONSTRAINT plana -- Postgres no permite `WHERE` en una
+UNIQUE CONSTRAINT, solo en un índice. Con la constraint plana, una fila
+soft-borrada seguía bloqueando reinsertar el mismo par (ticket,
+candidato) para siempre, exactamente el bug que la convención existe
+para evitar. No se editó la migración 0023 ya aplicada (rompería el
+historial de Drizzle -- el hash ya quedó registrado en
+`__drizzle_migrations`); se corrigió el schema
+(`ticket-similarity-candidates.ts`: `unique(...)` ->
+`uniqueIndex(...).where(sql\`${t.deletedAt} is null\`)`) y se generó una
+migración nueva:
+
+```sql
+-- 0026_damp_grim_reaper.sql
+ALTER TABLE "ticket_similarity_candidates" DROP CONSTRAINT "ticket_similarity_candidates_ticket_candidate_unique";
+CREATE UNIQUE INDEX "ticket_similarity_candidates_ticket_candidate_unique" ON "ticket_similarity_candidates" USING btree ("ticket_id","candidate_ticket_id") WHERE "ticket_similarity_candidates"."deleted_at" is null;
+```
+
+Confirmado contra `pg_indexes` después de migrar: el índice real dice
+`... WHERE (deleted_at IS NULL)`. Confirmado contra `pg_constraint`: ya
+no existe ninguna constraint tipo `u` (unique) con ese nombre, solo el
+índice. Probado con inserts reales: una fila soft-borrada con un par
+(ticket, candidato) NO bloquea insertar una fila ACTIVA con el mismo
+par (se permite); dos filas ACTIVAS con el mismo par sí chocan
+(`error 23505`, `constraint_name:
+"ticket_similarity_candidates_ticket_candidate_unique"`) -- exactamente
+el comportamiento que pide la convención.
+
+Verificado después de migrar (no asumido): RLS habilitado, la policy
+`deny_anon_authenticated` presente, el trigger `set_updated_at` presente,
+y CERO grants a `anon`/`authenticated` (el `ALTER DEFAULT PRIVILEGES`
+del paso inicial de RLS ya cubrió esta tabla nueva sola, sin necesitar un
+REVOKE manual -- ver CLAUDE.md > Políticas RLS).
+
+**Un evento por candidato en `ticket_events`, no un evento resumen** --
+mismo criterio que `attachment_added` (uno por archivo) y las acciones
+masivas del paso 6.5 ("uno por reclamo actualizado, nunca un evento
+resumen"). `type: "similar_ticket_detected"`, `actorType: "system"`
+(primer escritor real de ese valor del enum -- existía desde antes en
+`ticket_event_actor_type`, sin ningún evento que lo usara). Payload:
+`{candidateTicketId, candidatePublicCode, similarity}`.
+`describeTicketEvent()` (paso 6.3) tiene un caso nuevo: headline
+`"Posible duplicado detectado: {código}"`, detail `"{%} de similitud con
+este reclamo."` -- mismo patrón que el resto de los ocho tipos
+(`ticket-event-description.ts`), con su propio fallback si el payload no
+matchea el schema de Zod.
+
+**Comportamiento silencioso sin candidatos sobre el umbral** -- pedido
+explícito del enunciado: ni fila en `ticket_similarity_candidates` ni
+evento en `ticket_events`. Un "0 duplicados encontrados" sería ruido en
+la línea de tiempo de la enorme mayoría de los reclamos, que no son
+duplicados de nada.
+
+**Verificado en las dos direcciones, con la Server Action real** (no
+invocando `findSimilarTickets()` directo -- formulario público real,
+navegador real vía Playwright, contra `/r/[token]` de Torre Central):
+
+- **Positivo:** dos reclamos reales enviados con texto CASI IDÉNTICO
+  (`TC-2026-1770` y, 23 segundos después, `TC-2026-1771`) -- el segundo
+  detectó al primero con `similarity: 1` (texto idéntico), quedó una fila
+  en `ticket_similarity_candidates` (`status: "pending"`) y un evento
+  `similar_ticket_detected` con el payload completo y correcto.
+- **Hallazgo real, no un bug:** el intento original de probar esto contra
+  un ticket del CLUSTER DEL SEED (`TC-2026-0001`, paso 7.1) no detectó
+  nada -- no por un error de la detección, sino porque los `reported_at`
+  fijos del seed (calculados como "hace N horas" en el momento en que se
+  corrió el seed, hace varios días de calendario reales) ya quedaron
+  fuera de la ventana de 72hs respecto de "ahora". Ventana funcionando
+  correctamente; el dato de referencia había envejecido.
+- **Negativo:** un tercer reclamo real (`TC-2026-1772`), mismo
+  edificio+categoría+ventana que los dos anteriores, con texto SIN
+  relación temática ("se rompió el portón de la cochera") -- cero filas
+  en `ticket_similarity_candidates`, cero eventos de similitud, pese a
+  compartir edificio/categoría/ventana con dos tickets genuinamente
+  similares entre sí. Confirma que el umbral filtra de verdad, no que
+  "cualquier cosa en la ventana" se marca.
 
 ## Reglas de seguridad (no negociables)
 

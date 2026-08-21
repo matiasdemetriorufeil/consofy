@@ -21,6 +21,16 @@ export const ticketEventType = pgEnum("ticket_event_type", [
   "attachment_added",
   "merged_into_incident",
   "whatsapp_handoff_opened",
+  // Paso 7.2 -- lo escribe findSimilarTickets al detectar UN candidato con
+  // similarity() >= al umbral configurado (0.20 por default, ver el
+  // reporte del paso), disparado justo después del alta del ticket (paso
+  // 5.5). UNO por candidato, no un evento resumen -- mismo criterio que
+  // attachment_added (uno por archivo) y las acciones masivas del paso
+  // 6.5 ("uno por reclamo actualizado, nunca un evento resumen").
+  // actorType siempre "system" -- primer escritor real de ese valor del
+  // enum (existía desde antes en ticket_event_actor_type, sin ningún
+  // evento que lo usara todavía).
+  "similar_ticket_detected",
 ]);
 
 export const ticketEventActorType = pgEnum("ticket_event_actor_type", [

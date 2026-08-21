@@ -131,6 +131,32 @@ describe("describeTicketEvent", () => {
     expect(result.headline).not.toMatch(/envió|avisó|notificó|informó/i);
   });
 
+  it("similar_ticket_detected: nombra el código del candidato y el % de similitud", () => {
+    const result = describeTicketEvent({
+      type: "similar_ticket_detected",
+      actorType: "system",
+      actorLabel: "Sistema",
+      payload: {
+        candidateTicketId: "a1111111-1111-4111-8111-111111111111",
+        candidatePublicCode: "TC-2026-0001",
+        similarity: 0.3105,
+      },
+    });
+    expect(result.headline).toBe("Posible duplicado detectado: TC-2026-0001");
+    expect(result.detail).toBe("31% de similitud con este reclamo.");
+  });
+
+  it("similar_ticket_detected con payload inválido: cae a un texto genérico, no rompe", () => {
+    const result = describeTicketEvent({
+      type: "similar_ticket_detected",
+      actorType: "system",
+      actorLabel: "Sistema",
+      payload: { algoRaro: true },
+    });
+    expect(result.headline).toBe("Se detectó un posible reclamo duplicado");
+    expect(result.detail).toBeNull();
+  });
+
   it("evento sin payload en absoluto (columna con su default {}): no rompe ningún tipo", () => {
     const types = [
       "created",
@@ -141,6 +167,7 @@ describe("describeTicketEvent", () => {
       "attachment_added",
       "merged_into_incident",
       "whatsapp_handoff_opened",
+      "similar_ticket_detected",
     ] as const;
     for (const type of types) {
       expect(() =>

@@ -162,6 +162,34 @@
       "when": 1787169207427,
       "tag": "0022_enable_pg_trgm_for_ticket_search",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1787334812176,
+      "tag": "0023_sloppy_korg",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1787334833202,
+      "tag": "0024_ticket_similarity_candidates_updated_at_trigger",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1787334951669,
+      "tag": "0025_wet_luminals",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1787336596043,
+      "tag": "0026_damp_grim_reaper",
+      "breakpoints": true
     }
   ]
 }

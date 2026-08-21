@@ -1,0 +1,1 @@
+ALTER TYPE "public"."ticket_event_type" ADD VALUE 'similar_ticket_detected';
