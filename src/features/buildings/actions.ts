@@ -21,6 +21,10 @@ import {
 } from "./building-schema";
 import { findBuildingByCodePrefix, getActiveBuildings } from "./queries";
 import { SELECTED_BUILDING_COOKIE } from "./selected-building";
+import {
+  updateSimilaritySettingsSchema,
+  type UpdateSimilaritySettingsResult,
+} from "./similarity-settings-schema";
 
 // authorizedAction() (src/lib/auth.ts): cambiar el edificio seleccionado
 // es una Server Action invocable por HTTP directo como cualquier otra --
@@ -390,5 +394,54 @@ export const checkCodePrefixAvailableAction = authorizedAction(
     return conflict
       ? { available: false, usedBy: conflict.name }
       : { available: true };
+  },
+);
+
+// Configuración de la heurística de duplicados (paso 7.6) -- POR
+// EDIFICIO, ver similarity-config.ts para dónde se leen estos dos
+// valores. Un cambio acá NUNCA recalcula candidatos ya detectados
+// (agrupados, descartados o pendientes) -- solo afecta la detección que
+// corra a partir del PRÓXIMO ticket que se cargue en este edificio;
+// `ticket_similarity_candidates` no guarda ninguna referencia a la
+// configuración vigente al momento de detectar, así que no hay nada que
+// re-evaluar ni backfillear.
+//
+// UPDATE directo, sin compare-and-swap: a diferencia de
+// changeTicketStatusAction (6.4), acá no hay ningún concepto de
+// "transición inválida" entre dos configuraciones -- cualquier par
+// (ventana, umbral) dentro de rango es válido viniendo de cualquier otro,
+// mismo criterio ya usado para changeTicketPriorityAction.
+export const updateSimilaritySettingsAction = authorizedAction(
+  async (context, input: unknown): Promise<UpdateSimilaritySettingsResult> => {
+    const parsed = updateSimilaritySettingsSchema.safeParse(input);
+    if (!parsed.success) {
+      return {
+        ok: false,
+        error: parsed.error.issues[0]?.message ?? "Datos inválidos.",
+      };
+    }
+    const { buildingId, windowHours, threshold } = parsed.data;
+
+    const [updated] = await db
+      .update(buildings)
+      .set({
+        similarityWindowHours: windowHours,
+        similarityThreshold: threshold,
+      })
+      .where(
+        and(
+          eq(buildings.id, buildingId),
+          eq(buildings.organizationId, context.organization.id),
+          isNull(buildings.deletedAt),
+        ),
+      )
+      .returning({ id: buildings.id });
+
+    if (!updated) {
+      return { ok: false, error: "No encontramos ese edificio." };
+    }
+
+    revalidatePath(`/panel/buildings/${buildingId}`, "layout");
+    return { ok: true };
   },
 );

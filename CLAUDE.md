@@ -3355,6 +3355,156 @@ match en el DOM (la tarjeta de Acciones siempre se renderiza después de
 cualquier banner) -- error del script de verificación, no del código de
 la aplicación ni de ningún archivo de este repositorio.
 
+## Configuración de la heurística de duplicados, por edificio (paso 7.6)
+
+Último paso de la etapa 7: expone editables desde el panel los dos
+valores que hasta ahora eran constantes hardcodeadas de la detección de
+posibles duplicados.
+
+**Dónde estaban hardcodeados, verificado antes de tocar nada (no
+asumido):** `DEFAULT_SIMILAR_TICKETS_WINDOW_HOURS = 72`
+(`src/features/tickets/find-similar-tickets.ts`, paso 7.1) y
+`DEFAULT_SIMILARITY_THRESHOLD = 0.2`
+(`src/features/tickets/detect-similar-tickets-on-create.ts`, paso 7.2).
+`findSimilarTickets()` YA recibía `buildingId` de forma directa (parte de
+`FindSimilarTicketsParams`) -- no hizo falta ningún ajuste a los call
+sites existentes para que pudiera leer la config real, más allá de
+agregarle la consulta.
+
+**Por qué en `buildings`, no en una tabla nueva:** la configuración es POR
+EDIFICIO (decisión explícita del enunciado), coherente con que
+`findSimilarTickets` ya filtra por `building_id` -- agregarla como
+columnas de la misma fila que ya representa "este edificio" es la opción
+más directa, sin joins ni tabla puente para una relación 1 a 1.
+
+**Columnas nuevas** (`src/db/schema/buildings.ts`):
+`similarity_window_hours` (integer, default 72) y `similarity_threshold`
+(real, default 0.2) -- los MISMOS valores que ya regían como constantes,
+para que ningún edificio existente cambie de comportamiento al aplicar la
+migración. Dos CHECK nuevos, mismos rangos que valida Zod (ver abajo):
+`similarity_window_hours BETWEEN 1 AND 720` y
+`similarity_threshold > 0 AND similarity_threshold <= 1`.
+
+**Un cambio de configuración es SOLO hacia adelante -- decisión explícita
+del enunciado, no reinterpretada.** `ticket_similarity_candidates` no
+guarda ninguna referencia a la config vigente al momento de detectar, así
+que no hay nada que recalcular ni backfillear: un candidato ya escrito
+(agrupado, descartado o pendiente) nunca se vuelve a evaluar. Solo afecta
+la detección que corra a partir del PRÓXIMO ticket que se cargue en ESE
+edificio.
+
+**Migración real aplicada:**
+
+```sql
+-- 0030_soft_johnny_storm.sql
+ALTER TABLE "buildings" ADD COLUMN "similarity_window_hours" integer DEFAULT 72 NOT NULL;
+ALTER TABLE "buildings" ADD COLUMN "similarity_threshold" real DEFAULT 0.2 NOT NULL;
+ALTER TABLE "buildings" ADD CONSTRAINT "buildings_similarity_window_hours_range" CHECK ("buildings"."similarity_window_hours" >= 1 and "buildings"."similarity_window_hours" <= 720);
+ALTER TABLE "buildings" ADD CONSTRAINT "buildings_similarity_threshold_range" CHECK ("buildings"."similarity_threshold" > 0 and "buildings"."similarity_threshold" <= 1);
+```
+
+**Único lugar que lee estos dos valores de la base:**
+`getBuildingSimilarityConfig()` (`src/features/tickets/similarity-config.ts`,
+nuevo) -- una sola consulta que devuelve `{windowHours, threshold}`.
+`findSimilarTickets()` la llama para el default de `windowHours` cuando el
+caller no fuerza un valor explícito (el parámetro `windowHours` sigue
+existiendo, mismo motivo del 7.1: poder fijar un valor concreto al
+testear contra timestamps reales); `detectAndFlagSimilarTickets()` la
+llama por separado para el default de `threshold`. **Se llaman por
+separado (dos consultas, no una compartida)** a propósito: cada función
+usa solo el campo de su propia responsabilidad --
+`findSimilarTickets` nunca filtró por umbral (devuelve TODOS los
+candidatos con su score, sin cortar; el corte es trabajo de
+`detectAndFlagSimilarTickets`) y cambiar ese contrato para que reciba el
+umbral hubiera sido un cambio de alcance mayor al pedido. El costo real
+(una consulta PK extra, indexada) es despreciable frente a los
+round-trips ya medidos en el resto del proyecto (ver CLAUDE.md >
+Separación dev/producción).
+
+**Extremos del umbral -- criterio elegido, no el default de "cerrado en
+los dos lados":** rango `(0, 1]`, no `[0, 1]`. **Cero bloqueado**:
+`similarity()` de pg_trgm siempre es `>= 0`, así que un umbral de 0
+matchearía CUALQUIER ticket del edificio+categoría+ventana -- rompe el
+propósito completo de la heurística, inundando de falsos positivos.
+**Uno permitido**, aunque sea un extremo: sigue siendo una elección válida
+y no degenerada (un administrador que solo quiera flaggear texto
+prácticamente idéntico, ej. copy-paste), a diferencia de 0.
+
+**Ventana -- 1 a 720 horas (30 días):** no puede ser 0 ni negativa (una
+ventana de cero horas no compara contra nada). El máximo (720h/30 días) es
+criterio propio: un patrón que se repite más espaciado que un mes deja de
+ser "el mismo hecho duplicado" para pasar a ser un problema recurrente,
+que la agrupación manual de la etapa 7 (paso 7.4) ya cubre mejor que
+seguir ensanchando la ventana de similitud.
+
+**UI: `SimilaritySettingsCard`** (`src/features/buildings/components/`),
+montada en el LAYOUT de `/panel/buildings/[buildingId]` (visible en las
+seis pestañas, no en una sola) -- no se agregó una pestaña
+"Configuración" nueva: no existía ninguna antes de este paso (la única
+"pantalla de configuración de un edificio" hoy es el diálogo "Editar
+edificio", paso 4.1/4.2), y esta configuración es del edificio EN SÍ, no
+de un tab puntual (Reclamos, Documentos, etc.) -- igual que el
+encabezado, tiene sentido verla sin importar en qué pestaña se esté
+parado. Muestra los valores ACTUALES al cargar (props desde
+`getBuildingSimilarityConfig()`, la MISMA función que usa la detección
+real -- no una segunda consulta casi idéntica), nunca un formulario
+vacío. Dos `<Input type="number">` simples (no un slider): no hay ningún
+otro control de ese tipo en el proyecto todavía, y agregar el primitivo de
+Radix (`radix-ui` ya trae `Slider`, así que no habría sido una dependencia
+nueva) solo para esta pantalla no se justificaba frente a dos inputs
+numéricos con validación de rango.
+
+**Server Action:** `updateSimilaritySettingsAction`
+(`src/features/buildings/actions.ts`) -- `authorizedAction()`, valida con
+`updateSimilaritySettingsSchema`
+(`src/features/buildings/similarity-settings-schema.ts`, límites
+importados de `similarity-config.ts` para no duplicar los números mágicos
+1/720/0/1), UPDATE directo sin compare-and-swap (no hay concepto de
+"transición inválida" entre dos configuraciones, mismo criterio que
+`changeTicketPriorityAction`).
+
+**Verificado con datos reales, formulario público + panel real
+(Playwright, admin de prueba dedicado), en dos edificios reales de la
+misma organización -- Torre Central (el que se reconfigura) y Los Álamos
+(control, queda en el default 72h/0.20 todo el tiempo):**
+
+- **Ventana por edificio:** Torre Central reconfigurado a 1 hora (vía el
+  botón real "Guardar configuración"). Un par de tickets de Plomería
+  (`TC-2026-1797`/`TC-2026-1798`, texto casi idéntico) con
+  `reported_at` separado ~2 horas (el primero backdateado por SQL, mismo
+  método ya usado en la verificación del propio 7.1 para controlar
+  timestamps reales) -- **0 candidatos** detectados (2h > 1h). El MISMO
+  patrón exacto en Los Álamos (`LA-2026-1270`/`LA-2026-1271`, sin tocar su
+  config, sigue en 72h) -- **1 candidato, 91.2% de similitud** -- confirma
+  que el corte es por edificio, no global.
+- **Umbral por edificio:** Torre Central en 0.9. Un par de Electricidad
+  (`TC-2026-1799`/`TC-2026-1800`) con score real 0.605505 (confirmado
+  llamando a `findSimilarTickets` directo, sin el filtro de umbral) --
+  **0 candidatos** persistidos (0.605 < 0.9). El MISMO texto exacto en Los
+  Álamos (`LA-2026-1272`/`LA-2026-1273`, umbral default 0.20) -- **1
+  candidato, mismo score 0.605505** -- confirma que el umbral corta antes
+  de escribir la fila, por edificio.
+- **Un cambio de config no toca candidatos ya detectados:** el candidato
+  de un par de Ascensores creado ANTES de cualquier cambio
+  (`TC-2026-1795`/`TC-2026-1796`, id `1d8ee460-52f2-4c4e-99f0-1aa42c72fe85`,
+  0.85567, `pending`) se releyó DESPUÉS de reconfigurar Torre Central a
+  1h/0.9 -- mismo id, mismo score, mismo status, sin ningún cambio.
+- **Valores fuera de rango, rechazados antes de tocar la base:** umbral
+  `1.5` -> rechazado con `"Como máximo 1."` (toast real); ventana `-5` ->
+  rechazado con `"Como mínimo 1 hora."` -- confirmado en los dos casos que
+  la fila de `buildings` en la base NO cambió (releída después de cada
+  intento, con los valores previos intactos).
+
+Torre Central se restauró a 72h/0.20 (sus valores originales) al
+terminar la verificación -- es un edificio real y persistente del
+proyecto, no un dato de prueba descartable, así que no se lo deja en un
+estado distinto del que tenía antes de este paso.
+
+**Limpieza:** los 10 tickets sintéticos (Torre Central + Los Álamos), sus
+3 candidatos de similitud y las 10 personas creadas por el formulario
+público: soft-borrados. Cuenta de prueba (`prueba-7-6-...@example.com`)
+eliminada por completo (Auth + `app_users`).
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.

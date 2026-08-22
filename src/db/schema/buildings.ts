@@ -3,7 +3,9 @@ import {
   boolean,
   check,
   index,
+  integer,
   pgTable,
+  real,
   text,
   unique,
   uniqueIndex,
@@ -40,6 +42,39 @@ export const buildings = pgTable(
     adminWhatsappE164: text("admin_whatsapp_e164").notNull(),
     notes: text("notes"),
     active: boolean("active").notNull().default(true),
+    // Detección de posibles duplicados (paso 7.6) -- POR EDIFICIO, no
+    // global, coherente con que findSimilarTickets (paso 7.1) ya filtra
+    // por building_id: dos edificios pueden tener volúmenes/patrones de
+    // reclamos muy distintos, así que la MISMA sensibilidad no
+    // necesariamente le sirve a los dos. Antes de este paso, los dos
+    // valores vivían hardcodeados como constantes de módulo --
+    // `DEFAULT_SIMILAR_TICKETS_WINDOW_HOURS` (72,
+    // find-similar-tickets.ts, paso 7.1) y `DEFAULT_SIMILARITY_THRESHOLD`
+    // (0.20, detect-similar-tickets-on-create.ts, paso 7.2) -- ver
+    // src/features/tickets/similarity-config.ts para dónde viven ahora
+    // esos mismos valores como default de columna (no se cambia el
+    // comportamiento de ningún edificio existente al migrar).
+    //
+    // Un cambio acá NO recalcula candidatos ya detectados (agrupados,
+    // descartados o pendientes) -- decisión explícita del enunciado: solo
+    // afecta la PRÓXIMA detección, la que corra cuando se cargue el
+    // próximo ticket. `ticket_similarity_candidates` no tiene ninguna
+    // referencia a estos valores ni una columna "con qué config se
+    // detectó esto" -- no hace falta, un candidato ya escrito no se
+    // vuelve a evaluar nunca.
+    //
+    // Ventana en horas -- entero, no un intervalo de Postgres: se usa tal
+    // cual en una multiplicación (`windowHours * 3600`, ver
+    // find-similar-tickets.ts) del lado de la aplicación, no en SQL
+    // directo, así que no hay ninguna ventaja en un tipo INTERVAL acá.
+    similarityWindowHours: integer("similarity_window_hours")
+      .notNull()
+      .default(72),
+    // real (float4), mismo tipo que ticket_similarity_candidates.similarity
+    // (la salida cruda de pg_trgm similarity()) -- comparar un umbral
+    // contra ese valor con el mismo tipo evita cualquier fricción de
+    // conversión.
+    similarityThreshold: real("similarity_threshold").notNull().default(0.2),
     ...timestamps(),
   },
   (t) => [
@@ -87,6 +122,31 @@ export const buildings = pgTable(
       // de E.164. Con \\+ el string en runtime sí contiene \+.
       "buildings_admin_whatsapp_e164_format",
       sql`${t.adminWhatsappE164} ~ '^\\+[1-9][0-9]{1,14}$'`,
+    ),
+    // Paso 7.6 -- mismos rangos que valida similarity-settings-schema.ts
+    // del lado de la aplicación (Zod), acá como defensa en profundidad
+    // (mismo criterio que ticket_similarity_candidates_similarity_range).
+    // 1 a 720 horas (30 días): no puede ser 0 ni negativa (una ventana de
+    // cero horas no compara contra nada), y un tope de 30 días porque un
+    // patrón que se repite más espaciado que eso deja de ser "el mismo
+    // hecho duplicado" para pasar a ser un problema recurrente (que ya
+    // cubre mejor la agrupación manual de la etapa 7, no una ventana de
+    // similitud cada vez más ancha).
+    check(
+      "buildings_similarity_window_hours_range",
+      sql`${t.similarityWindowHours} >= 1 and ${t.similarityWindowHours} <= 720`,
+    ),
+    // (0, 1] -- CERO bloqueado a propósito (similarity() siempre es >= 0,
+    // así que un umbral de 0 matchearía CUALQUIER ticket del mismo
+    // edificio+categoría+ventana, inundando la detección de falsos
+    // positivos sin aportar nada). UNO permitido a propósito, aunque sea
+    // un extremo: es una elección válida y no degenerada para un
+    // administrador que solo quiera flaggear texto prácticamente idéntico
+    // (copy-paste), a diferencia de 0 que rompe el propósito completo de
+    // la heurística.
+    check(
+      "buildings_similarity_threshold_range",
+      sql`${t.similarityThreshold} > 0 and ${t.similarityThreshold} <= 1`,
     ),
     denyAnonAuthenticated(),
   ],

@@ -4,15 +4,21 @@ import { db } from "@/db";
 import { ticketEvents, ticketSimilarityCandidates } from "@/db/schema";
 
 import { findSimilarTickets } from "./find-similar-tickets";
+import {
+  DEFAULT_SIMILARITY_THRESHOLD,
+  getBuildingSimilarityConfig,
+} from "./similarity-config";
 
 // Umbral de similitud (paso 7.2): decisión tomada a partir de los números
 // reales del paso 7.1 (los 6 pares del cluster del ascensor dieron entre
 // 0.2073 y 0.3654; el único control negativo probado dio 0.1853) -- 0.20
-// como default CONFIGURABLE, no un corte final. El paso 7.6 lo va a
-// exponer editable desde el panel (probablemente por organización); hasta
-// que exista esa pantalla, este constante es el único lugar que hay que
-// tocar para ajustarlo.
-export const DEFAULT_SIMILARITY_THRESHOLD = 0.2;
+// como default. Paso 7.6: dejó de ser una constante hardcodeada -- ahora
+// vive POR EDIFICIO (`buildings.similarity_threshold`, con 0.20 como
+// default de columna, ver similarity-config.ts). `DEFAULT_SIMILARITY_THRESHOLD`
+// re-exportada acá (antes definida en este archivo) para no romper nada
+// que ya la importara desde acá -- sigue sirviendo de fallback si el
+// edificio no resolviera.
+export { DEFAULT_SIMILARITY_THRESHOLD };
 
 export type DetectSimilarTicketsInput = {
   organizationId: string;
@@ -47,10 +53,25 @@ export async function detectAndFlagSimilarTickets(
     findCandidates?: typeof findSimilarTickets;
   },
 ): Promise<DetectSimilarTicketsResult> {
-  const threshold = options?.threshold ?? DEFAULT_SIMILARITY_THRESHOLD;
   const findCandidates = options?.findCandidates ?? findSimilarTickets;
 
   try {
+    // Paso 7.6 -- si el caller no fuerza un umbral explícito (los tests de
+    // este archivo sí lo hacen, para no depender de la config real de
+    // ningún edificio), se lee el umbral CONFIGURADO para este edificio
+    // real -- ya no la constante hardcodeada. Adentro del try/catch: una
+    // falla acá (ej. la base no responde) tiene que caer en la MISMA regla
+    // dura de "nunca impedir el alta del ticket" que ya protege al resto
+    // de esta función, no escapar el try/catch por estar "antes" de él.
+    const threshold =
+      options?.threshold ??
+      (
+        await getBuildingSimilarityConfig(
+          input.organizationId,
+          input.buildingId,
+        )
+      ).threshold;
+
     const candidates = await findCandidates(input.organizationId, {
       buildingId: input.buildingId,
       categoryId: input.categoryId,

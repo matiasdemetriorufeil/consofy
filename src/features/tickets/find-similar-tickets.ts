@@ -11,6 +11,7 @@ import {
   PLAIN_CHARS,
 } from "./normalize-ticket-text";
 import { PENDING_STATUSES, type Status } from "./queries";
+import { getBuildingSimilarityConfig } from "./similarity-config";
 
 // Detección de reclamos repetidos (paso 7.1) -- ESTE paso construye
 // solamente el servicio, testeable de forma aislada; no se conecta
@@ -30,13 +31,16 @@ import { PENDING_STATUSES, type Status } from "./queries";
 // aislada"): no hace falta insertar un ticket real primero para verificar
 // qué candidatos devuelve.
 
-// 72 horas, no un número redondo elegido al azar -- mismo valor ya usado
-// en el seed para armar el cluster de 4 reclamos del ascensor
-// ("dentro de una ventana de 72hs", ver src/db/seed.ts) y el que pide el
-// enunciado del paso como default. Configurable por parámetro para que un
-// futuro ajuste de sensibilidad (paso 7.2 o más adelante) no dependa de
-// tocar esta función.
-export const DEFAULT_SIMILAR_TICKETS_WINDOW_HOURS = 72;
+// Paso 7.6 -- la ventana default (72 horas, mismo valor ya usado en el
+// seed para armar el cluster de 4 reclamos del ascensor, ver
+// src/db/seed.ts) dejó de ser una constante hardcodeada acá: ahora vive
+// por EDIFICIO (`buildings.similarity_window_hours`, con 72 como default
+// de columna -- ningún edificio existente cambia de comportamiento al
+// migrar). `DEFAULT_SIMILARITY_WINDOW_HOURS` (re-exportada de
+// similarity-config.ts) sigue existiendo como fallback defensivo si el
+// edificio no resolviera, no como el valor real que usa la mayoría de las
+// llamadas.
+export { DEFAULT_SIMILARITY_WINDOW_HOURS as DEFAULT_SIMILAR_TICKETS_WINDOW_HOURS } from "./similarity-config";
 
 // normalizeTicketText/ACCENTED_CHARS/PLAIN_CHARS viven en
 // normalize-ticket-text.ts (archivo aparte, sin `import "server-only"`) --
@@ -138,8 +142,18 @@ export async function findSimilarTickets(
   organizationId: string,
   params: FindSimilarTicketsParams,
 ): Promise<SimilarTicketCandidate[]> {
+  // Paso 7.6 -- si el caller no fuerza una ventana explícita (ver
+  // FindSimilarTicketsParams.windowHours: sigue existiendo para poder
+  // fijar un valor concreto al testear en aislamiento contra timestamps
+  // reales del seed, mismo motivo del paso 7.1), se lee la ventana
+  // CONFIGURADA para este edificio real -- ya no la constante hardcodeada.
+  // `organizationId`/`params.buildingId` siempre resuelven a una fila real
+  // en el único caller de verdad (detectAndFlagSimilarTickets, paso 7.2,
+  // que ya validó el edificio antes de llegar acá).
   const windowHours =
-    params.windowHours ?? DEFAULT_SIMILAR_TICKETS_WINDOW_HOURS;
+    params.windowHours ??
+    (await getBuildingSimilarityConfig(organizationId, params.buildingId))
+      .windowHours;
   const referenceReportedAt = params.referenceReportedAt ?? new Date();
   // .toISOString(), no el Date crudo interpolado en el fragmento sql`` --
   // mismo motivo ya documentado en getAttentionTickets (queries.ts): el

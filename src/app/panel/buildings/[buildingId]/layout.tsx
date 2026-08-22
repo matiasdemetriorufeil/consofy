@@ -3,7 +3,9 @@ import { z } from "zod";
 
 import { BuildingDetailHeader } from "@/features/buildings/components/building-detail-header";
 import { BuildingDetailTabs } from "@/features/buildings/components/building-detail-tabs";
+import { SimilaritySettingsCard } from "@/features/buildings/components/similarity-settings-card";
 import { getBuildingDetail } from "@/features/buildings/queries";
+import { getBuildingSimilarityConfig } from "@/features/tickets/similarity-config";
 import { requireUser } from "@/lib/auth";
 
 // Resuelve y autoriza el edificio UNA sola vez para las cinco pestañas
@@ -46,9 +48,25 @@ export default async function BuildingDetailLayout({
     notFound();
   }
 
+  // Paso 7.6 -- configuración de detección de duplicados, visible en TODAS
+  // las pestañas (es una configuración del edificio, no de una pestaña en
+  // particular). Misma función que usa la detección real
+  // (findSimilarTickets/detectAndFlagSimilarTickets, ver
+  // src/features/tickets/similarity-config.ts) -- un solo lugar que lee
+  // estos dos valores, sin una segunda consulta casi idéntica.
+  const similarityConfig = await getBuildingSimilarityConfig(
+    organization.id,
+    building.id,
+  );
+
   return (
     <div className="flex flex-col gap-6">
       <BuildingDetailHeader building={building} />
+      <SimilaritySettingsCard
+        buildingId={building.id}
+        windowHours={similarityConfig.windowHours}
+        threshold={similarityConfig.threshold}
+      />
       <BuildingDetailTabs buildingId={building.id} />
       {children}
     </div>
