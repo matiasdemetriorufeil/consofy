@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 
 import { db } from "@/db";
 import { ticketEvents, ticketSimilarityCandidates, tickets } from "@/db/schema";
+import { applyIncidentGrouping } from "@/features/incidents/group-tickets-into-incident";
 import { authorizedAction } from "@/lib/auth";
 
 import { toBadgeStatus } from "./status-mapping";
@@ -356,9 +357,18 @@ export const addTicketNoteAction = authorizedAction(
 // uno por su cuenta, a propósito (ver el comentario de la tabla en
 // ticket-similarity-candidates.ts).
 //
-// "Agrupar" en este paso SOLO cambia `status` a "grouped" -- no crea
-// ningún incidente (eso es el paso 7.4, que va a tomar los candidatos ya
-// agrupados como insumo). No hay nada de incidentes en este archivo.
+// "Agrupar" (paso 7.4) además arma/mantiene el incidente detrás del par --
+// ver applyIncidentGrouping() (features/incidents/group-tickets-into-
+// incident.ts) para los cuatro casos (crear, sumarse a uno existente,
+// fusionar dos, o no-op si ya comparten incidente). "Descartar" nunca
+// toca incidentes.
+//
+// TODO adentro de una transacción -- a diferencia de la primera versión
+// de este paso (7.3), que hacía los INSERT/UPDATE sueltos: el caso de
+// fusión puede reasignar MUCHOS tickets a la vez (todos los que
+// apuntaban al incidente perdedor), y no tiene sentido que el candidato
+// quede "grouped" si esa reasignación fallara a mitad de camino, o
+// viceversa.
 //
 // Compare-and-swap contra `status = 'pending'` (mismo criterio que
 // changeTicketStatusAction, paso 6.4): si el candidato ya se resolvió por
@@ -373,96 +383,148 @@ export const resolveSimilarityCandidateAction = authorizedAction(
     }
     const { candidateId, resolution } = parsed.data;
 
-    const [updated] = await db
-      .update(ticketSimilarityCandidates)
-      .set({ status: resolution })
-      .where(
-        and(
-          eq(ticketSimilarityCandidates.id, candidateId),
-          eq(
-            ticketSimilarityCandidates.organizationId,
-            context.organization.id,
+    const result = await db.transaction(async (tx) => {
+      const [updated] = await tx
+        .update(ticketSimilarityCandidates)
+        .set({ status: resolution })
+        .where(
+          and(
+            eq(ticketSimilarityCandidates.id, candidateId),
+            eq(
+              ticketSimilarityCandidates.organizationId,
+              context.organization.id,
+            ),
+            eq(ticketSimilarityCandidates.status, "pending"),
+            isNull(ticketSimilarityCandidates.deletedAt),
           ),
-          eq(ticketSimilarityCandidates.status, "pending"),
-          isNull(ticketSimilarityCandidates.deletedAt),
-        ),
-      )
-      .returning({
-        ticketId: ticketSimilarityCandidates.ticketId,
-        candidateTicketId: ticketSimilarityCandidates.candidateTicketId,
-      });
+        )
+        .returning({
+          ticketId: ticketSimilarityCandidates.ticketId,
+          candidateTicketId: ticketSimilarityCandidates.candidateTicketId,
+        });
 
-    if (!updated) {
-      return {
-        ok: false,
-        error:
-          "Este candidato ya no está pendiente -- recargá la página para ver el estado actual.",
-      };
-    }
+      if (!updated) {
+        return {
+          ok: false as const,
+          error:
+            "Este candidato ya no está pendiente -- recargá la página para ver el estado actual.",
+        };
+      }
 
-    // Los DOS tickets del par, para el evento (necesita el public_code del
-    // OTRO ticket en cada payload) y para revalidar las dos rutas de
-    // detalle -- un solo SELECT con inArray, no dos round-trips.
-    const bothTickets = await db
-      .select({
-        id: tickets.id,
-        publicCode: tickets.publicCode,
-        buildingId: tickets.buildingId,
-      })
-      .from(tickets)
-      .where(
-        and(
-          inArray(tickets.id, [updated.ticketId, updated.candidateTicketId]),
-          eq(tickets.organizationId, context.organization.id),
-        ),
+      // Los DOS tickets del par -- para el evento (necesita el
+      // public_code del OTRO ticket en cada payload), para la agrupación
+      // en incidentes (necesita category_id/incident_id de los dos) y
+      // para revalidar las dos rutas de detalle -- un solo SELECT con
+      // inArray, no varios round-trips.
+      const bothTickets = await tx
+        .select({
+          id: tickets.id,
+          publicCode: tickets.publicCode,
+          buildingId: tickets.buildingId,
+          categoryId: tickets.categoryId,
+          incidentId: tickets.incidentId,
+        })
+        .from(tickets)
+        .where(
+          and(
+            inArray(tickets.id, [updated.ticketId, updated.candidateTicketId]),
+            eq(tickets.organizationId, context.organization.id),
+          ),
+        );
+      const newTicket = bothTickets.find((t) => t.id === updated.ticketId);
+      const oldTicket = bothTickets.find(
+        (t) => t.id === updated.candidateTicketId,
       );
-    const newTicket = bothTickets.find((t) => t.id === updated.ticketId);
-    const oldTicket = bothTickets.find(
-      (t) => t.id === updated.candidateTicketId,
-    );
-    if (!newTicket || !oldTicket) {
-      // No debería pasar (las FK compuestas de ticket_similarity_candidates
-      // garantizan que las dos filas existen en ESTA organización), pero si
-      // pasara, la fila ya quedó resuelta en la base -- no tiene sentido
-      // fingir que la acción falló.
+      if (!newTicket || !oldTicket) {
+        // No debería pasar (las FK compuestas de
+        // ticket_similarity_candidates garantizan que las dos filas
+        // existen en ESTA organización), pero si pasara, la fila ya
+        // quedó resuelta en la base -- no tiene sentido fingir que la
+        // acción falló. `newTicket`/`oldTicket` explícitos en `null` acá
+        // (no ausentes) para que el shape de retorno sea el MISMO en las
+        // dos ramas -- el caller narrowea con un chequeo de null simple,
+        // no con `"prop" in result` (menos confiable contra la inferencia
+        // de tipo de db.transaction()).
+        return {
+          ok: true as const,
+          newTicket: null,
+          oldTicket: null,
+          touchedIncidentIds: [] as string[],
+        };
+      }
+
+      const eventType =
+        resolution === "grouped"
+          ? ("similar_ticket_grouped" as const)
+          : ("similar_ticket_discarded" as const);
+
+      // Un evento en CADA ticket del par -- mismo criterio que
+      // similar_ticket_detected (paso 7.2): cada reclamo tiene que poder
+      // explicar, mirando SOLO su propia línea de tiempo, qué pasó con
+      // esto. Tipado explícito (no inferido de los dos objetos
+      // iniciales): más abajo se le hace `push()` con los eventos de
+      // applyIncidentGrouping(), que usan otros valores del mismo enum
+      // (merged_into_incident/incident_merged).
+      const events: (typeof ticketEvents.$inferInsert)[] = [
+        {
+          organizationId: context.organization.id,
+          ticketId: newTicket.id,
+          type: eventType,
+          actorType: "admin" as const,
+          actorLabel: context.appUser.displayName,
+          payload: {
+            otherTicketId: oldTicket.id,
+            otherPublicCode: oldTicket.publicCode,
+          },
+        },
+        {
+          organizationId: context.organization.id,
+          ticketId: oldTicket.id,
+          type: eventType,
+          actorType: "admin" as const,
+          actorLabel: context.appUser.displayName,
+          payload: {
+            otherTicketId: newTicket.id,
+            otherPublicCode: newTicket.publicCode,
+          },
+        },
+      ];
+
+      let touchedIncidentIds: string[] = [];
+      if (resolution === "grouped") {
+        const grouping = await applyIncidentGrouping(
+          tx,
+          context.organization.id,
+          context.appUser.displayName,
+          newTicket,
+          oldTicket,
+        );
+        events.push(...grouping.events);
+        touchedIncidentIds = grouping.touchedIncidentIds;
+      }
+
+      await tx.insert(ticketEvents).values(events);
+
+      return {
+        ok: true as const,
+        newTicket,
+        oldTicket,
+        touchedIncidentIds,
+      };
+    });
+
+    if (!result.ok) {
+      return result;
+    }
+    if (!result.newTicket || !result.oldTicket) {
       return { ok: true };
     }
 
-    const eventType =
-      resolution === "grouped"
-        ? ("similar_ticket_grouped" as const)
-        : ("similar_ticket_discarded" as const);
-
-    // Un evento en CADA ticket del par -- mismo criterio que
-    // similar_ticket_detected (paso 7.2): cada reclamo tiene que poder
-    // explicar, mirando SOLO su propia línea de tiempo, qué pasó con esto.
-    await db.insert(ticketEvents).values([
-      {
-        organizationId: context.organization.id,
-        ticketId: newTicket.id,
-        type: eventType,
-        actorType: "admin",
-        actorLabel: context.appUser.displayName,
-        payload: {
-          otherTicketId: oldTicket.id,
-          otherPublicCode: oldTicket.publicCode,
-        },
-      },
-      {
-        organizationId: context.organization.id,
-        ticketId: oldTicket.id,
-        type: eventType,
-        actorType: "admin",
-        actorLabel: context.appUser.displayName,
-        payload: {
-          otherTicketId: newTicket.id,
-          otherPublicCode: newTicket.publicCode,
-        },
-      },
-    ]);
-
-    revalidateTicketPaths(newTicket.id, newTicket.buildingId);
-    revalidateTicketPaths(oldTicket.id, oldTicket.buildingId);
+    revalidateTicketPaths(result.newTicket.id, result.newTicket.buildingId);
+    revalidateTicketPaths(result.oldTicket.id, result.oldTicket.buildingId);
+    for (const incidentId of result.touchedIncidentIds) {
+      revalidatePath(`/panel/incidents/${incidentId}`);
+    }
     return { ok: true };
   },
 );

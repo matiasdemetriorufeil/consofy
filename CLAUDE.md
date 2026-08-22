@@ -3045,6 +3045,181 @@ registro de negocio -- se borró por completo (Auth vía Admin API +
 nadie va a usar ni monitorear es un riesgo real, distinto de "borrar un
 dato de negocio".
 
+## Modelo de incidentes: agrupar tickets bajo un problema en común (paso 7.4)
+
+Extiende `resolveSimilarityCandidateAction` del 7.3 (no un endpoint nuevo):
+al ejecutar "Agrupar" sobre un candidato pendiente, además de marcar el
+candidato como `grouped`, ahora arma o mantiene un incidente
+("problema en común") real detrás de los dos tickets del par.
+
+**Qué ya existía en el esquema antes de este paso, verificado contra la
+base real, no asumido.** El plan original (etapa 2.5) decía que `incidents`
+y `tickets.incident_id` se iban a crear ahí -- correcto, ya estaban
+completos y sin usar: `src/db/schema/incidents.ts` (tabla `incidents` con
+`organization_id`, `building_id`/`category_id` con FK compuestas,
+`status` (`open`/`resolved`), `resolved_at` con su CHECK, `deleted_at` vía
+`timestamps()`, `UNIQUE(id, organization_id)`, RLS + deny-all) y
+`tickets.incident_id` (nullable, FK compuesta hacia
+`incidents(id, organization_id)`, MATCH SIMPLE) ya existían tal cual, sin
+ninguna query/action/UI construida encima. Se usaron TAL CUAL, sin
+recrear nada -- solo se agregó lo que faltaba (ver migración abajo).
+
+**Los cuatro casos de agrupación**, implementados en
+`applyIncidentGrouping()` (`src/features/incidents/group-tickets-into-incident.ts`,
+nuevo, corre siempre DENTRO de la transacción de
+`resolveSimilarityCandidateAction`, nunca con `db` suelto -- el caso de
+fusión puede tocar varias filas de `tickets` a la vez):
+
+1. **Ninguno de los dos tickets tiene incidente:** se crea uno nuevo
+   (`building_id`/`category_id` salen de los tickets, que ya comparten
+   ambos por cómo filtra `findSimilarTickets`, paso 7.1) y los dos quedan
+   apuntando a él.
+2. **Exactamente uno ya tiene incidente:** el otro se suma a ESE
+   incidente existente -- nunca se crea uno nuevo.
+3. **Los dos ya tienen el MISMO incidente:** no-op explícito (además de
+   marcar el candidato `grouped`) -- ya están agrupados, no es un error.
+4. **Los dos tienen incidentes DISTINTOS (agrupación en cadena -- pares
+   agrupados por separado antes de conectarse):** fusión. **Criterio
+   elegido para qué incidente persiste: el más VIEJO por `created_at`** --
+   es el que lleva más tiempo trackeando el problema (probablemente el
+   que más historia ya acumuló), y es determinístico y estable, sin
+   depender de cuál ticket del par llegó como `ticket_id` vs.
+   `candidate_ticket_id` (detalle de implementación de 7.1/7.2, no una
+   señal de negocio). **Todos** los tickets que apuntaban al incidente
+   perdedor -- no solo el par que disparó la fusión, cualquier otro
+   ticket que ese incidente ya hubiera acumulado de agrupaciones
+   anteriores -- se reasignan al ganador; el perdedor se **soft-borra**
+   (`deleted_at`), nunca `DELETE` físico.
+
+**Eventos en `ticket_events` -- reuso deliberado de un valor existente +
+un valor genuinamente nuevo, no cuatro tipos nuevos.** El enum ya tenía
+`merged_into_incident` (paso 2.5, nunca escrito hasta ahora) -- se le
+agregó un campo `reason: "created" | "joined"` al payload para
+diferenciar los casos 1 y 2 sin duplicar el tipo de evento. Para el caso
+4 (fusión) se agregó **un** valor nuevo, `incident_merged`
+(migración abajo), reservado solo para ese caso más raro -- escrito una
+vez por cada ticket reasignado del incidente perdedor (no solo el par),
+con payload `{fromIncidentId, toIncidentId, toIncidentTitle}`. El caso 3
+(ya agrupados) no escribe ningún evento de incidente -- nada cambió del
+lado del incidente, solo el candidato pasa a `grouped` (evento
+`similar_ticket_grouped`, ya existente del 7.3). `describeTicketEvent()`
+(`ticket-event-description.ts`) tiene textos distintos para los tres:
+"creó un problema en común a partir de este reclamo" (created), "sumó
+este reclamo a un problema en común ya existente" (joined), "fusionó el
+problema en común de este reclamo con otro" (incident_merged) -- 4 tests
+nuevos en `ticket-event-description.test.ts`.
+
+**Título del incidente, generado solo, sin pantalla intermedia:**
+`` `${categoria.name} en ${building.name}` `` (`buildIncidentTitle()`,
+mismo archivo) -- "Agrupar" es un click único sin formulario, así que se
+arma con lo que YA se sabe con certeza (categoría + edificio, compartidos
+por los dos tickets del par).
+
+**Migración real aplicada** (`0028_opposite_charles_xavier.sql`):
+
+```sql
+ALTER TYPE "public"."ticket_event_type" ADD VALUE 'incident_merged';
+CREATE INDEX "tickets_incident_id_idx" ON "tickets" USING btree ("incident_id");
+```
+
+El índice no es parcial (a diferencia de la mayoría de los índices de
+`tickets.ts`): a esta consulta ("todos los tickets de este incidente")
+le interesan tickets de cualquier `status`, no un subconjunto -- lo usan
+tanto la vista de detalle del incidente como la búsqueda de "todos los
+tickets que apuntaban al incidente perdedor" durante una fusión.
+
+**Vista de detalle del incidente**, ruta nueva `/panel/incidents/[incidentId]`
+(criterio propio de path, mismo patrón que `/panel/tickets/[ticketId]`):
+categoría + edificio + estado del incidente, la lista de tickets
+agrupados con su estado/prioridad individual (cada uno linkea a su propio
+detalle), y las unidades/vecinos afectados -- **deduplicados**, no una
+fila por ticket. `deriveAffectedParties()`
+(`src/features/incidents/derive-affected-parties.ts`, función PURA sin
+`import "server-only"`, mismo criterio que `normalize-ticket-text.ts` del
+7.1 -- testeable con Vitest sin infraestructura de servidor) dedupea
+unidades por `unitLabel` y vecinos por `neighborId` (no por nombre/texto:
+dos tickets del mismo incidente pueden compartir exactamente la misma
+unidad o el mismo vecino, y listarlos dos veces mostraría a la misma
+persona afectada como si fueran dos distintas). 6 tests en
+`derive-affected-parties.test.ts`, incluido el caso "misma unidad,
+vecinos distintos" (la unidad se dedupea, los dos vecinos quedan) para
+confirmar que el dedupe es por clave, no por fila completa.
+
+Cross-org, uuid inválido, o incidente soft-borrado (fusionado hacia otro)
+-- `notFound()` para los tres, mismo criterio de ambigüedad que
+`/panel/tickets/[ticketId]`: `getIncidentDetail()`
+(`src/features/incidents/queries.ts`) filtra `organization_id` e
+`isNull(deleted_at)` en el WHERE mismo, sin distinguir por qué no
+resolvió.
+
+**Link desde el ticket al incidente:** `getTicketDetail()`
+(`tickets/queries.ts`) se extendió con un LEFT JOIN a `incidents`
+(filtrado por `isNull(incidents.deletedAt)` en el ON, no en el WHERE --
+así un ticket con `incident_id` apuntando a un incidente ya soft-borrado
+sigue trayendo el resto de sus datos, solo con `incidentId`/`incidentTitle`
+en `null`). La página de detalle del ticket muestra "Parte de
+'{título}'" con link a `/panel/incidents/[incidentId]` solo cuando
+`ticket.incidentId` no es `null`.
+
+**Fuera de alcance de este paso, a propósito:** propagar resolución de
+tickets al incidente (7.5) y el panel de configuración del umbral (7.6).
+El banner de un candidato ya `grouped` sigue desapareciendo con el mismo
+mecanismo del 7.3 (oculto local + `revalidatePath`), sin cambios acá.
+
+**Verificado con datos reales, formulario público + panel real (Playwright,
+sesión de un admin de prueba dedicado, creado y borrado solo para esta
+verificación -- ver más abajo), NUNCA con inserts directos:**
+
+- **Caso simple:** dos tickets nuevos de Ascensores en Torre Central
+  (`TC-2026-1778`, `TC-2026-1779`, mismo texto de ascensor trabado) --
+  candidato auto-detectado al 71% de similitud. "Agrupar" desde el
+  detalle de `TC-2026-1779` creó el incidente
+  `a97cb96c-1ece-44dd-9929-e1ae41e7cc45` ("Ascensores en Torre Central"),
+  ambos tickets con ese `incident_id`. El detalle del incidente mostró
+  los 2 tickets, 2 unidades reales (Norte - 4°A, Norte - 4°B) y 2 vecinos
+  reales -- todo dato real del formulario, ninguno inventado.
+- **Caso de unión a incidente existente:** un tercer ticket
+  (`TC-2026-1780`, mismo tema) agrupado contra `TC-2026-1778` (66% de
+  similitud) -- el ticket quedó con el MISMO `incident_id`
+  (`a97cb96c-...`), confirmado que NO se creó un segundo incidente
+  (sigue habiendo un solo incidente con ese id en la base).
+- **Caso de fusión:** cuatro tickets de Plomería (`TC-2026-1781..1784`,
+  mismo tema de pérdida de agua). Se agrupó el par 1781-1782 primero
+  (creó el incidente `aa28d6bc-...`, 00:09:30) y el par 1783-1784 después
+  por separado (creó `e91c74ac-...`, 00:09:42 -- MÁS NUEVO). Recién
+  después se agrupó 1782 con 1783 (cada uno con un incidente DISTINTO) --
+  resultado: los 4 tickets terminaron con `incident_id = aa28d6bc-...`
+  (el más viejo, según el criterio elegido), `e91c74ac-...` quedó con
+  `deleted_at` seteado (confirmado por SQL directo -- la fila SIGUE
+  existiendo, no se borró físicamente), y se escribieron 2 eventos
+  `incident_merged` -- uno para `TC-2026-1783` (el ticket del candidato
+  que disparó la fusión) y otro para `TC-2026-1784` (que NO era parte del
+  par que se agrupó, pero apuntaba al incidente perdedor y se reasignó
+  igual, confirmando que la fusión mueve TODOS los tickets del perdedor,
+  no solo el par). El detalle del incidente ganador mostró los 4 tickets,
+  4 unidades y 4 vecinos reales, sin duplicados ni huérfanos; el detalle
+  del incidente perdedor devolvió el 404 esperado
+  ("No encontramos ese problema en común").
+- **Ticket sin incidente:** `TC-2026-0002` (reclamo real del seed, sin
+  ningún candidato de similitud) no mostró ningún link "Parte de" en su
+  detalle.
+
+**Cuenta de prueba usada, creada y borrada solo para esta verificación**
+(ver CLAUDE.md > Reglas de entorno): `prueba-7-4-1787356588577@example.com`,
+creada vía `auth.admin.createUser()` (Admin API, service-role key -- único
+uso de esta clave en el paso, para crear y para borrar esta cuenta
+puntual) + fila en `app_users`. Al terminar, se borró por completo (Auth
+vía Admin API + `DELETE` en `app_users`), mismo criterio ya fijado en el
+7.3: es una credencial descartable, no un dato de negocio.
+
+**Limpieza de datos de negocio -- soft-borrado, nunca físico:** los 7
+tickets sintéticos, las 9 filas de `ticket_similarity_candidates` que los
+referenciaban, las 7 personas creadas por el formulario público, y los 2
+incidentes que quedaron activos al terminar la verificación (el incidente
+perdedor de la fusión ya había quedado soft-borrado por la propia lógica
+de fusión, no por este paso de limpieza) -- todos con `deleted_at`
+seteado, confirmado con una consulta final antes de cerrar el paso.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.

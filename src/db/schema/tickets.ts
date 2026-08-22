@@ -228,6 +228,14 @@ export const tickets = pgTable(
       t.categoryId,
       t.reportedAt,
     ),
+    // "Todos los tickets de este incidente" -- paso 7.4: la vista de
+    // detalle del incidente lista sus tickets, y la fusión de incidentes
+    // busca "todos los tickets que apuntan al incidente perdedor" antes de
+    // reasignarlos. Sin este índice, las dos consultas harían Seq Scan
+    // (ninguno de los índices existentes tiene incident_id como columna
+    // líder). No parcial: a diferencia de otros índices de este archivo,
+    // acá SÍ interesan tickets con cualquier status, no un subconjunto.
+    index("tickets_incident_id_idx").on(t.incidentId),
     denyAnonAuthenticated(),
   ],
 ).enableRLS();

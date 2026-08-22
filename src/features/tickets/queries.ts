@@ -17,6 +17,7 @@ import { db } from "@/db";
 import {
   buildings,
   categories,
+  incidents,
   people,
   ticketAttachments,
   ticketEvents,
@@ -936,6 +937,21 @@ export type TicketDetail = {
   neighborName: string | null;
   neighborPhoneE164: string | null;
   neighborEmail: string | null;
+  // Problema en común (paso 7.4) del que este reclamo forma parte, si
+  // tiene uno -- `null` en el caso normal (la mayoría de los reclamos
+  // nunca se agrupan). El caller (page.tsx) usa esto SOLO para mostrar un
+  // link hacia /panel/incidents/[incidentId], nunca para traer el resto
+  // del detalle del incidente acá (eso ya lo resuelve
+  // getIncidentDetail/getIncidentTickets, con su propio LEFT JOIN e
+  // isNull(incidents.deletedAt) -- ver incidents/queries.ts). Filtrado por
+  // isNull(incidents.deletedAt): un incidente que se soft-borró en una
+  // fusión (ver group-tickets-into-incident.ts) no debería seguir
+  // ofreciendo un link navegable, aunque tickets.incident_id todavía no se
+  // haya reasignado en la fila que se está leyendo en este instante
+  // preciso (la reasignación y el soft-delete corren en la MISMA
+  // transacción, así que en la práctica esto nunca queda inconsistente).
+  incidentId: string | null;
+  incidentTitle: string | null;
 };
 
 // Único SELECT con todos los joins (mismo criterio que getTicketInbox): sin
@@ -975,6 +991,8 @@ export async function getTicketDetail(
       neighborLastName: people.lastName,
       neighborPhoneE164: people.phoneE164,
       neighborEmail: people.email,
+      incidentId: incidents.id,
+      incidentTitle: incidents.title,
     })
     .from(tickets)
     .innerJoin(
@@ -1003,6 +1021,14 @@ export async function getTicketDetail(
       and(
         eq(people.id, tickets.personId),
         eq(people.organizationId, tickets.organizationId),
+      ),
+    )
+    .leftJoin(
+      incidents,
+      and(
+        eq(incidents.id, tickets.incidentId),
+        eq(incidents.organizationId, tickets.organizationId),
+        isNull(incidents.deletedAt),
       ),
     )
     .where(
@@ -1043,6 +1069,8 @@ export async function getTicketDetail(
       null,
     neighborPhoneE164: row.neighborPhoneE164,
     neighborEmail: row.neighborEmail,
+    incidentId: row.incidentId,
+    incidentTitle: row.incidentTitle,
   };
 }
 

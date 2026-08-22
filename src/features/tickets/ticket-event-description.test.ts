@@ -214,6 +214,81 @@ describe("describeTicketEvent", () => {
     );
   });
 
+  it("merged_into_incident con reason='created': deja claro que se creó un problema en común nuevo", () => {
+    const result = describeTicketEvent({
+      type: "merged_into_incident",
+      actorType: "admin",
+      actorLabel: "Administración",
+      payload: {
+        incidentId: "a1111111-1111-4111-8111-111111111111",
+        incidentTitle: "Ascensores en Torre Central",
+        reason: "created",
+      },
+    });
+    expect(result.headline).toBe(
+      "Administración creó un problema en común a partir de este reclamo",
+    );
+    expect(result.detail).toBe("Ascensores en Torre Central");
+  });
+
+  it("merged_into_incident con reason='joined': deja claro que se sumó a uno YA existente", () => {
+    const result = describeTicketEvent({
+      type: "merged_into_incident",
+      actorType: "admin",
+      actorLabel: "Administración",
+      payload: {
+        incidentId: "a1111111-1111-4111-8111-111111111111",
+        incidentTitle: "Ascensores en Torre Central",
+        reason: "joined",
+      },
+    });
+    expect(result.headline).toBe(
+      "Administración sumó este reclamo a un problema en común ya existente",
+    );
+    expect(result.detail).toBe("Ascensores en Torre Central");
+  });
+
+  it("incident_merged: nombra el problema en común que sobrevive, texto distinto de merged_into_incident", () => {
+    const result = describeTicketEvent({
+      type: "incident_merged",
+      actorType: "admin",
+      actorLabel: "Administración",
+      payload: {
+        fromIncidentId: "a1111111-1111-4111-8111-111111111111",
+        toIncidentId: "b2222222-2222-4222-8222-222222222222",
+        toIncidentTitle: "Ascensores en Torre Central",
+      },
+    });
+    expect(result.headline).toBe(
+      "Administración fusionó el problema en común de este reclamo con otro",
+    );
+    expect(result.detail).toBe(
+      'Ahora es parte de "Ascensores en Torre Central".',
+    );
+  });
+
+  it("merged_into_incident/incident_merged con payload inválido: cae a un texto genérico, no rompe", () => {
+    const merged = describeTicketEvent({
+      type: "merged_into_incident",
+      actorType: "admin",
+      actorLabel: "Administración",
+      payload: { algoRaro: true },
+    });
+    expect(merged.headline).toBe(
+      "Administración agrupó este reclamo con un problema en común",
+    );
+    const incidentMerged = describeTicketEvent({
+      type: "incident_merged",
+      actorType: "admin",
+      actorLabel: "Administración",
+      payload: { algoRaro: true },
+    });
+    expect(incidentMerged.headline).toBe(
+      "Administración fusionó el problema en común de este reclamo con otro",
+    );
+    expect(incidentMerged.detail).toBeNull();
+  });
+
   it("evento sin payload en absoluto (columna con su default {}): no rompe ningún tipo", () => {
     const types = [
       "created",
@@ -227,6 +302,7 @@ describe("describeTicketEvent", () => {
       "similar_ticket_detected",
       "similar_ticket_grouped",
       "similar_ticket_discarded",
+      "incident_merged",
     ] as const;
     for (const type of types) {
       expect(() =>

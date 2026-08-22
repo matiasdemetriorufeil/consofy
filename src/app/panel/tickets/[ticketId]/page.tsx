@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation";
-import { ArrowLeft, Mail, Phone } from "lucide-react";
+import { ArrowLeft, Layers, Mail, Phone } from "lucide-react";
 import Link from "next/link";
 import { z } from "zod";
 
@@ -136,6 +136,15 @@ export default async function TicketDetailPage({
             {ticket.unitLabel ? ` · ${ticket.unitLabel}` : ""} ·{" "}
             {ticket.categoryName}
           </p>
+          {ticket.incidentId && (
+            <Link
+              href={`/panel/incidents/${ticket.incidentId}`}
+              className="text-ink-muted hover:text-ink inline-flex w-fit items-center gap-1.5 text-sm hover:underline"
+            >
+              <Layers className="size-3.5" aria-hidden="true" />
+              Parte de &quot;{ticket.incidentTitle}&quot;
+            </Link>
+          )}
         </div>
         <div className="flex flex-wrap gap-2">
           <PriorityBadge priority={toBadgePriority(ticket.priority)} />

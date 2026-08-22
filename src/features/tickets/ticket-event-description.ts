@@ -60,8 +60,32 @@ const attachmentAddedPayloadSchema = z.object({
   originalFilename: z.string().trim().min(1).optional(),
 });
 
+// Paso 7.4 -- primer escritor real (resolveSimilarityCandidateAction, al
+// "Agrupar" un candidato). `incidentTitle` pasa de opcional a
+// obligatorio ahora que existe ese escritor real -- ya no hay motivo para
+// que un evento nuevo lo omita. `reason` es lo que distingue, en el
+// MISMO tipo de evento, los dos casos que el paso 7.4 considera "un
+// reclamo se agrupó con un problema en común" (a diferencia de la fusión
+// de DOS incidentes, que es un hecho distinto -- ver incident_merged más
+// abajo):
+// - "created": ninguno de los dos tickets del par tenía incidente antes
+//   -- se creó uno nuevo para los dos.
+// - "joined": el OTRO ticket del par ya tenía incidente -- este se sumó
+//   a ese mismo incidente existente.
 const mergedIntoIncidentPayloadSchema = z.object({
-  incidentTitle: z.string().trim().min(1).optional(),
+  incidentId: z.uuid(),
+  incidentTitle: z.string().trim().min(1),
+  reason: z.enum(["created", "joined"]),
+});
+
+// Paso 7.4 -- SOLO para la fusión de dos incidentes distintos (ver el
+// comentario largo de este valor en ticket-events.ts). Se escribe en cada
+// ticket que estaba en el incidente PERDEDOR -- `toIncidentId` es el
+// incidente que sobrevive (el que ese ticket pasa a tener ahora).
+const incidentMergedPayloadSchema = z.object({
+  fromIncidentId: z.uuid(),
+  toIncidentId: z.uuid(),
+  toIncidentTitle: z.string().trim().min(1),
 });
 
 // Paso 7.2 -- payload que escribe detectAndFlagSimilarTickets() por cada
@@ -198,11 +222,42 @@ function describeMergedIntoIncident(
   event: TicketTimelineEventInput,
 ): TicketEventDescription {
   const parsed = mergedIntoIncidentPayloadSchema.safeParse(event.payload);
-  const incidentTitle = parsed.success ? parsed.data.incidentTitle : undefined;
+  if (!parsed.success) {
+    return {
+      // "problema en común", no "incidente" -- ver CLAUDE.md > Glosario.
+      headline: `${event.actorLabel} agrupó este reclamo con un problema en común`,
+      detail: null,
+    };
+  }
+  const { incidentTitle, reason } = parsed.data;
   return {
-    // "problema en común", no "incidente" -- ver CLAUDE.md > Glosario.
-    headline: `${event.actorLabel} agrupó este reclamo con un problema en común`,
-    detail: incidentTitle ?? null,
+    headline:
+      reason === "created"
+        ? `${event.actorLabel} creó un problema en común a partir de este reclamo`
+        : `${event.actorLabel} sumó este reclamo a un problema en común ya existente`,
+    detail: incidentTitle,
+  };
+}
+
+// Paso 7.4 -- fusión de dos incidentes (ver el comentario de
+// incidentMergedPayloadSchema y el de incident_merged en ticket-events.ts
+// para cuándo pasa esto exactamente). Texto DISTINTO de
+// describeMergedIntoIncident a propósito: acá el ticket YA estaba
+// agrupado, lo que cambió es que SU incidente se unió a otro, no que se
+// agrupó por primera vez.
+function describeIncidentMerged(
+  event: TicketTimelineEventInput,
+): TicketEventDescription {
+  const parsed = incidentMergedPayloadSchema.safeParse(event.payload);
+  if (!parsed.success) {
+    return {
+      headline: `${event.actorLabel} fusionó el problema en común de este reclamo con otro`,
+      detail: null,
+    };
+  }
+  return {
+    headline: `${event.actorLabel} fusionó el problema en común de este reclamo con otro`,
+    detail: `Ahora es parte de "${parsed.data.toIncidentTitle}".`,
   };
 }
 
@@ -285,5 +340,7 @@ export function describeTicketEvent(
       return describeSimilarTicketResolved(event, "grouped");
     case "similar_ticket_discarded":
       return describeSimilarTicketResolved(event, "discarded");
+    case "incident_merged":
+      return describeIncidentMerged(event);
   }
 }

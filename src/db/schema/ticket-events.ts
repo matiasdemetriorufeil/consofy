@@ -45,6 +45,22 @@ export const ticketEventType = pgEnum("ticket_event_type", [
   // cuenta, mirando SU propia línea de tiempo, qué pasó con esto.
   "similar_ticket_grouped",
   "similar_ticket_discarded",
+  // Paso 7.4 -- SOLO cuando "Agrupar" (7.3) une dos INCIDENTES ya
+  // existentes y distintos en uno solo (agrupación en cadena: A+B ya
+  // habían formado un incidente, C+D otro, y recién ahora un candidato
+  // conecta B con C). `merged_into_incident` (de arriba, ya existía desde
+  // antes de este proyecto sin ningún escritor real) alcanza para los
+  // otros dos casos de 7.4 ("se creó un incidente nuevo" / "este reclamo
+  // se sumó a uno ya existente" -- un nuevo campo `reason` en su payload
+  // los distingue, ver ticket-event-description.ts); la fusión de DOS
+  // incidentes es un hecho de negocio distinto y más raro (nunca le pasa
+  // a la mayoría de los tickets agrupados), por eso se separa en su
+  // propio valor en vez de forzarlo adentro de merged_into_incident con
+  // un tercer `reason`. Se escribe en CADA ticket que estaba en el
+  // incidente PERDEDOR (reasignado al ganador) -- no solo en el par que
+  // disparó la fusión -- porque esos son los tickets cuyo incident_id
+  // realmente cambió.
+  "incident_merged",
 ]);
 
 export const ticketEventActorType = pgEnum("ticket_event_actor_type", [
