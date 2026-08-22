@@ -3220,6 +3220,141 @@ perdedor de la fusión ya había quedado soft-borrado por la propia lógica
 de fusión, no por este paso de limpieza) -- todos con `deleted_at`
 seteado, confirmado con una consulta final antes de cerrar el paso.
 
+## Propagación de estado: resolver un incidente resuelve sus tickets (paso 7.5)
+
+`resolveIncidentAction` (`src/features/incidents/actions.ts`, nuevo) --
+único botón nuevo de `/panel/incidents/[incidentId]` (paso 7.4): resuelve
+el incidente y propaga la resolución a sus tickets asociados.
+
+**Propagación en UN SOLO SENTIDO, decisión de diseño explícita del
+enunciado, no reinterpretada:** resolver el incidente resuelve sus
+tickets activos. Lo inverso NO existe -- resolver o cerrar un ticket
+individual (por la vía normal del paso 6.4) nunca toca el incidente ni a
+los demás tickets del mismo incidente, sin importar si ese ticket
+pertenece a un incidente abierto. Tampoco existe ninguna acción de
+"reabrir" un incidente en este paso -- no fue pedida, no se agregó por
+iniciativa propia.
+
+**La máquina de transiciones del 6.4 se REUSA de verdad, no se
+reimplementa -- movida de lugar para poder compartirla.**
+`isValidStatusTransition()` ya vivía en `tickets/ticket-actions-schema.ts`
+(sin `"use server"`, así que es importable desde cualquier feature); pero
+`timestampFieldsForStatus()` vivía en `tickets/actions.ts` (que sí tiene
+`"use server"` y por lo tanto solo puede exportar funciones async) -- se
+movió a `ticket-actions-schema.ts` en este paso, sin cambiar su lógica ni
+un carácter de su comportamiento, específicamente para que
+`incidents/actions.ts` pudiera importar la MISMA función en vez de
+duplicar el cálculo de `resolved_at`/`closed_at`. `tickets/actions.ts`
+ahora la importa en vez de definirla.
+
+**Qué ticket queda "elegible" -- ningún chequeo de "¿es un estado
+terminal?" escrito a mano, sale gratis del propio mapa de
+transiciones:** un ticket del incidente se resuelve si y solo si
+`isValidStatusTransition(status_actual, "resolved")` da `true`. Con
+`TICKET_STATUS_TRANSITIONS` tal como está hoy, eso es EXACTAMENTE `new` e
+`in_progress` -- un ticket ya en `resolved` no pasa (la función rechaza
+`from === to` explícitamente), y uno en `closed`/`discarded` tampoco (esas
+transiciones no están en el mapa). El requisito del enunciado ("los que ya
+estaban en un estado terminal quedan intactos, no se fuerza nada") sale
+así sin ninguna rama especial para "terminal" -- es el mismo mecanismo que
+ya decide qué transiciones son válidas en el 6.4, aplicado tal cual.
+
+**Un valor de enum nuevo en `ticket_event_type`, no reusar
+`status_changed`:** `resolved_by_incident` (migración `0029`) dice
+explícitamente que la resolución vino por PROPAGACIÓN desde el incidente,
+nunca que el administrador entró a ESE reclamo puntual y lo marcó
+resuelto a mano (esa vía sigue existiendo tal cual y sigue escribiendo
+`status_changed`, sin tocar este tipo de evento). Payload:
+`{incidentId, incidentTitle, fromStatus}` -- `fromStatus` es de dónde
+venía ESE ticket puntual (`new` o `in_progress`), para que el texto pueda
+decir "de dónde" además de "por qué".
+`describeTicketEvent()`/`ticket-event-description.ts` tiene un texto
+propio: _"{Admin} resolvió este reclamo al resolver el problema en
+común"_ + detail _"No se resolvió reclamo por reclamo -- se resolvió junto
+con '{incidente}'."_ -- deliberadamente sin compartir texto con
+`status_changed`.
+
+**Migración real aplicada:**
+
+```sql
+-- 0029_tiny_nemesis.sql
+ALTER TYPE "public"."ticket_event_type" ADD VALUE 'resolved_by_incident';
+```
+
+**Qué pasa si el incidente ya está resuelto -- CRITERIO ELEGIDO, dos
+capas, no una sola.** El botón "Resolver incidente"
+(`ResolveIncidentButton`, único Client Component de esta pantalla) NI
+SIQUIERA SE RENDERIZA cuando `incident.status !== "open"` -- mismo
+criterio ya usado en `SimilarTicketBanner` (un candidato ya `grouped` no
+se sigue mostrando), en vez de un botón deshabilitado o un mensaje de
+error después de intentarlo. La Server Action IGUAL rechaza por su cuenta
+con compare-and-swap contra `status = 'open'` (mismo patrón que
+`changeTicketStatusAction`, 6.4) -- si se invoca de todos modos (doble
+click, dos pestañas, o directo por HTTP sin pasar por el botón), devuelve
+`{ok: false, error: "Este problema en común ya está resuelto."}` en vez de
+volver a ejecutar la propagación. Probado en la práctica invocando la
+Server Action DIRECTO (ruta de diagnóstico temporal en `/dev/tmp-resolve-check`,
+borrada después de probar) sobre un incidente ya resuelto: devolvió
+exactamente ese mensaje, sin tocar ningún ticket de nuevo.
+
+**Todos los tickets ACTIVOS del incidente, leídos frescos en el momento de
+resolver -- no solo los que la pantalla tenía renderizados:** la Server
+Action vuelve a consultar `tickets` por `incident_id` (filtrado por
+`organization_id` e `isNull(deleted_at)`) en el momento de ejecutar, así
+que un ticket que se agregó al incidente después de que la página cargó
+igual queda incluido en la propagación.
+
+**Verificado con datos reales, formulario público + panel real
+(Playwright, admin de prueba dedicado, creado y borrado solo para esta
+verificación):**
+
+- **Caso 1 (3 tickets, estados activos distintos):** incidente
+  `4aab5582-ac2d-431a-af22-2d1709d00675` ("Ascensores en Torre Central")
+  con `TC-2026-1787` (new), `TC-2026-1788` (in_progress, pasado a mano por
+  el 6.4 antes de la prueba) y `TC-2026-1789` (new) -- solo hay dos
+  estados "activos" reales en el enum (`new`/`in_progress`), así que el
+  tercer ticket repite uno de los dos a propósito, documentado acá. Tras
+  "Resolver incidente": incidente `status: "resolved"`,
+  `resolved_at: 2026-08-22T01:44:58.453Z`; los 3 tickets quedaron
+  `resolved` con el MISMO `resolved_at`; 3 eventos `resolved_by_incident`,
+  uno por ticket, cada uno con su `fromStatus` real (`new`, `new`,
+  `in_progress`).
+- **Caso 2 (un ticket ya en estado terminal):** incidente
+  `f6671e05-0094-4fe9-8896-84167b6e089a` ("Ruidos molestos en Torre
+  Central") con `TC-2026-1790` (new), `TC-2026-1791` (in_progress) y
+  `TC-2026-1792` (`discarded`, pasado a mano por el 6.4 ANTES de resolver
+  el incidente). Tras "Resolver incidente": `1790`/`1791` -> `resolved`
+  con 2 eventos `resolved_by_incident`; `1792` quedó INTACTO en
+  `discarded` (`resolved_at: null`, sin ningún evento nuevo) -- confirmado
+  que son exactamente 2 eventos, no 3.
+- **Caso 3 (resolución individual no propaga hacia arriba):** incidente
+  `bf0a46f4-04e4-4111-90b5-0e360ee8bd6a` ("Electricidad en Torre Central")
+  con `TC-2026-1793`/`TC-2026-1794`, los dos `new`. Se resolvió
+  `TC-2026-1793` INDIVIDUALMENTE por la vía normal del 6.4 (botón "Marcar
+  como resuelto" en el detalle del TICKET, no el del incidente) --
+  confirmado que el incidente siguió `status: "open"`, `resolved_at:
+null`, y `TC-2026-1794` siguió `new` sin tocar. El evento de
+  `TC-2026-1793` fue `status_changed` (`from: "new", to: "resolved"`),
+  NUNCA `resolved_by_incident` -- la línea de tiempo distingue
+  correctamente las dos vías.
+- **Caso 4 (incidente ya resuelto):** reutilizando el incidente del caso
+  1 (ya `resolved`), la página no ofreció el botón (oculto, confirmado
+  navegando de nuevo a `/panel/incidents/4aab5582-...`); invocando la
+  Server Action directo (ruta de diagnóstico temporal) confirmó el
+  rechazo `"Este problema en común ya está resuelto."`, sin ningún cambio
+  adicional en la base.
+
+**Hallazgo del propio proceso de verificación, no un bug de la
+aplicación:** el primer intento de descartar `TC-2026-1792` con un script
+de Playwright apuntó por error al botón "Descartar" del BANNER de
+posible duplicado (que descarta el CANDIDATO de similitud, paso 7.3) en
+vez del botón "Descartar" de "Acciones > Estado" (que cambia el estado del
+ticket, paso 6.4) -- la página tiene dos botones con el mismo texto
+visible en momentos distintos del flujo. Corregido apuntando al ÚLTIMO
+match en el DOM (la tarjeta de Acciones siempre se renderiza después de
+cualquier banner) -- error del script de verificación, no del código de
+la aplicación ni de ningún archivo de este repositorio.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.

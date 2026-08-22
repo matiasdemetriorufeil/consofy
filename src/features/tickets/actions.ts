@@ -22,8 +22,8 @@ import {
   changeTicketStatusInputSchema,
   isValidStatusTransition,
   resolveSimilarityCandidateInputSchema,
+  timestampFieldsForStatus,
   type TicketActionResult,
-  type TicketStatusValue,
 } from "./ticket-actions-schema";
 import {
   bulkAssignInputSchema,
@@ -52,40 +52,6 @@ function revalidateTicketPaths(ticketId: string, buildingId?: string) {
   if (buildingId) {
     revalidatePath(`/panel/buildings/${buildingId}/tickets`);
   }
-}
-
-// resolved_at/closed_at según el estado destino -- calculado acá, no
-// dejado en manos de quien llama, para que sea IMPOSIBLE violar los CHECK
-// de tickets.ts (tickets_resolved_at_requires_resolved_or_closed,
-// tickets_closed_at_requires_closed) sin importar desde qué estado se
-// venga:
-// - -> resolved: resolved_at = ahora, closed_at se limpia (por las dudas;
-//   el mapa de transiciones nunca llega a "resolved" viniendo de
-//   "closed", pero limpiarlo igual no cuesta nada y blinda el invariante).
-// - -> closed: closed_at = ahora. resolved_at NO se toca -- closed solo es
-//   alcanzable desde resolved (ver TICKET_STATUS_TRANSITIONS), así que ya
-//   tiene que estar seteado; conservarlo preserva CUÁNDO se resolvió de
-//   verdad, no lo pisa con el momento del cierre.
-// - -> in_progress / new / discarded: los dos se limpian -- "reabrir"
-//   pierde la marca de tiempo de haber estado resuelto/cerrado (el
-//   historial completo igual queda en ticket_events, que es append-only;
-//   estas columnas reflejan el estado ACTUAL, no un archivo histórico).
-function timestampFieldsForStatus(
-  status: TicketStatusValue,
-  now: Date,
-): { resolvedAt?: Date | null; closedAt: Date | null } {
-  if (status === "resolved") {
-    return { resolvedAt: now, closedAt: null };
-  }
-  if (status === "closed") {
-    // resolvedAt AUSENTE (no `null`) a propósito -- closed solo es
-    // alcanzable desde resolved (ver TICKET_STATUS_TRANSITIONS), así que
-    // ya tiene que estar seteado; omitir la clave del `.set()` de Drizzle
-    // deja la columna intacta, preservando CUÁNDO se resolvió de verdad
-    // en vez de pisarlo con el momento del cierre.
-    return { closedAt: now };
-  }
-  return { resolvedAt: null, closedAt: null };
 }
 
 // Cambiar estado -- protegido con compare-and-swap contra `fromStatus`

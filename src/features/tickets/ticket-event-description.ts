@@ -88,6 +88,18 @@ const incidentMergedPayloadSchema = z.object({
   toIncidentTitle: z.string().trim().min(1),
 });
 
+// Paso 7.5 -- payload que escribe resolveIncidentAction() en cada ticket
+// que de verdad transicionó al resolver el incidente (incidents/
+// actions.ts). `fromStatus` es el estado del que venía ESE ticket puntual
+// (new o in_progress -- los únicos elegibles, ver el comentario de
+// isValidStatusTransition en resolveIncidentAction), para que el texto
+// pueda decir "de dónde" además de "por qué".
+const resolvedByIncidentPayloadSchema = z.object({
+  incidentId: z.uuid(),
+  incidentTitle: z.string().trim().min(1),
+  fromStatus: z.enum(["new", "in_progress", "resolved", "closed", "discarded"]),
+});
+
 // Paso 7.2 -- payload que escribe detectAndFlagSimilarTickets() por cada
 // candidato sobre el umbral (ticket-similarity-candidates.ts).
 const similarTicketDetectedPayloadSchema = z.object({
@@ -261,6 +273,27 @@ function describeIncidentMerged(
   };
 }
 
+// Paso 7.5 -- deja bien claro que la resolución vino por PROPAGACIÓN
+// desde el incidente, no porque el administrador entró a ESTE reclamo
+// puntual y lo marcó resuelto a mano (esa vía sigue existiendo y escribe
+// "status_changed", sin tocar nunca este tipo de evento). El detail
+// nombra el problema en común -- mismo patrón que describeMergedIntoIncident.
+function describeResolvedByIncident(
+  event: TicketTimelineEventInput,
+): TicketEventDescription {
+  const parsed = resolvedByIncidentPayloadSchema.safeParse(event.payload);
+  if (!parsed.success) {
+    return {
+      headline: `${event.actorLabel} resolvió este reclamo al resolver un problema en común`,
+      detail: null,
+    };
+  }
+  return {
+    headline: `${event.actorLabel} resolvió este reclamo al resolver el problema en común`,
+    detail: `No se resolvió reclamo por reclamo -- se resolvió junto con "${parsed.data.incidentTitle}".`,
+  };
+}
+
 // Paso 7.2 -- detectAndFlagSimilarTickets() siempre escribe este evento
 // con actorType "system" (primer escritor real de ese valor del enum, ver
 // el comentario de ticket-events.ts). El headline no usa actorLabel a
@@ -342,5 +375,7 @@ export function describeTicketEvent(
       return describeSimilarTicketResolved(event, "discarded");
     case "incident_merged":
       return describeIncidentMerged(event);
+    case "resolved_by_incident":
+      return describeResolvedByIncident(event);
   }
 }

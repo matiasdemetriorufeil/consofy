@@ -61,6 +61,19 @@ export const ticketEventType = pgEnum("ticket_event_type", [
   // disparó la fusión -- porque esos son los tickets cuyo incident_id
   // realmente cambió.
   "incident_merged",
+  // Paso 7.5 -- resolveIncidentAction (incidents/actions.ts) resuelve el
+  // incidente y propaga la resolución a sus tickets asociados. Valor
+  // DISTINTO de "status_changed" a propósito: la propagación es un hecho
+  // de negocio distinto de que un administrador entre a ESTE reclamo
+  // puntual y lo marque resuelto a mano -- un evento "status_changed" acá
+  // sugeriría lo segundo, y la línea de tiempo tiene que dejar bien claro
+  // que este reclamo se resolvió PORQUE se resolvió el problema en común
+  // que lo agrupaba, no de forma individual. Se escribe SOLO en los
+  // tickets que de verdad transicionaron (ver isValidStatusTransition en
+  // ticket-actions-schema.ts) -- un ticket que ya estaba en un estado
+  // terminal (resolved/closed/discarded) no recibe este evento, porque no
+  // se le tocó nada.
+  "resolved_by_incident",
 ]);
 
 export const ticketEventActorType = pgEnum("ticket_event_actor_type", [

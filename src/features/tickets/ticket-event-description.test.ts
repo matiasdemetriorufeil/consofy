@@ -289,6 +289,42 @@ describe("describeTicketEvent", () => {
     expect(incidentMerged.detail).toBeNull();
   });
 
+  it("resolved_by_incident: deja claro que fue propagación, no resolución manual, y nombra el problema en común", () => {
+    const result = describeTicketEvent({
+      type: "resolved_by_incident",
+      actorType: "admin",
+      actorLabel: "Administración",
+      payload: {
+        incidentId: "a1111111-1111-4111-8111-111111111111",
+        incidentTitle: "Ascensores en Torre Central",
+        fromStatus: "in_progress",
+      },
+    });
+    expect(result.headline).toBe(
+      "Administración resolvió este reclamo al resolver el problema en común",
+    );
+    expect(result.detail).toBe(
+      'No se resolvió reclamo por reclamo -- se resolvió junto con "Ascensores en Torre Central".',
+    );
+    // No puede compartir texto con un status_changed a resolved manual --
+    // ver CLAUDE.md > Propagación de estado, paso 7.5: distinguir las dos
+    // vías es el punto central de este evento.
+    expect(result.headline).not.toContain("cambió el estado");
+  });
+
+  it("resolved_by_incident con payload inválido: cae a un texto genérico, no rompe", () => {
+    const result = describeTicketEvent({
+      type: "resolved_by_incident",
+      actorType: "admin",
+      actorLabel: "Administración",
+      payload: { algoRaro: true },
+    });
+    expect(result.headline).toBe(
+      "Administración resolvió este reclamo al resolver un problema en común",
+    );
+    expect(result.detail).toBeNull();
+  });
+
   it("evento sin payload en absoluto (columna con su default {}): no rompe ningún tipo", () => {
     const types = [
       "created",
@@ -303,6 +339,7 @@ describe("describeTicketEvent", () => {
       "similar_ticket_grouped",
       "similar_ticket_discarded",
       "incident_merged",
+      "resolved_by_incident",
     ] as const;
     for (const type of types) {
       expect(() =>

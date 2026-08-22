@@ -12,6 +12,7 @@ import {
   toBadgePriority,
   toBadgeStatus,
 } from "@/features/tickets/status-mapping";
+import { ResolveIncidentButton } from "@/features/incidents/components/resolve-incident-button";
 import { deriveAffectedParties } from "@/features/incidents/derive-affected-parties";
 import {
   getIncidentDetail,
@@ -22,8 +23,14 @@ import { requireUser } from "@/lib/auth";
 // Vista de detalle de un incidente / "problema en común" (paso 7.4) --
 // muestra qué categoría+edificio agrupa, los tickets agrupados con su
 // estado individual, y las unidades/vecinos afectados (deduplicados, ver
-// derive-affected-parties.ts). Solo lectura -- ninguna acción de este paso
-// (propagar resolución es 7.5, todavía no existe).
+// derive-affected-parties.ts).
+//
+// Paso 7.5 -- agrega la única acción de esta pantalla: "Resolver
+// incidente", que propaga la resolución a los tickets asociados (ver
+// incidents/actions.ts). El botón SOLO se renderiza con
+// `incident.status === "open"` -- un incidente ya resuelto no ofrece la
+// acción (ver el comentario de ResolveIncidentButton para el criterio
+// completo, con la Server Action como segunda capa de defensa).
 //
 // Cross-org, uuid inválido, o incidente soft-borrado (fusionado hacia
 // otro, ver group-tickets-into-incident.ts) -- notFound() para los tres,
@@ -70,16 +77,21 @@ export default async function IncidentDetailPage({
             {incident.buildingName} · {incident.categoryName}
           </p>
         </div>
-        <Badge
-          variant="outline"
-          className={
-            incident.status === "resolved"
-              ? "bg-resuelto/10 text-resuelto font-body border-transparent"
-              : "bg-media/10 text-media font-body border-transparent"
-          }
-        >
-          {incident.status === "resolved" ? "Resuelto" : "Abierto"}
-        </Badge>
+        <div className="flex items-center gap-2">
+          <Badge
+            variant="outline"
+            className={
+              incident.status === "resolved"
+                ? "bg-resuelto/10 text-resuelto font-body border-transparent"
+                : "bg-media/10 text-media font-body border-transparent"
+            }
+          >
+            {incident.status === "resolved" ? "Resuelto" : "Abierto"}
+          </Badge>
+          {incident.status === "open" && (
+            <ResolveIncidentButton incidentId={incident.id} />
+          )}
+        </div>
       </div>
 
       <Card>
