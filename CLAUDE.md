@@ -2479,7 +2479,7 @@ carga 6.6" -- mismo patrón que "Prueba carga 6.1"/"Prueba carga 6.5"):
   `getTicketInboxCount({ statuses: [status] })` -- probado para los 5
   estados, sin ninguna diferencia.
 - Combinando edificio + categoría + chip (`building=Los Álamos,
-  category=Plomería`): la suma de los 5 chips (15) coincide con el total
+category=Plomería`): la suma de los 5 chips (15) coincide con el total
   filtrado sin estado (15), y cada chip individual coincide con aplicar el
   filtro completo (edificio + categoría + estado) a mano -- confirma
   intersección real (AND), no que un filtro pisa al otro.
@@ -2773,19 +2773,20 @@ mock aislado): se pisó temporalmente el `findCandidates` inyectado en el
 call site real de `attemptCreateTicket` para que tirara una excepción
 siempre, se envió un reclamo real por el formulario público (navegador
 real, Playwright, contra el dev server), y:
+
 - El vecino vio la pantalla de éxito normal, con su código real
   (`TC-2026-1773`).
 - El log del servidor (`(.next/dev/logs/next-development.log`) registró
   el error real: `"[detectAndFlagSimilarTickets] Falló la detección de
-  posibles duplicados para el ticket bdd18baa-...: Error: FALLO FORZADO
-  -- verificación 7.2"`.
+posibles duplicados para el ticket bdd18baa-...: Error: FALLO FORZADO
+-- verificación 7.2"`.
 - La base confirma el ticket creado (`status: "new"`), sin ninguna fila
   en `ticket_similarity_candidates` ni ningún evento
   `similar_ticket_detected` -- el catch cortó ANTES de escribir nada,
   sin dejar un estado a medias.
-El cambio temporal se revirtió apenas terminó la prueba (confirmado con
-`git diff` antes de seguir) -- el código que queda en el repo nunca tuvo
-la inyección de falla.
+  El cambio temporal se revirtió apenas terminó la prueba (confirmado con
+  `git diff` antes de seguir) -- el código que queda en el repo nunca tuvo
+  la inyección de falla.
 
 **Tabla nueva (`ticket_similarity_candidates`), no una columna en
 `tickets` -- decisión de este paso.** El enunciado pide soportar más de
@@ -3504,6 +3505,140 @@ estado distinto del que tenía antes de este paso.
 3 candidatos de similitud y las 10 personas creadas por el formulario
 público: soft-borrados. Cuenta de prueba (`prueba-7-6-...@example.com`)
 eliminada por completo (Auth + `app_users`).
+
+## MessagingProvider -- interfaz del flujo de salida (paso 8.1, etapa 8)
+
+Primer paso de la etapa 8 (comunicados masivos): define la interfaz que
+va a usar TODO el flujo de salida (8.2 en adelante), con dos
+implementaciones reales -- `consoleProvider` (desarrollo) y
+`manualLinkProvider` (Fase 1, real). Deliberadamente separado del flujo de
+ENTRADA (handoff del vecino, etapa 5) -- ver CLAUDE.md > Reglas de
+WhatsApp: comparten aprendizajes de mecánica (dominio de la URL, truncado
+por grafemas), no código de orquestación ni la interfaz en sí.
+
+**`announcement_recipients` -- verificado ANTES de tocar nada, ya
+existía.** Mismo patrón que `incidents` en el 7.4: el esquema original
+(etapa 2.5) ya tenía la tabla completa, sin ningún código encima
+(`src/db/schema/announcement-recipients.ts`) -- `delivery_status`
+(`pending`/`link_opened`/`failed`/`skipped`), `sent_at`, `error_message`,
+`phone_snapshot`. No se tocó ni se creó nada del esquema en este paso
+(eso es 8.5/8.6) -- la interfaz se diseñó para ser compatible con esas
+columnas sin tener que rediseñarla después: ver el comentario de
+`MessagingAttemptResult` en `messaging-provider.ts` para la
+correspondencia exacta. Importante: `{ok: true, url}` NO equivale
+todavía a `delivery_status = 'link_opened'` -- ese estado describe que el
+link YA se abrió de verdad (un hecho del navegador, posterior), mismo
+criterio que `whatsapp_handoff_opened` del flujo de entrada (paso 5.9): se
+registra en un paso aparte, disparado por el click real, nunca asumido de
+antemano. `'skipped'` tampoco lo decide esta interfaz -- un destinatario
+sin teléfono es un criterio de negocio de 8.5/8.6, esa fila nace
+`skipped` sin llegar nunca a un `MessagingProvider` (por eso
+`MessagingRecipient.phoneE164` es `string`, no `string | null`).
+
+**Reuso de `buildWhatsAppUrl` (flujo de entrada, paso 5.7/5.9b), no
+reimplementado.** Evaluado antes de escribir nada nuevo: esa función YA es
+genuinamente genérica (`(phone: string, message: string) => string`, sin
+ningún conocimiento de "reclamos") y ya vive en `src/lib/`, el lugar
+correcto para utilidades transversales (ver CLAUDE.md > Estructura de
+carpetas) -- no hacía falta moverla ni copiarla, `manual-link-provider.ts`
+la importa directo. Reconfirmado con `curl` (no solo citando el hallazgo
+del 5.9b, pedido explícito del paso) que `api.whatsapp.com/send` sigue sin
+corromper emojis ni saltos de línea para un mensaje con la forma de un
+aviso:
+
+```
+curl -sI "https://wa.me/5493511234567?text=Aviso%20%F0%9F%93%A2%20para%20todos%0ASaludos!"
+  Location: https://api.whatsapp.com/send/?phone=...&text=Aviso+%EF%BF%BD+para+todos%0ASaludos%21...
+  -- el emoji 📢 sigue corrompiéndose a %EF%BF%BD en el redirect de wa.me, igual que en el 5.9b.
+
+curl -s "https://api.whatsapp.com/send?phone=5493511234567&text=Aviso%20%F0%9F%93%A2%20para%20todos%0ASaludos!"
+  -- "%F0%9F%93%A2" (📢 intacto) y "%0A" (el salto de línea) aparecen sin
+     corromper en el link real de la página ("Continuar a la conversación")
+     Y en el deep link whatsapp://send/ embebido -- confirmado yendo
+     DIRECTO al dominio correcto, sin pasar por wa.me.
+```
+
+**Truncado por grafemas -- reescrito de cero, NO reusado de
+`format-ticket-message.ts`, con el motivo documentado.**
+`truncateDescriptionToFit`/`toGraphemes` de ese archivo son privadas (sin
+exportar) y están entrelazadas con el concepto específico del mensaje de
+un reclamo ("campos fijos + presupuesto para la descripción") --
+extraerlas hubiera significado tocar un archivo del flujo de entrada, que
+el enunciado pide no tocar. Un aviso no tiene campos fijos que preservar
+(título+cuerpo ya combinados en un solo texto por quien llame) -- el
+problema es más simple: truncar el mensaje ENTERO si excede el
+presupuesto. `truncateMessageToFit()` en `manual-link-provider.ts`
+aplica la MISMA lección (Intl.Segmenter grapheme + búsqueda binaria sobre
+el largo codificado) reescrita para esta forma más simple del problema.
+Mismo presupuesto medido en el 5.6 (2000 - 100 de reserva = 1900): sigue
+siendo válido tal cual, porque es el MISMO dominio (`api.whatsapp.com/
+send`) el que arma la URL en los dos flujos.
+
+**Diseño de la interfaz, pensado para lo que 8.2+ va a necesitar (sin que
+exista todavía ninguna UI que la use):**
+
+- `sendToRecipient(recipient, message)`, UN destinatario por invocación,
+  nunca un lote -- Fase 1 (paso 8.5) es manual, el administrador abre
+  WhatsApp de a uno. Un método de envío masivo modelaría una capacidad que
+  ni Fase 1 ni este paso tienen.
+- Devuelve `Promise<MessagingAttemptResult>` aunque las dos
+  implementaciones de hoy resuelven sincrónicamente -- `CloudApiProvider`
+  (etapa 13) sí va a necesitar I/O real (HTTP a la Cloud API), y que el
+  método ya sea async desde ahora evita cambiar la firma (y todos los
+  callers) el día que exista.
+- Objeto plano (`consoleProvider`/`manualLinkProvider` son objetos
+  literales, no clases) -- este proyecto no tiene ningún patrón de clases
+  de servicio (las únicas clases existentes, `BuildWhatsAppUrlError`/
+  `AttachmentUploadError`, son subclases de `Error`).
+
+**Selección por variable de entorno -- `MESSAGING_PROVIDER`, nombre YA
+anticipado por el propio proyecto.** `.env.example` y el comentario de
+`src/lib/env.ts` (paso 2.1b) ya tenían el nombre reservado, con la regla
+explícita "no la agregues hasta que algo la importe de verdad" -- este es
+ese momento. Valores válidos HOY: `console` (default si se deja vacío o
+sin definir -- seguro para cualquier checkout nuevo, no abre nada real) y
+`manual_link`. `cloud_api` NO es un valor aceptado -- pedido explícito del
+enunciado ("ni siquiera dejes un archivo stub"): el enum de Zod lo
+rechaza a propósito, para que elegirlo falle alto y claro al arrancar en
+vez de fallar en silencio dentro del factory. `getMessagingProvider()`
+(`get-messaging-provider.ts`) es el ÚNICO lugar que decide qué
+implementación usar -- ningún componente de UI ni Server Action futura
+debe importar `consoleProvider`/`manualLinkProvider` directo (verificado
+por diseño, todavía no hay ningún consumidor real -- eso empieza en 8.2).
+
+**Verificado con un script real, no solo lectura de código -- cuatro
+corridas, cada una un proceso nuevo** (necesario porque `env.ts` parsea
+`process.env` una sola vez al importarse, cacheado en el módulo):
+
+```
+$ (sin MESSAGING_PROVIDER)              -> {"MESSAGING_PROVIDER_env":"(sin definir)","resolvedProviderId":"console"}
+$ MESSAGING_PROVIDER=manual_link        -> {"MESSAGING_PROVIDER_env":"manual_link","resolvedProviderId":"manual_link"}
+$ MESSAGING_PROVIDER=console            -> {"MESSAGING_PROVIDER_env":"console","resolvedProviderId":"console"}
+$ MESSAGING_PROVIDER=cloud_api          -> Error: Variables de entorno inválidas o faltantes... "Invalid option: expected one of \"console\"|\"manual_link\""
+```
+
+**Tests unitarios (Vitest, mismo patrón que `formatTicketMessage` del
+5.6) -- 8 tests nuevos, 86/86 en total.** El caso pedido explícito del
+enunciado (emojis + saltos de línea, ida y vuelta):
+
+```ts
+const original =
+  "📢 Aviso importante\n\nEl próximo lunes se corta el agua de 9 a 13hs por trabajos de mantenimiento. 🔧💧\n\nGracias por la comprensión 🙏";
+// url real producida:
+// https://api.whatsapp.com/send?phone=5493511112223&text=%F0%9F%93%A2%20Aviso%20importante%0A%0AEl%20pr%C3%B3ximo%20lunes...%F0%9F%99%8F
+// decodeURIComponent(text) === original -> true
+```
+
+Más: el teléfono viaja sin "+" en `phone=`; un teléfono vacío falla con
+`{ok: false, error}` sin lanzar; `truncateMessageToFit` no corta un
+grafema a la mitad (probado repitiendo 🏢 -- 2 unidades UTF-16 cada una --
+con un presupuesto chico, confirmando que el resultado final siempre
+tiene una cantidad PAR de unidades UTF-16 antes de la elipsis); y un
+mensaje que supera `DEFAULT_MAX_ENCODED_MESSAGE_LENGTH` llega truncado a
+la URL final, que sigue siendo decodificable sin tirar excepción.
+
+**Sin dependencias nuevas** -- confirmado con `git diff --stat
+package.json package-lock.json` (sin cambios) antes de cerrar el paso.
 
 ## Reglas de seguridad (no negociables)
 

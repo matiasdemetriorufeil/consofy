@@ -4,3 +4,12 @@ out
 build
 coverage
 package-lock.json
+# Metadata de drizzle-kit (paso de mantenimiento post-7.6): _journal.json y
+# *_snapshot.json en src/db/migrations/meta/ los genera `drizzle-kit
+# generate` en cada migración nueva, nunca se editan a mano -- mismo
+# criterio que package-lock.json arriba (artefacto de una herramienta,
+# reformatearlo no evita que la propia herramienta lo vuelva a escribir
+# con su formato la próxima vez). Los .sql de src/db/migrations/ (fuera de
+# meta/) no necesitan entrada acá: Prettier no tiene parser de SQL
+# instalado en este proyecto, así que ya los ignora por su cuenta.
+src/db/migrations/meta/

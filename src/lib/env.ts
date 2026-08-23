@@ -7,14 +7,27 @@ import { publicEnv } from "./env.public";
 // REGLA: una variable se agrega a este esquema en el mismo paso en que algún
 // código empieza a leerla, nunca antes. Hoy lo leen src/db/index.ts
 // (DATABASE_URL), src/features/buildings/public-link.ts
-// (NEXT_PUBLIC_APP_URL, paso 4.6) y src/lib/supabase/admin.ts
+// (NEXT_PUBLIC_APP_URL, paso 4.6), src/lib/supabase/admin.ts
 // (SUPABASE_SERVICE_ROLE_KEY, paso 5.10: la única forma de generar URLs
 // firmadas para el bucket privado de adjuntos, ver CLAUDE.md > Reglas de
-// entorno sobre por qué esta clave se usa lo menos posible). No agregues
-// MESSAGING_PROVIDER hasta que algo la importe de verdad — ver PASO 2.1b en
-// el historial: validar variables que nada consume obliga a rellenarlas con
-// dummies para poder probar cualquier otra cosa, y eso invalida la
-// validación.
+// entorno sobre por qué esta clave se usa lo menos posible) y
+// src/features/announcements/messaging/get-messaging-provider.ts
+// (MESSAGING_PROVIDER, paso 8.1 -- el momento en que por fin algo la
+// importa de verdad, después de que esta misma regla bloqueó agregarla
+// antes de tiempo). Validar variables que nada consume obliga a
+// rellenarlas con dummies para poder probar cualquier otra cosa, y eso
+// invalida la validación -- no repitas ese error con la próxima variable
+// nueva.
+//
+// MESSAGING_PROVIDER: "console" | "manual_link" -- NO incluye "cloud_api"
+// todavía. CloudApiProvider es etapa 13, ni siquiera existe un stub (pedido
+// explícito del paso 8.1) -- aceptar ese valor acá haría que la variable
+// "valide" pero el factory no tuviera ninguna implementación real que
+// devolver, un fallo diferido y confuso en vez de un error claro al
+// arrancar. `.default("console")`: sin esto, cualquier checkout que no
+// haya actualizado su `.env.local` todavía (la variable es nueva en este
+// paso) dejaría de arrancar la app -- "console" es el default seguro
+// porque no abre nada real, solo imprime en la terminal.
 //
 // NEXT_PUBLIC_APP_URL vive ACÁ (esquema de servidor) y no en
 // src/lib/env.public.ts a propósito: el enlace público del edificio se arma
@@ -39,6 +52,7 @@ const schema = z.object({
   DATABASE_URL: z.url(),
   NEXT_PUBLIC_APP_URL: z.url(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
+  MESSAGING_PROVIDER: z.enum(["console", "manual_link"]).default("console"),
 });
 
 // -----------------------------------------------------------------------
@@ -113,6 +127,13 @@ function parseEnv() {
     DATABASE_URL: process.env.DATABASE_URL,
     NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL,
     SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
+    // Zod aplica .default("console") solo cuando la clave está AUSENTE del
+    // objeto, no cuando es "" -- un .env.local con la línea
+    // "MESSAGING_PROVIDER=" (valor vacío, tal como queda en .env.example)
+    // deja process.env.MESSAGING_PROVIDER === "", que fallaría el enum en
+    // vez de caer al default. `|| undefined` convierte ese vacío en
+    // ausencia real, para que sí dispare el default.
+    MESSAGING_PROVIDER: process.env.MESSAGING_PROVIDER || undefined,
   });
 
   if (!parsed.success) {
