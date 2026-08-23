@@ -1,0 +1,501 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { toast } from "sonner";
+
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Field, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
+import { OCCUPANCY_ROLE_LABEL } from "@/features/people/occupancy-role";
+
+import {
+  countSegmentRecipientsAction,
+  createAnnouncementDraftAction,
+  getBuildingTowersAndFloorsAction,
+  searchPeopleForSegmentAction,
+} from "../actions";
+import type { PersonSearchResult } from "../queries";
+import type { SegmentCriteria } from "../segment-schema";
+
+const ALL_BUILDINGS_VALUE = "__all__";
+const ROLE_OPTIONS = ["owner", "tenant"] as const;
+
+type AddedPerson = {
+  id: string;
+  label: string;
+};
+
+function personLabel(p: {
+  firstName: string;
+  lastName: string | null;
+  phoneE164: string | null;
+}): string {
+  const name = [p.firstName, p.lastName].filter(Boolean).join(" ");
+  return p.phoneE164 ? `${name} (${p.phoneE164})` : name;
+}
+
+// Constructor de segmentos (paso 8.2) -- único Client Component de la
+// pantalla de creación de un aviso: necesita estado local para ir armando
+// el segmento y disparar el conteo en vivo mientras se arma, ANTES de
+// guardar nada.
+//
+// Combinación de criterios (documentado también en el reporte del paso):
+// AND entre categorías (torre Y piso Y rol tienen que cumplirse todos
+// para que una unidad/ocupación califique por los criterios GENERALES) --
+// OR dentro de una misma categoría (cualquiera de las torres elegidas,
+// cualquiera de los pisos, cualquiera de los roles). Las personas
+// agregadas a mano se UNEN (unión, no intersección) al resultado de los
+// criterios generales -- ver el comentario reinterpretado de
+// announcements.segment.
+export function AnnouncementSegmentForm({
+  buildings,
+}: {
+  buildings: { id: string; name: string }[];
+}) {
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [buildingId, setBuildingId] = useState<string | null>(null);
+
+  const [towerOptions, setTowerOptions] = useState<string[]>([]);
+  const [floorOptions, setFloorOptions] = useState<string[]>([]);
+  const [selectedTowers, setSelectedTowers] = useState<string[]>([]);
+  const [selectedFloors, setSelectedFloors] = useState<string[]>([]);
+  const [selectedRoles, setSelectedRoles] = useState<SegmentCriteria["roles"]>(
+    [],
+  );
+
+  const [personQuery, setPersonQuery] = useState("");
+  const [personResults, setPersonResults] = useState<PersonSearchResult[]>([]);
+  const [addedPeople, setAddedPeople] = useState<AddedPerson[]>([]);
+
+  const [counts, setCounts] = useState<{
+    qualifiedWithPhone: number;
+    qualifiedWithoutPhone: number;
+  } | null>(null);
+  const [countPending, setCountPending] = useState(false);
+  const [countError, setCountError] = useState<string | null>(null);
+
+  const [savePending, setSavePending] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [created, setCreated] = useState<{ id: string; title: string } | null>(
+    null,
+  );
+
+  // Cambiar de edificio invalida torres/pisos elegidos -- una torre/piso
+  // de OTRO edificio no tiene ningún sentido acá (mismo criterio que
+  // "cambiar de edificio limpia cualquier unidad ya elegida" en el filtro
+  // de la bandeja de reclamos, paso 6.1). Reset SÍNCRONO ajustado durante
+  // el render (mismo patrón ya usado en TicketActionsPanel para
+  // sincronizar el input de responsable con la prop) -- no en un
+  // useEffect: es estado derivado de `buildingId`, no una sincronización
+  // con un sistema externo, así que setState "en efecto" acá causaría un
+  // frame de más con las torres/pisos viejos todavía visibles.
+  const [prevBuildingId, setPrevBuildingId] = useState(buildingId);
+  if (buildingId !== prevBuildingId) {
+    setPrevBuildingId(buildingId);
+    setSelectedTowers([]);
+    setSelectedFloors([]);
+    setTowerOptions([]);
+    setFloorOptions([]);
+  }
+
+  // Acá SÍ un useEffect real: buscar las opciones de torre/piso es I/O
+  // real contra el servidor (un sistema externo), no estado derivado.
+  useEffect(() => {
+    if (!buildingId) {
+      return;
+    }
+    let cancelled = false;
+    getBuildingTowersAndFloorsAction(buildingId).then((result) => {
+      if (!cancelled) {
+        setTowerOptions(result.towers);
+        setFloorOptions(result.floors);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [buildingId]);
+
+  // Conteo en vivo con debounce (400ms, mismo valor ya usado en el
+  // buscador de la bandeja de reclamos, paso 6.1) -- contra datos REALES
+  // en cada cambio de criterio, nunca un estimado. Todo el setState vive
+  // ADENTRO del callback del timeout (nunca sincrónico en el cuerpo del
+  // efecto) -- evita el render en cascada que dispara la regla
+  // react-hooks/set-state-in-effect.
+  //
+  // `cancelled` -- CORRECCIÓN encontrada probando este mismo paso con
+  // datos reales: sin este flag, la respuesta del pedido de conteo
+  // INICIAL (buildingId=null, disparado al montar) podía llegar DESPUÉS
+  // de la respuesta del pedido siguiente (ya con el edificio elegido) --
+  // dos pedidos al servidor no garantizan resolver en el orden en que se
+  // lanzaron. Sin el guard, la respuesta vieja pisaba el conteo correcto
+  // ya mostrado, dejando en pantalla un número mayor (el de "todos los
+  // edificios") después de haber elegido un edificio puntual. Mismo
+  // patrón que ya usa el efecto de arriba (towers/floors) -- se aplica acá
+  // también, no solo ahí.
+  useEffect(() => {
+    const segment: SegmentCriteria = {
+      towers: selectedTowers,
+      floors: selectedFloors,
+      roles: selectedRoles,
+      personIds: addedPeople.map((p) => p.id),
+    };
+    let cancelled = false;
+    const timeout = setTimeout(async () => {
+      setCountPending(true);
+      setCountError(null);
+      const result = await countSegmentRecipientsAction({
+        buildingId,
+        segment,
+      });
+      if (cancelled) {
+        return;
+      }
+      setCountPending(false);
+      if (result.ok) {
+        setCounts({
+          qualifiedWithPhone: result.qualifiedWithPhone,
+          qualifiedWithoutPhone: result.qualifiedWithoutPhone,
+        });
+      } else {
+        setCountError(result.error);
+        setCounts(null);
+      }
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(timeout);
+    };
+  }, [buildingId, selectedTowers, selectedFloors, selectedRoles, addedPeople]);
+
+  // Búsqueda de personas con debounce, mismo patrón -- el "limpiar
+  // resultados si la búsqueda es muy corta" también vive adentro del
+  // timeout, por el mismo motivo de arriba. Mismo guard `cancelled` que el
+  // efecto de conteo -- misma clase de bug (una búsqueda vieja podría
+  // resolver después de una más nueva y pisar sus resultados).
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+  useEffect(() => {
+    clearTimeout(searchDebounceRef.current);
+    let cancelled = false;
+    searchDebounceRef.current = setTimeout(async () => {
+      if (personQuery.trim().length < 2) {
+        if (!cancelled) {
+          setPersonResults([]);
+        }
+        return;
+      }
+      const results = await searchPeopleForSegmentAction(personQuery);
+      if (!cancelled) {
+        setPersonResults(results);
+      }
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(searchDebounceRef.current);
+    };
+  }, [personQuery]);
+
+  function toggleInArray<T>(list: T[], value: T): T[] {
+    return list.includes(value)
+      ? list.filter((v) => v !== value)
+      : [...list, value];
+  }
+
+  function addPerson(person: PersonSearchResult) {
+    if (addedPeople.some((p) => p.id === person.id)) {
+      return;
+    }
+    setAddedPeople([
+      ...addedPeople,
+      { id: person.id, label: personLabel(person) },
+    ]);
+    setPersonQuery("");
+    setPersonResults([]);
+  }
+
+  function removePerson(id: string) {
+    setAddedPeople(addedPeople.filter((p) => p.id !== id));
+  }
+
+  function handleSave() {
+    setSaveError(null);
+    setSavePending(true);
+    const segment: SegmentCriteria = {
+      towers: selectedTowers,
+      floors: selectedFloors,
+      roles: selectedRoles,
+      personIds: addedPeople.map((p) => p.id),
+    };
+    createAnnouncementDraftAction({ title, body, buildingId, segment }).then(
+      (result) => {
+        setSavePending(false);
+        if (result.ok) {
+          toast.success("Borrador guardado.");
+          setCreated({ id: result.id, title });
+        } else {
+          setSaveError(result.error);
+        }
+      },
+    );
+  }
+
+  function handleReset() {
+    setCreated(null);
+    setTitle("");
+    setBody("");
+    setBuildingId(null);
+    setSelectedRoles([]);
+    setAddedPeople([]);
+  }
+
+  if (created) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Borrador guardado</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3">
+          <p className="text-ink text-sm">
+            &quot;{created.title}&quot; se guardó como borrador, con{" "}
+            {counts?.qualifiedWithPhone ?? 0} destinatario(s). Todavía no se
+            mandó nada -- eso es un paso siguiente.
+          </p>
+          <Button type="button" variant="outline" onClick={handleReset}>
+            Crear otro aviso
+          </Button>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-6">
+      <Card>
+        <CardHeader>
+          <CardTitle>Datos del aviso</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4">
+          <Field>
+            <FieldLabel htmlFor="announcement-title">Título</FieldLabel>
+            <Input
+              id="announcement-title"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="Ej: Corte de agua programado"
+            />
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="announcement-body">Mensaje</FieldLabel>
+            <Textarea
+              id="announcement-body"
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              rows={4}
+              placeholder="Escribí el texto que van a recibir los vecinos."
+            />
+          </Field>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Destinatarios</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-5">
+          <Field>
+            <FieldLabel htmlFor="announcement-building">Edificio</FieldLabel>
+            <Select
+              value={buildingId ?? ALL_BUILDINGS_VALUE}
+              onValueChange={(value) =>
+                setBuildingId(value === ALL_BUILDINGS_VALUE ? null : value)
+              }
+            >
+              <SelectTrigger id="announcement-building">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={ALL_BUILDINGS_VALUE}>
+                  Todos los edificios
+                </SelectItem>
+                {buildings.map((b) => (
+                  <SelectItem key={b.id} value={b.id}>
+                    {b.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {buildingId === null && (
+              <p className="text-ink-muted text-xs">
+                Con &quot;Todos los edificios&quot; no se puede filtrar por
+                torre ni piso -- esos criterios necesitan un edificio puntual.
+              </p>
+            )}
+          </Field>
+
+          {buildingId && towerOptions.length > 0 && (
+            <div className="flex flex-col gap-1.5">
+              <span className="text-ink-muted text-xs">Torre</span>
+              <div className="flex flex-wrap gap-3">
+                {towerOptions.map((tower) => (
+                  <label
+                    key={tower}
+                    className="flex items-center gap-1.5 text-sm"
+                  >
+                    <Checkbox
+                      checked={selectedTowers.includes(tower)}
+                      onCheckedChange={() =>
+                        setSelectedTowers(toggleInArray(selectedTowers, tower))
+                      }
+                    />
+                    {tower}
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {buildingId && floorOptions.length > 0 && (
+            <div className="flex flex-col gap-1.5">
+              <span className="text-ink-muted text-xs">Piso</span>
+              <div className="flex flex-wrap gap-3">
+                {floorOptions.map((floor) => (
+                  <label
+                    key={floor}
+                    className="flex items-center gap-1.5 text-sm"
+                  >
+                    <Checkbox
+                      checked={selectedFloors.includes(floor)}
+                      onCheckedChange={() =>
+                        setSelectedFloors(toggleInArray(selectedFloors, floor))
+                      }
+                    />
+                    {floor}
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="flex flex-col gap-1.5">
+            <span className="text-ink-muted text-xs">Rol</span>
+            <div className="flex flex-wrap gap-3">
+              {ROLE_OPTIONS.map((role) => (
+                <label key={role} className="flex items-center gap-1.5 text-sm">
+                  <Checkbox
+                    checked={selectedRoles.includes(role)}
+                    onCheckedChange={() =>
+                      setSelectedRoles(toggleInArray(selectedRoles, role))
+                    }
+                  />
+                  {OCCUPANCY_ROLE_LABEL[role]}
+                </label>
+              ))}
+            </div>
+          </div>
+
+          <Field>
+            <FieldLabel htmlFor="announcement-person-search">
+              Agregar una persona puntual
+            </FieldLabel>
+            <Input
+              id="announcement-person-search"
+              value={personQuery}
+              onChange={(e) => setPersonQuery(e.target.value)}
+              placeholder="Buscar por nombre o teléfono..."
+            />
+            {personResults.length > 0 && (
+              <ul className="border-border divide-border mt-1 flex flex-col divide-y rounded-md border">
+                {personResults.map((person) => (
+                  <li key={person.id}>
+                    <button
+                      type="button"
+                      className="hover:bg-canvas w-full px-3 py-2 text-left text-sm"
+                      onClick={() => addPerson(person)}
+                    >
+                      {personLabel(person)}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {addedPeople.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-2">
+                {addedPeople.map((p) => (
+                  <Badge
+                    key={p.id}
+                    variant="secondary"
+                    className="font-body gap-1.5"
+                  >
+                    {p.label}
+                    <button
+                      type="button"
+                      aria-label={`Quitar a ${p.label}`}
+                      onClick={() => removePerson(p.id)}
+                    >
+                      ×
+                    </button>
+                  </Badge>
+                ))}
+              </div>
+            )}
+          </Field>
+
+          <div className="border-border rounded-md border border-dashed p-3 text-sm">
+            {countPending && (
+              <p className="text-ink-muted">Calculando destinatarios…</p>
+            )}
+            {!countPending && countError && (
+              <p className="text-destructive">{countError}</p>
+            )}
+            {!countPending && !countError && counts && (
+              <div className="flex flex-col gap-0.5">
+                <p className="text-ink font-medium">
+                  {counts.qualifiedWithPhone} destinatario
+                  {counts.qualifiedWithPhone === 1 ? "" : "s"} van a recibir
+                  este aviso.
+                </p>
+                {counts.qualifiedWithoutPhone > 0 && (
+                  <p className="text-ink-muted text-xs">
+                    {counts.qualifiedWithoutPhone} persona
+                    {counts.qualifiedWithoutPhone === 1 ? "" : "s"} más califica
+                    {counts.qualifiedWithoutPhone === 1 ? "" : "n"} por este
+                    segmento, pero no tiene{" "}
+                    {counts.qualifiedWithoutPhone === 1 ? "" : "n"} teléfono
+                    cargado -- no va
+                    {counts.qualifiedWithoutPhone === 1 ? "" : "n"} a recibir el
+                    aviso.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      {saveError && <p className="text-destructive text-sm">{saveError}</p>}
+
+      <Button
+        type="button"
+        className="self-start"
+        disabled={savePending || !title.trim() || !body.trim()}
+        onClick={handleSave}
+      >
+        {savePending ? "Guardando…" : "Guardar borrador"}
+      </Button>
+    </div>
+  );
+}

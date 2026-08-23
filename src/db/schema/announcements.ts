@@ -41,17 +41,43 @@ export const announcements = pgTable(
     title: text("title").notNull(),
     body: text("body").notNull(),
     // Criterio de destinatarios, validado con Zod en la capa de aplicación
-    // (no acá). Forma esperada:
+    // (no acá, ver segmentCriteriaSchema en
+    // src/features/announcements/segment-schema.ts). Forma esperada:
     //   {
-    //     towers?: string[];               // solo con building_id != null
-    //     floors?: string[];                // idem
-    //     roles?: ("owner" | "tenant")[];
-    //     personIds?: string[];             // si está presente, ANULA el
-    //                                        // resto de los filtros: envía
-    //                                        // solo a estas personas
+    //     towers: string[];                 // solo relevante con
+    //                                        // building_id != null
+    //     floors: string[];                 // idem
+    //     roles: ("owner" | "tenant")[];
+    //     personIds: string[];
     //   }
-    // Objeto vacío {} = todos los destinatarios elegibles del alcance (el
-    // edificio, o toda la organización si building_id es NULL).
+    // Objeto con arrays vacíos = todos los destinatarios elegibles del
+    // alcance (el edificio, o toda la organización si building_id es
+    // NULL).
+    //
+    // REINTERPRETADO en el paso 8.2 -- semántica anterior de este
+    // comentario (dejada acá tachada en el historial de git, no en el
+    // código): "si personIds está presente, ANULA el resto de los
+    // filtros". El paso 8.2 pide explícitamente poder agregar personas
+    // individuales ADEMÁS de los criterios generales (no solo en
+    // reemplazo) -- `personIds` ahora es SIEMPRE aditivo: el segmento
+    // final es la UNIÓN (personas que califican por torres/pisos/roles)
+    // ∪ (personas de personIds), deduplicada por persona. El caso "en
+    // lugar de" sigue siendo alcanzable tal cual (dejar towers/floors/
+    // roles vacíos y cargar solo personIds), así que la unión es
+    // estrictamente más expresiva que la semántica anterior, no una
+    // ruptura de compatibilidad -- ver CLAUDE.md > Constructor de
+    // segmentos, paso 8.2, para el razonamiento completo.
+    //
+    // "edificio uno o varios" del enunciado del plan, interpretado contra
+    // el esquema real (que ya modela `building_id` como UN uuid nullable,
+    // no un array): un aviso apunta a UN edificio puntual, o a NULL
+    // ("toda la organización", ver el comentario de building_id arriba)
+    // -- eso ya cubre el caso de negocio real que motivaba "varios"
+    // (mandar el mismo aviso a más de un edificio sin repetirlo). No se
+    // agregó soporte para un subconjunto arbitrario de edificios
+    // específicos: hubiera exigido cambiar building_id por un array,
+    // deshaciendo una decisión ya tomada y documentada de la etapa 2.5
+    // sin una necesidad de negocio real que lo pida.
     segment: jsonb("segment").notNull().default({}),
     status: announcementStatus("status").notNull().default("draft"),
     scheduledFor: timestamp("scheduled_for", { withTimezone: true }),

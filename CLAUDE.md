@@ -3640,6 +3640,168 @@ la URL final, que sigue siendo decodificable sin tirar excepción.
 **Sin dependencias nuevas** -- confirmado con `git diff --stat
 package.json package-lock.json` (sin cambios) antes de cerrar el paso.
 
+## Constructor de segmentos para comunicados (paso 8.2)
+
+Primera pantalla real de la etapa 8: crea un aviso como BORRADOR con un
+segmento de destinatarios armado por edificio/torre/piso/rol/personas
+puntuales, con un contador en vivo contra datos reales. Nada se envía en
+este paso (eso es 8.4/8.5).
+
+**Qué encontré antes de tocar nada:**
+
+- **Torre**: existe como concepto real -- `units.tower` (text, nullable
+  -- "muchos edificios no tienen torres"), no una tabla propia. `units`
+  también tiene `floor` (text, NO integer -- "PB", "EP", "Subsuelo 1" son
+  válidos) y `number`.
+- **Rol propietario/inquilino**: `unit_occupancies.role`, enum
+  `occupancy_role` con valores `"owner"`/`"tenant"` (traducción ya
+  existente en `src/features/people/occupancy-role.ts`,
+  `OCCUPANCY_ROLE_LABEL`).
+- **Relación people/units/buildings**: vía `unit_occupancies`
+  (`personId`, `unitId`, `role`, `endedOn` nullable = ocupación vigente).
+  Una persona puede tener MÁS DE UNA ocupación vigente a la vez (confirmado
+  con datos reales del seed: Roberto López es propietario de dos unidades
+  distintas de Torre Central) -- el conteo tiene que deduplicar por
+  persona, no por fila de ocupación.
+- **`announcements`/`announcement_recipients`**: los dos YA EXISTÍAN
+  completos desde la etapa 2.5 (mismo patrón que `incidents` en el 7.4).
+  `announcements.segment` (jsonb) ya tenía documentado EXACTAMENTE el
+  shape que este paso necesita (`towers`/`floors`/`roles`/`personIds`) --
+  no hizo falta ninguna migración. `announcement_recipients`
+  (`delivery_status`, `sent_at`, `error_message`, `phone_snapshot`) no se
+  tocó ni se usó para persistir nada todavía -- ver el comentario de
+  `MessagingAttemptResult` (paso 8.1) para la correspondencia ya
+  compatible.
+
+**Reinterpretaciones sobre el esquema real, documentadas explícitamente
+(no asumidas del enunciado del plan):**
+
+- **"Edificio, uno o varios"** → interpretado como "uno puntual, o
+  `null` = toda la organización". `announcements.building_id` YA es un
+  uuid nullable SIMPLE (no un array) desde la etapa 2.5, con su propio
+  comentario explicando por qué: "un aviso de TODA la organización...
+  para no repetirlo edificio por edificio" -- ese es exactamente el caso
+  de negocio real que motivaba "varios". No se agregó soporte para un
+  subconjunto arbitrario de edificios específicos (hubiera exigido
+  deshacer una decisión ya tomada de la etapa 2.5 sin necesidad real).
+- **"Rango de unidades (de 1A a 5C, o por piso)"** → interpretado como
+  MULTI-SELECT de pisos existentes (`floors: string[]`), no un rango
+  "desde-hasta". `units.floor` es TEXT sin orden natural universal ("PB"
+  vs. "3" vs. "Subsuelo 1") -- un algoritmo de rango alfanumérico sobre
+  eso sería frágil e inventaría un orden que el modelo no garantiza. El
+  propio enunciado autorizaba esto ("según lo que permita el modelo
+  real").
+- **`personIds`, de "reemplaza" a "ADITIVO"** → el comentario original de
+  `announcements.segment` decía "si personIds está presente, ANULA el
+  resto de los filtros". Reinterpretado a UNIÓN: el enunciado pide
+  explícitamente sumar personas "además de O en lugar de" los criterios
+  generales -- la unión cubre los dos casos (con los demás filtros
+  vacíos, "en lugar de" sigue funcionando igual), así que es
+  estrictamente más expresiva, no una ruptura. Documentado en el
+  comentario de la columna, no solo acá.
+
+**Combinación de criterios -- AND entre categorías, OR dentro de una
+misma categoría, UNIÓN con las personas agregadas a mano:**
+
+- Una unidad/ocupación califica por los criterios GENERALES si cumple
+  TODOS los filtros activos a la vez (torre Y piso Y rol -- AND), pero
+  dentro de cada filtro alcanza con matchear CUALQUIERA de los valores
+  elegidos (cualquiera de las torres, cualquiera de los pisos, cualquiera
+  de los roles -- OR). Un filtro vacío no restringe nada en esa
+  categoría.
+- Las personas agregadas a mano (`personIds`) se UNEN al resultado de los
+  criterios generales -- nunca una intersección, nunca reemplazan nada.
+- El segmento final es la unión deduplicada de ambos conjuntos, por
+  persona (un `Map` keyeado por `person.id` en
+  `countSegmentRecipients()`/`findPeopleByCriteria()`,
+  `src/features/announcements/queries.ts`).
+
+**Sin migración** -- `announcements.segment`/`buildings_id` ya existían
+con el shape correcto; solo se actualizó el COMENTARIO de la columna
+(reinterpretación de `personIds`, documentada arriba).
+
+**Contador en vivo, contra datos reales en cada cambio** --
+`countSegmentRecipientsAction` (Server Action, `actions.ts`), llamada con
+debounce de 400ms desde `AnnouncementSegmentForm` cada vez que cambia
+algún criterio. Devuelve `{qualifiedWithPhone, qualifiedWithoutPhone}` --
+personas sin `phone_e164` (nullable, ver CLAUDE.md > Acceso a datos)
+califican por el segmento pero se muestran aparte, excluidas del conteo
+principal (conecta con el paso 8.7).
+
+**Bug real encontrado probando este mismo paso con datos reales --
+condición de carrera en el contador en vivo, corregida, no solo
+reportada.** Sin ningún guard, la respuesta del pedido de conteo INICIAL
+(`buildingId=null`, disparado al montar el formulario) podía resolver
+DESPUÉS de la respuesta del pedido siguiente (ya con un edificio
+elegido) -- dos pedidos al servidor no garantizan resolver en el orden en
+que se lanzaron. Confirmado en la práctica: seleccionar "Torre Central"
+mostraba brevemente el conteo correcto (16) y después LO PISABA con el
+conteo de "todos los edificios" (26), porque la respuesta vieja llegó
+tarde. Mismo patrón de bug en la búsqueda de personas (una búsqueda
+vieja podría pisar los resultados de una más nueva). Arreglado con un
+flag `cancelled` en las tres condiciones de carrera potenciales (conteo,
+torres/pisos, búsqueda de personas) -- mismo patrón que ya usaba el
+efecto de torres/pisos original, extendido a los otros dos. El reset
+SÍNCRONO de `selectedTowers`/`selectedFloors` al cambiar de edificio se
+resolvió AJUSTANDO ESTADO DURANTE EL RENDER (mismo patrón ya usado en
+`TicketActionsPanel` para sincronizar un input con una prop), no en un
+`useEffect` -- evita el error real de lint `react-hooks/set-state-in-
+effect` que salió al escribir la primera versión (llamar `setState`
+sincrónicamente en el cuerpo de un efecto).
+
+**Segundo bug real encontrado en la misma verificación -- búsqueda de
+personas por nombre completo.** Buscar "Claudia Rojas" (el nombre
+completo, como cualquiera escribiría para encontrar a alguien) daba CERO
+resultados: el ILIKE comparaba la query completa contra `first_name` O
+contra `last_name` por separado, y ninguna de las dos columnas por sí
+sola contiene el string "Claudia Rojas". Corregido agregando una cuarta
+rama al OR que compara contra `first_name || ' ' || coalesce(last_name,
+'')` -- el mismo "Nombre Apellido" que ya se muestra en el resultado.
+
+**UI**: `AnnouncementSegmentForm`
+(`src/features/announcements/components/`), único Client Component de
+`/panel/announcements/new`. Selectores de torre/piso solo aparecen con un
+edificio puntual elegido (deshabilitados/ocultos con "Todos los
+edificios", mismo criterio que el comentario de `announcements.segment`).
+Personas agregadas a mano se muestran como chips removibles. El
+`EmptyState` de `/panel/announcements` ahora linkea acá -- la pantalla de
+LISTADO de avisos sigue sin existir (fuera de alcance de 8.2, documentado
+como límite conocido, no un olvido).
+
+**Verificado con datos reales del seed (Torre Central: 17 personas con
+ocupación vigente, 16 con teléfono, 1 sin -- Alejandro Herrera; 1 sola
+ocupación `tenant`, las demás `owner`), admin de prueba dedicado
+(Playwright, creado y borrado solo para esta verificación):**
+
+- **Caso 1 (un solo edificio):** segmento = Torre Central, sin otros
+  filtros → **16 con teléfono + 1 sin teléfono**, coincide exacto con el
+  `COUNT` manual (`unit_occupancies` vigentes de Torre Central, deduplicado
+  por persona).
+- **Caso 2 (intersección, no unión):** + rol Propietario → **15 con
+  teléfono + 1 sin teléfono** -- excluye correctamente a la única
+  ocupación `tenant` (Ana Álvarez), que el caso 1 SÍ incluía. Confirma
+  AND entre categorías, no unión con "todo el edificio".
+- **Caso 3a (persona agregada que NO calificaba):** + Claudia Rojas
+  (sin ninguna ocupación en ningún edificio) → **16 con teléfono** (15+1,
+  suma limpia, sin tocar el excluido).
+- **Caso 3b (persona agregada que YA calificaba -- dedup):** + Roberto
+  López (ya contado vía rol=owner) → sigue en **16 con teléfono**, sin
+  subir -- confirma que la unión dedupea de verdad, no solo "no debería
+  duplicar".
+- **Caso 4 (excluidos por falta de teléfono):** presente en los 4 casos
+  de arriba -- Alejandro Herrera (`Sur 3°A`, propietario, sin
+  `phone_e164`) aparece siempre como "1 persona más califica... pero no
+  tiene teléfono cargado", nunca en el conteo principal.
+- **Persistencia confirmada por SQL directo** (no solo por la pantalla):
+  guardar el borrador de arriba escribió
+  `segment: {roles: ["owner"], towers: [], floors: [], personIds:
+["<id de Claudia Rojas>"]}` y `building_id` = el uuid real de Torre
+  Central, `status: "draft"`.
+
+**Limpieza:** el aviso de prueba persistido: soft-borrado. Cuenta de
+prueba (`prueba-8-2-...@example.com`) eliminada por completo (Auth +
+`app_users`).
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
