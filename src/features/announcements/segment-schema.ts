@@ -48,7 +48,16 @@ export type SegmentRecipientCount = {
   qualifiedWithoutPhone: number;
 };
 
-export const createAnnouncementDraftSchema = z.object({
+// Paso 8.3 -- contenido del aviso, plantilla + variables. `templateId` no
+// se valida contra un catálogo acá (viviría en
+// features/announcements/templates.ts, que Zod no tiene por qué conocer) --
+// la Server Action que recibe esto es la que resuelve la plantilla real y
+// decide qué hacer si no matchea ninguna (ver actions.ts). `templateVariables`
+// es un diccionario libre string->string: sus claves dependen de CUÁL
+// plantilla se eligió, así que no hay un shape fijo que Zod pueda exigir acá
+// sin conocer la plantilla -- esa validación (¿están completas las variables
+// que la plantilla declara?) también vive en la Server Action.
+const announcementContentSchema = {
   title: z
     .string()
     .trim()
@@ -61,7 +70,13 @@ export const createAnnouncementDraftSchema = z.object({
     .max(4000, "Como máximo 4000 caracteres."),
   buildingId: z.uuid().nullable(),
   segment: segmentCriteriaSchema,
-});
+  templateId: z.string().nullable(),
+  templateVariables: z.record(z.string(), z.string()).default({}),
+};
+
+export const createAnnouncementDraftSchema = z.object(
+  announcementContentSchema,
+);
 
 export type CreateAnnouncementDraftInput = z.input<
   typeof createAnnouncementDraftSchema
@@ -69,3 +84,17 @@ export type CreateAnnouncementDraftInput = z.input<
 
 export type CreateAnnouncementDraftResult =
   { ok: true; id: string } | { ok: false; error: string };
+
+// Igual que crear, pero contra un borrador YA EXISTENTE (mismo registro,
+// nunca uno nuevo) -- ver CLAUDE.md > Editor de comunicados, paso 8.3.
+export const updateAnnouncementDraftSchema = z.object({
+  id: z.uuid(),
+  ...announcementContentSchema,
+});
+
+export type UpdateAnnouncementDraftInput = z.input<
+  typeof updateAnnouncementDraftSchema
+>;
+
+export type UpdateAnnouncementDraftResult =
+  { ok: true } | { ok: false; error: string };

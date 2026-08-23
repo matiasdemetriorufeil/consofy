@@ -3802,6 +3802,146 @@ ocupación `tenant`, las demás `owner`), admin de prueba dedicado
 prueba (`prueba-8-2-...@example.com`) eliminada por completo (Auth +
 `app_users`).
 
+## Editor de comunicados con plantillas reutilizables (paso 8.3)
+
+Extiende la MISMA pantalla del paso 8.2 (`AnnouncementSegmentForm`, mismo
+registro de `announcements`) con un editor de contenido: elegir una
+plantilla predefinida (o arrancar en blanco), completar sus variables de
+comunicado en campos de formulario, ver el cuerpo armado en vivo, y
+guardar sobre el mismo borrador.
+
+**Qué encontré antes de tocar nada:**
+
+- **Columnas de `announcements` para el contenido**, ya existentes desde
+  el paso 8.1/8.2: `title` (text), `body` (text), sin ninguna columna de
+  "plantilla usada" -- confirmado leyendo el archivo completo, no de
+  memoria.
+- **Ninguna tabla ni estructura para plantillas en sí, verificado, no
+  asumido.** A diferencia de `incidents` (paso 7.4) o
+  `announcement_recipients` (paso 8.1), que la etapa 2.5 ya había dejado
+  completos y sin usar, acá no hay nada -- `grep -rniE "template|plantilla"
+src/db/schema/` no encontró ninguna tabla ni columna pensada para esto
+  (el único hit real fue un comentario no relacionado en `buildings.ts`).
+
+**Dónde y cómo decidí guardar las plantillas predefinidas: hardcodeadas en
+código (`src/features/announcements/templates.ts`), no en una tabla.**
+El enunciado de este paso prohíbe explícitamente agregar una pantalla de
+administración de plantillas -- sin esa pantalla, no hay quién las edite
+desde el panel, así que una tabla nueva solo agregaría una migración y un
+CRUD que nadie va a usar todavía. Si en algún paso futuro se pide poder
+crear/editar plantillas desde el panel, ESE es el momento de convertir
+esto en una tabla real (criterio propio, no una instrucción ya dada --
+el enunciado dejaba las dos opciones abiertas explícitamente).
+
+**Formato de placeholder por destinatario -- documentado para que el paso
+8.5 lo parsee sin ambigüedad:**
+
+- Sintaxis: `{{clave}}`, con `clave` = uno o más caracteres de `\w`
+  (letras/números/guión bajo), sin espacios adentro de las llaves. Regex:
+  `/\{\{(\w+)\}\}/g`.
+- Las CUATRO plantillas predefinidas usan como mínimo `{{nombre}}` y
+  `{{unidad}}` (pedido explícito del enunciado) -- pero esto NO es una
+  lista cerrada: en modo "sin plantilla" el administrador puede tipear
+  cualquier `{{token}}` a mano en el texto libre.
+- **El contrato clave para el 8.5:** las variables DE COMUNICADO (fecha,
+  horario, motivo...) se sustituyen en ESTE paso, antes de guardar --
+  `announcements.body` ya guardado tiene esas resueltas. Cualquier
+  `{{token}}` que quede en ese `body` guardado es, por construcción, un
+  placeholder POR DESTINATARIO que el 8.5 tiene que resolver contra los
+  datos reales de cada persona del segmento. `extractPlaceholderTokens(body)`
+  (`templates.ts`) hace exactamente ese parseo -- el 8.5 puede reusarla
+  directo en vez de reimplementar la regex.
+- Las DOS categorías de variable comparten la misma sintaxis
+  `{{clave}}` -- se distinguen por CÓDIGO, no por un delimitador distinto:
+  cada plantilla declara su lista `variables` (las de comunicado); todo
+  `{{token}}` del `bodyTemplate` que NO esté en esa lista quedó, a
+  propósito, para resolverse por destinatario.
+
+**Validación de variables de comunicado -- server-side, no solo
+client-side.** Si se eligió una plantilla, TODAS sus variables tienen que
+venir completas (no vacías/solo espacios) antes de guardar --
+`validateTemplateVariables()` (`actions.ts`) lo revalida en el servidor
+aunque el cliente ya lo bloquee, mismo criterio de "Zod en el servidor
+siempre" (CLAUDE.md > Reglas de seguridad) aplicado a mano porque el shape
+de `variables` depende de CUÁL plantilla se eligió -- un schema de Zod
+estático no puede expresar eso sin conocer la plantilla. El cliente
+(`AnnouncementSegmentForm`) bloquea el guardado ANTES de llamar al
+servidor y muestra el error de forma clara: un mensaje general
+("Completá todas las variables de la plantilla antes de guardar.") más
+"Completá este campo." debajo de cada variable vacía -- nunca un
+placeholder vacío guardado en silencio.
+
+**`templateId`/`templateVariables`, columnas nuevas en `announcements`
+(migración real, aplicada):**
+
+```sql
+-- 0031_simple_deathstrike.sql
+ALTER TABLE "announcements" ADD COLUMN "template_id" text;
+ALTER TABLE "announcements" ADD COLUMN "template_variables" jsonb DEFAULT '{}'::jsonb NOT NULL;
+```
+
+`template_id` es simplemente el `id` de una plantilla hardcodeada (ej.
+`"corte-de-agua"`), sin FK -- no hay tabla del lado referenciado. Si el
+código borra o renombra una plantilla después de que un borrador la usó,
+`getAnnouncementTemplate()` devuelve `undefined` y el editor cae a modo
+"sin plantilla" mostrando el `body` ya guardado como texto libre -- nada
+se pierde, porque `body` ya tiene el texto final, no depende de que la
+plantilla siga existiendo. `template_variables` guarda los valores
+tipeados (fecha, horario, motivo...) por separado de `body`, para poder
+REPOBLAR los campos del formulario al reabrir un borrador -- `body` por sí
+solo alcanza para mostrar el texto final, pero no para reconstruir qué se
+tipeó en cada campo.
+
+**Modo edición/reload -- ruta nueva, necesaria para que "recargar la
+pantalla" sea una prueba real, no solo un estado de React.**
+`/panel/announcements/new` sigue siendo el punto de entrada en blanco;
+al guardar con éxito (crear), ahora NAVEGA (`router.push`) a
+`/panel/announcements/[id]` en vez de mostrar una tarjeta "guardado"
+efímera -- esa página nueva es un Server Component
+(`getAnnouncementDraftForEdit`, `queries.ts`) que relee todo de la base en
+CADA carga, nunca depende de memoria del cliente. Guardar de nuevo desde
+ahí usa `updateAnnouncementDraftAction` (UPDATE sobre el mismo `id`,
+acotado a `status = 'draft'` -- mismo criterio de aislamiento por
+organización que el resto del proyecto), nunca crea un registro nuevo.
+Esto es lo que hace que F5 en `/panel/announcements/[id]` muestre
+exactamente lo mismo: la fuente de verdad es la base, no el estado del
+formulario.
+
+**Verificado con datos reales, admin de prueba dedicado (Playwright,
+creado y borrado solo para esta verificación):**
+
+- **Caso 1 (plantilla + sustitución correcta):** "Corte de agua" con
+  `fecha=15/09/2026`, `horarioDesde=09:00`, `horarioHasta=13:00`,
+  `motivo="trabajos de mantenimiento en la cisterna"` -- la vista previa
+  sustituyó las cuatro correctamente y dejó `{{nombre}}`/`{{unidad}}`
+  intactos, confirmado tanto en la UI como releyendo la fila real de
+  `announcements` por SQL (`template_id: "corte-de-agua"`,
+  `template_variables` con las cuatro claves, `body` idéntico a la vista
+  previa mostrada).
+- **Caso 2 (variable sin completar bloquea el guardado):** con la
+  plantilla elegida y las cuatro variables vacías, "Guardar borrador" NO
+  navegó (siguió en `/panel/announcements/new`) y mostró el mensaje
+  general más 4 "Completá este campo." (uno por variable) -- confirmado
+  que no se creó ninguna fila nueva en la base para este intento.
+- **Caso 3 (persistencia real tras recargar):** guardado el borrador del
+  caso 1 (con edificio Torre Central + rol Propietario del segmento del
+  8.2), se recargó la página (`page.reload()`, no solo re-navegación) --
+  título, plantilla elegida, las cuatro variables, la vista previa, el
+  edificio y el checkbox de rol quedaron EXACTAMENTE igual que antes de
+  recargar (confirmado en la UI, con captura de pantalla, y contra la fila
+  real de la base).
+- **Caso 4 (sin plantilla):** título + cuerpo libre tipeado a mano,
+  incluyendo `{{nombre}}`/`{{unidad}}` tipeados por el propio
+  administrador -- guardó, navegó a la pantalla de edición, y tras
+  recargar mostró "Sin plantilla (texto en blanco)" con el cuerpo exacto
+  intacto (`template_id: null`, `template_variables: {}` en la base).
+
+**Limpieza:** los dos avisos de prueba (`Prueba 8.3 - Corte de agua`,
+`Prueba 8.3 - Sin plantilla`): soft-borrados. Cuenta de prueba
+(`prueba-8-3-...@example.com`) eliminada por completo (Auth +
+`app_users`) -- único uso de la service-role key en este paso, para crear
+y para borrar esa cuenta puntual.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.

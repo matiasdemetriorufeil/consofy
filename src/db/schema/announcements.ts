@@ -79,6 +79,26 @@ export const announcements = pgTable(
     // deshaciendo una decisión ya tomada y documentada de la etapa 2.5
     // sin una necesidad de negocio real que lo pida.
     segment: jsonb("segment").notNull().default({}),
+    // Paso 8.3 -- plantillas reutilizables con variables. Las plantillas en
+    // sí NO viven en una tabla (ver el comentario de
+    // src/features/announcements/templates.ts para por qué): `templateId`
+    // es simplemente el `id` de una de esas plantillas hardcodeadas
+    // (ej. "corte-de-agua"), o NULL si el aviso se escribió sin plantilla
+    // ("en blanco"). Sin FK a propósito -- no hay tabla del lado
+    // referenciado. Si el código borra o renombra una plantilla más
+    // adelante, un borrador viejo simplemente deja de encontrar el match
+    // (`getAnnouncementTemplate()` devuelve undefined) y el editor cae al
+    // modo "sin plantilla" -- sin romper nada, porque `body` (abajo) ya
+    // guardó el texto final, no depende de que la plantilla siga existiendo.
+    templateId: text("template_id"),
+    // Valores de las variables DE COMUNICADO (fecha, horario, motivo...),
+    // completadas una sola vez para todo el segmento -- NUNCA valores por
+    // destinatario (nombre/unidad se resuelven recién en el paso 8.5). Se
+    // guardan por separado de `body` para poder REPOBLAR los campos del
+    // formulario al reabrir un borrador (`body` por sí solo ya tiene el
+    // texto final sustituido, pero no alcanza para reconstruir qué se
+    // tipeó en cada campo). `{}` en modo "sin plantilla".
+    templateVariables: jsonb("template_variables").notNull().default({}),
     status: announcementStatus("status").notNull().default("draft"),
     scheduledFor: timestamp("scheduled_for", { withTimezone: true }),
     sentAt: timestamp("sent_at", { withTimezone: true }),

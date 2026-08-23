@@ -1,5 +1,6 @@
 "use server";
 
+import { and, eq, isNull } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
@@ -18,9 +19,12 @@ import {
 import {
   countSegmentInputSchema,
   createAnnouncementDraftSchema,
+  updateAnnouncementDraftSchema,
   type CreateAnnouncementDraftResult,
   type SegmentRecipientCount,
+  type UpdateAnnouncementDraftResult,
 } from "./segment-schema";
+import { getAnnouncementTemplate } from "./templates";
 
 // Nunca se confía en el buildingId que manda el cliente sin cruzarlo --
 // mismo criterio que setSelectedBuildingAction (buildings/actions.ts):
@@ -37,6 +41,37 @@ async function isValidBuildingSelection(
   }
   const activeBuildings = await getActiveBuildings(organizationId);
   return activeBuildings.some((b) => b.id === buildingId);
+}
+
+// Paso 8.3 -- si se eligió una plantilla, TODAS sus variables de comunicado
+// tienen que venir completas (no vacías/solo espacios) antes de guardar,
+// revalidado acá aunque el cliente ya lo chequee -- mismo criterio de
+// "Zod en el servidor siempre" que el resto del proyecto (CLAUDE.md >
+// Reglas de seguridad), aplicado a mano porque el shape de `variables`
+// depende de CUÁL plantilla se eligió, algo que un schema de Zod estático
+// no puede expresar sin conocer la plantilla. Un `templateId` que no
+// matchea ninguna plantilla conocida (una borrada del código después de
+// que un borrador viejo la usó) NO bloquea el guardado -- `body` ya trae
+// el texto final, no depende de que la plantilla siga existiendo (ver el
+// comentario de la columna en announcements.ts).
+function validateTemplateVariables(
+  templateId: string | null,
+  templateVariables: Record<string, string>,
+): string | null {
+  if (templateId === null) {
+    return null;
+  }
+  const template = getAnnouncementTemplate(templateId);
+  if (!template) {
+    return null;
+  }
+  const missing = template.variables.find(
+    (v) => !templateVariables[v.key]?.trim(),
+  );
+  if (missing) {
+    return `Completá "${missing.label}" antes de guardar.`;
+  }
+  return null;
 }
 
 // Opciones de torre/piso para el edificio elegido (paso 8.2) -- se llama
@@ -111,12 +146,21 @@ export const createAnnouncementDraftAction = authorizedAction(
         error: parsed.error.issues[0]?.message ?? "Datos inválidos.",
       };
     }
-    const { title, body, buildingId, segment } = parsed.data;
+    const { title, body, buildingId, segment, templateId, templateVariables } =
+      parsed.data;
 
     if (
       !(await isValidBuildingSelection(context.organization.id, buildingId))
     ) {
       return { ok: false, error: "Elegí un edificio válido." };
+    }
+
+    const variableError = validateTemplateVariables(
+      templateId,
+      templateVariables,
+    );
+    if (variableError) {
+      return { ok: false, error: variableError };
     }
 
     const [row] = await db
@@ -127,6 +171,8 @@ export const createAnnouncementDraftAction = authorizedAction(
         title,
         body,
         segment,
+        templateId,
+        templateVariables,
         createdBy: context.appUser.displayName,
       })
       .returning({ id: announcements.id });
@@ -140,5 +186,79 @@ export const createAnnouncementDraftAction = authorizedAction(
 
     revalidatePath("/panel/announcements");
     return { ok: true, id: row.id };
+  },
+);
+
+// Actualiza un borrador YA EXISTENTE (paso 8.3) -- mismo registro, nunca
+// crea uno nuevo. Solo alcanza borradores (`status = 'draft'`): un aviso que
+// ya avanzó de estado (todavía no alcanzable en la práctica -- 8.4/8.5 no
+// existen aún) no se edita por esta vía. Filtra por `organizationId` en el
+// WHERE del UPDATE mismo (nunca después, en JS) -- mismo patrón que el
+// resto del proyecto (CLAUDE.md > Acceso a datos): un `id` de otra
+// organización, o inexistente, no actualiza ninguna fila y cae al mismo
+// mensaje ambiguo.
+export const updateAnnouncementDraftAction = authorizedAction(
+  async (context, input: unknown): Promise<UpdateAnnouncementDraftResult> => {
+    const parsed = updateAnnouncementDraftSchema.safeParse(input);
+    if (!parsed.success) {
+      return {
+        ok: false,
+        error: parsed.error.issues[0]?.message ?? "Datos inválidos.",
+      };
+    }
+    const {
+      id,
+      title,
+      body,
+      buildingId,
+      segment,
+      templateId,
+      templateVariables,
+    } = parsed.data;
+
+    if (
+      !(await isValidBuildingSelection(context.organization.id, buildingId))
+    ) {
+      return { ok: false, error: "Elegí un edificio válido." };
+    }
+
+    const variableError = validateTemplateVariables(
+      templateId,
+      templateVariables,
+    );
+    if (variableError) {
+      return { ok: false, error: variableError };
+    }
+
+    const [row] = await db
+      .update(announcements)
+      .set({
+        buildingId,
+        title,
+        body,
+        segment,
+        templateId,
+        templateVariables,
+      })
+      .where(
+        and(
+          eq(announcements.id, id),
+          eq(announcements.organizationId, context.organization.id),
+          eq(announcements.status, "draft"),
+          isNull(announcements.deletedAt),
+        ),
+      )
+      .returning({ id: announcements.id });
+
+    if (!row) {
+      return {
+        ok: false,
+        error: "No encontramos ese borrador.",
+      };
+    }
+
+    revalidatePath("/panel/announcements");
+    revalidatePath(`/panel/announcements/${id}`);
+    return { ok: true };
   },
 );

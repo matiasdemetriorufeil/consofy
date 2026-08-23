@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -24,16 +26,34 @@ import {
   createAnnouncementDraftAction,
   getBuildingTowersAndFloorsAction,
   searchPeopleForSegmentAction,
+  updateAnnouncementDraftAction,
 } from "../actions";
 import type { PersonSearchResult } from "../queries";
 import type { SegmentCriteria } from "../segment-schema";
+import {
+  ANNOUNCEMENT_TEMPLATES,
+  applyTemplateVariables,
+  getAnnouncementTemplate,
+} from "../templates";
 
 const ALL_BUILDINGS_VALUE = "__all__";
+const BLANK_TEMPLATE_VALUE = "__blank__";
 const ROLE_OPTIONS = ["owner", "tenant"] as const;
 
 type AddedPerson = {
   id: string;
   label: string;
+};
+
+export type InitialAnnouncementDraft = {
+  id: string;
+  title: string;
+  body: string;
+  buildingId: string | null;
+  segment: SegmentCriteria;
+  templateId: string | null;
+  templateVariables: Record<string, string>;
+  addedPeople: AddedPerson[];
 };
 
 function personLabel(p: {
@@ -45,39 +65,95 @@ function personLabel(p: {
   return p.phoneE164 ? `${name} (${p.phoneE164})` : name;
 }
 
-// Constructor de segmentos (paso 8.2) -- único Client Component de la
-// pantalla de creación de un aviso: necesita estado local para ir armando
-// el segmento y disparar el conteo en vivo mientras se arma, ANTES de
-// guardar nada.
+// Constructor de segmentos (paso 8.2) + editor de contenido con plantillas
+// (paso 8.3) -- único Client Component de la pantalla de creación/edición
+// de un aviso: necesita estado local para ir armando el segmento y el
+// cuerpo, con conteo y vista previa en vivo, ANTES de guardar nada.
 //
-// Combinación de criterios (documentado también en el reporte del paso):
-// AND entre categorías (torre Y piso Y rol tienen que cumplirse todos
-// para que una unidad/ocupación califique por los criterios GENERALES) --
-// OR dentro de una misma categoría (cualquiera de las torres elegidas,
-// cualquiera de los pisos, cualquiera de los roles). Las personas
-// agregadas a mano se UNEN (unión, no intersección) al resultado de los
-// criterios generales -- ver el comentario reinterpretado de
-// announcements.segment.
+// Combinación de criterios de destinatarios (documentado también en el
+// reporte del paso 8.2): AND entre categorías (torre Y piso Y rol tienen
+// que cumplirse todos para que una unidad/ocupación califique por los
+// criterios GENERALES) -- OR dentro de una misma categoría (cualquiera de
+// las torres elegidas, cualquiera de los pisos, cualquiera de los roles).
+// Las personas agregadas a mano se UNEN (unión, no intersección) al
+// resultado de los criterios generales -- ver el comentario reinterpretado
+// de announcements.segment.
+//
+// Crear vs. editar (paso 8.3): sin `initialAnnouncement`, este componente
+// crea un borrador nuevo y, al guardar con éxito, NAVEGA a
+// /panel/announcements/[id] -- esa navegación (no un estado "guardado" en
+// React) es lo que hace que recargar la pantalla siga mostrando el mismo
+// borrador: la página de destino es un Server Component que relee todo de
+// la base en cada carga, nunca depende de memoria del cliente. Con
+// `initialAnnouncement`, guarda sobre ESE MISMO registro
+// (updateAnnouncementDraftAction), nunca crea uno nuevo.
 export function AnnouncementSegmentForm({
   buildings,
+  initialAnnouncement,
 }: {
   buildings: { id: string; name: string }[];
+  initialAnnouncement?: InitialAnnouncementDraft;
 }) {
-  const [title, setTitle] = useState("");
-  const [body, setBody] = useState("");
-  const [buildingId, setBuildingId] = useState<string | null>(null);
+  const router = useRouter();
+
+  const [title, setTitle] = useState(initialAnnouncement?.title ?? "");
+  const [buildingId, setBuildingId] = useState<string | null>(
+    initialAnnouncement?.buildingId ?? null,
+  );
 
   const [towerOptions, setTowerOptions] = useState<string[]>([]);
   const [floorOptions, setFloorOptions] = useState<string[]>([]);
-  const [selectedTowers, setSelectedTowers] = useState<string[]>([]);
-  const [selectedFloors, setSelectedFloors] = useState<string[]>([]);
+  const [selectedTowers, setSelectedTowers] = useState<string[]>(
+    initialAnnouncement?.segment.towers ?? [],
+  );
+  const [selectedFloors, setSelectedFloors] = useState<string[]>(
+    initialAnnouncement?.segment.floors ?? [],
+  );
   const [selectedRoles, setSelectedRoles] = useState<SegmentCriteria["roles"]>(
-    [],
+    initialAnnouncement?.segment.roles ?? [],
   );
 
   const [personQuery, setPersonQuery] = useState("");
   const [personResults, setPersonResults] = useState<PersonSearchResult[]>([]);
-  const [addedPeople, setAddedPeople] = useState<AddedPerson[]>([]);
+  const [addedPeople, setAddedPeople] = useState<AddedPerson[]>(
+    initialAnnouncement?.addedPeople ?? [],
+  );
+
+  // Plantilla (paso 8.3) -- si el borrador reabierto referencia un
+  // `templateId` que ya no existe en ANNOUNCEMENT_TEMPLATES (se borró del
+  // código después de guardar este borrador), cae a modo "sin plantilla"
+  // mostrando el `body` ya guardado como texto libre -- nada se pierde,
+  // ver el comentario de la columna en src/db/schema/announcements.ts.
+  const initialTemplate = initialAnnouncement?.templateId
+    ? getAnnouncementTemplate(initialAnnouncement.templateId)
+    : undefined;
+  const [templateId, setTemplateId] = useState<string | null>(
+    initialTemplate ? (initialAnnouncement?.templateId ?? null) : null,
+  );
+  const [templateVariables, setTemplateVariables] = useState<
+    Record<string, string>
+  >(initialTemplate ? (initialAnnouncement?.templateVariables ?? {}) : {});
+  const [freeBody, setFreeBody] = useState(
+    initialTemplate ? "" : (initialAnnouncement?.body ?? ""),
+  );
+  const [attemptedSave, setAttemptedSave] = useState(false);
+
+  const selectedTemplate = templateId
+    ? getAnnouncementTemplate(templateId)
+    : undefined;
+  // El cuerpo que efectivamente se guarda: con plantilla, las variables de
+  // comunicado ya sustituidas y los placeholders por destinatario
+  // ({{nombre}}/{{unidad}}) todavía visibles como placeholder -- la
+  // interpolación real por persona es del paso 8.5, no de acá. Sin
+  // plantilla, es exactamente lo que el administrador tipeó.
+  const effectiveBody = selectedTemplate
+    ? applyTemplateVariables(selectedTemplate.bodyTemplate, templateVariables)
+    : freeBody;
+  const missingVariableKeys = selectedTemplate
+    ? selectedTemplate.variables
+        .filter((v) => !templateVariables[v.key]?.trim())
+        .map((v) => v.key)
+    : [];
 
   const [counts, setCounts] = useState<{
     qualifiedWithPhone: number;
@@ -88,9 +164,6 @@ export function AnnouncementSegmentForm({
 
   const [savePending, setSavePending] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [created, setCreated] = useState<{ id: string; title: string } | null>(
-    null,
-  );
 
   // Cambiar de edificio invalida torres/pisos elegidos -- una torre/piso
   // de OTRO edificio no tiene ningún sentido acá (mismo criterio que
@@ -108,6 +181,17 @@ export function AnnouncementSegmentForm({
     setSelectedFloors([]);
     setTowerOptions([]);
     setFloorOptions([]);
+  }
+
+  // Cambiar de plantilla (o volver a "sin plantilla") invalida las
+  // variables ya completadas -- mismo motivo y mismo patrón que el reset
+  // de torres/pisos de arriba: es estado derivado de `templateId`, no una
+  // sincronización con un sistema externo.
+  const [prevTemplateId, setPrevTemplateId] = useState(templateId);
+  if (templateId !== prevTemplateId) {
+    setPrevTemplateId(templateId);
+    setTemplateVariables({});
+    setAttemptedSave(false);
   }
 
   // Acá SÍ un useEffect real: buscar las opciones de torre/piso es I/O
@@ -135,11 +219,11 @@ export function AnnouncementSegmentForm({
   // efecto) -- evita el render en cascada que dispara la regla
   // react-hooks/set-state-in-effect.
   //
-  // `cancelled` -- CORRECCIÓN encontrada probando este mismo paso con
-  // datos reales: sin este flag, la respuesta del pedido de conteo
-  // INICIAL (buildingId=null, disparado al montar) podía llegar DESPUÉS
-  // de la respuesta del pedido siguiente (ya con el edificio elegido) --
-  // dos pedidos al servidor no garantizan resolver en el orden en que se
+  // `cancelled` -- CORRECCIÓN encontrada probando el paso 8.2 con datos
+  // reales: sin este flag, la respuesta del pedido de conteo INICIAL
+  // (buildingId=null, disparado al montar) podía llegar DESPUÉS de la
+  // respuesta del pedido siguiente (ya con el edificio elegido) -- dos
+  // pedidos al servidor no garantizan resolver en el orden en que se
   // lanzaron. Sin el guard, la respuesta vieja pisaba el conteo correcto
   // ya mostrado, dejando en pantalla un número mayor (el de "todos los
   // edificios") después de haber elegido un edificio puntual. Mismo
@@ -233,6 +317,23 @@ export function AnnouncementSegmentForm({
 
   function handleSave() {
     setSaveError(null);
+    setAttemptedSave(true);
+
+    if (!title.trim()) {
+      setSaveError("Ingresá un título.");
+      return;
+    }
+    if (!effectiveBody.trim()) {
+      setSaveError("Ingresá el texto del aviso.");
+      return;
+    }
+    if (missingVariableKeys.length > 0) {
+      setSaveError(
+        "Completá todas las variables de la plantilla antes de guardar.",
+      );
+      return;
+    }
+
     setSavePending(true);
     const segment: SegmentCriteria = {
       towers: selectedTowers,
@@ -240,50 +341,54 @@ export function AnnouncementSegmentForm({
       roles: selectedRoles,
       personIds: addedPeople.map((p) => p.id),
     };
-    createAnnouncementDraftAction({ title, body, buildingId, segment }).then(
-      (result) => {
+    const payload = {
+      title,
+      body: effectiveBody,
+      buildingId,
+      segment,
+      templateId,
+      templateVariables,
+    };
+
+    if (initialAnnouncement) {
+      updateAnnouncementDraftAction({
+        id: initialAnnouncement.id,
+        ...payload,
+      }).then((result) => {
         setSavePending(false);
         if (result.ok) {
           toast.success("Borrador guardado.");
-          setCreated({ id: result.id, title });
+          router.refresh();
         } else {
           setSaveError(result.error);
         }
-      },
-    );
-  }
-
-  function handleReset() {
-    setCreated(null);
-    setTitle("");
-    setBody("");
-    setBuildingId(null);
-    setSelectedRoles([]);
-    setAddedPeople([]);
-  }
-
-  if (created) {
-    return (
-      <Card>
-        <CardHeader>
-          <CardTitle>Borrador guardado</CardTitle>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-3">
-          <p className="text-ink text-sm">
-            &quot;{created.title}&quot; se guardó como borrador, con{" "}
-            {counts?.qualifiedWithPhone ?? 0} destinatario(s). Todavía no se
-            mandó nada -- eso es un paso siguiente.
-          </p>
-          <Button type="button" variant="outline" onClick={handleReset}>
-            Crear otro aviso
-          </Button>
-        </CardContent>
-      </Card>
-    );
+      });
+    } else {
+      createAnnouncementDraftAction(payload).then((result) => {
+        setSavePending(false);
+        if (result.ok) {
+          toast.success("Borrador guardado.");
+          router.push(`/panel/announcements/${result.id}`);
+        } else {
+          setSaveError(result.error);
+        }
+      });
+    }
   }
 
   return (
     <div className="flex flex-col gap-6">
+      {initialAnnouncement && (
+        <div className="border-border bg-canvas flex items-center justify-between gap-3 rounded-md border p-3 text-sm">
+          <span className="text-ink-muted">
+            Editando el borrador &quot;{initialAnnouncement.title}&quot;.
+          </span>
+          <Button asChild variant="outline" size="sm">
+            <Link href="/panel/announcements/new">Crear otro aviso</Link>
+          </Button>
+        </div>
+      )}
+
       <Card>
         <CardHeader>
           <CardTitle>Datos del aviso</CardTitle>
@@ -298,16 +403,86 @@ export function AnnouncementSegmentForm({
               placeholder="Ej: Corte de agua programado"
             />
           </Field>
+
           <Field>
-            <FieldLabel htmlFor="announcement-body">Mensaje</FieldLabel>
-            <Textarea
-              id="announcement-body"
-              value={body}
-              onChange={(e) => setBody(e.target.value)}
-              rows={4}
-              placeholder="Escribí el texto que van a recibir los vecinos."
-            />
+            <FieldLabel htmlFor="announcement-template">Plantilla</FieldLabel>
+            <Select
+              value={templateId ?? BLANK_TEMPLATE_VALUE}
+              onValueChange={(value) =>
+                setTemplateId(value === BLANK_TEMPLATE_VALUE ? null : value)
+              }
+            >
+              <SelectTrigger id="announcement-template">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={BLANK_TEMPLATE_VALUE}>
+                  Sin plantilla (texto en blanco)
+                </SelectItem>
+                {ANNOUNCEMENT_TEMPLATES.map((t) => (
+                  <SelectItem key={t.id} value={t.id}>
+                    {t.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </Field>
+
+          {selectedTemplate ? (
+            <>
+              {selectedTemplate.variables.map((variable) => (
+                <Field key={variable.key}>
+                  <FieldLabel htmlFor={`announcement-variable-${variable.key}`}>
+                    {variable.label}
+                  </FieldLabel>
+                  <Input
+                    id={`announcement-variable-${variable.key}`}
+                    value={templateVariables[variable.key] ?? ""}
+                    onChange={(e) =>
+                      setTemplateVariables({
+                        ...templateVariables,
+                        [variable.key]: e.target.value,
+                      })
+                    }
+                    placeholder={variable.placeholder}
+                  />
+                  {attemptedSave &&
+                    missingVariableKeys.includes(variable.key) && (
+                      <p className="text-destructive text-xs">
+                        Completá este campo.
+                      </p>
+                    )}
+                </Field>
+              ))}
+              <Field>
+                <FieldLabel htmlFor="announcement-preview">
+                  Vista previa
+                </FieldLabel>
+                <Textarea
+                  id="announcement-preview"
+                  value={effectiveBody}
+                  readOnly
+                  rows={6}
+                  className="bg-canvas"
+                />
+                <p className="text-ink-muted text-xs">
+                  {"{{nombre}}"} y {"{{unidad}}"} se completan recién al mandar
+                  el aviso, con los datos reales de cada vecino.
+                </p>
+              </Field>
+            </>
+          ) : (
+            <Field>
+              <FieldLabel htmlFor="announcement-body">Mensaje</FieldLabel>
+              <Textarea
+                id="announcement-body"
+                value={freeBody}
+                onChange={(e) => setFreeBody(e.target.value)}
+                rows={4}
+                placeholder="Escribí el texto que van a recibir los vecinos."
+              />
+            </Field>
+          )}
         </CardContent>
       </Card>
 
@@ -491,7 +666,7 @@ export function AnnouncementSegmentForm({
       <Button
         type="button"
         className="self-start"
-        disabled={savePending || !title.trim() || !body.trim()}
+        disabled={savePending || !title.trim() || !effectiveBody.trim()}
         onClick={handleSave}
       >
         {savePending ? "Guardando…" : "Guardar borrador"}

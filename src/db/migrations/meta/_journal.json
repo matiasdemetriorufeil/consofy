@@ -218,6 +218,13 @@
       "when": 1787412323656,
       "tag": "0030_soft_johnny_storm",
       "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1787505618370,
+      "tag": "0031_simple_deathstrike",
+      "breakpoints": true
     }
   ]
 }

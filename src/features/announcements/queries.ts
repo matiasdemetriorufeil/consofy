@@ -1,11 +1,17 @@
 import "server-only";
 
 import { and, eq, ilike, inArray, isNull, or, sql } from "drizzle-orm";
+import { z } from "zod";
 
 import { db } from "@/db";
-import { people, unitOccupancies, units } from "@/db/schema";
+import { announcements, people, unitOccupancies, units } from "@/db/schema";
 
-import type { SegmentCriteria, SegmentRecipientCount } from "./segment-schema";
+import {
+  EMPTY_SEGMENT_CRITERIA,
+  segmentCriteriaSchema,
+  type SegmentCriteria,
+  type SegmentRecipientCount,
+} from "./segment-schema";
 
 export type BuildingTowersAndFloors = {
   towers: string[];
@@ -240,4 +246,102 @@ export async function searchPeopleForSegment(
       ),
     )
     .limit(limit);
+}
+
+// Personas agregadas a mano de un segmento YA GUARDADO (paso 8.3) -- a
+// diferencia de searchPeopleForSegment (busca CANDIDATOS nuevos por
+// nombre/teléfono), esta trae la ficha de personas cuyo ID YA vive en
+// `segment.personIds`, para poder repoblar los chips removibles del
+// formulario al reabrir un borrador. Mismo shape que PersonSearchResult
+// (así el cliente puede reusar el mismo personLabel()).
+export async function getPeopleForSegmentDisplay(
+  organizationId: string,
+  personIds: string[],
+): Promise<PersonSearchResult[]> {
+  if (personIds.length === 0) {
+    return [];
+  }
+  return db
+    .select({
+      id: people.id,
+      firstName: people.firstName,
+      lastName: people.lastName,
+      phoneE164: people.phoneE164,
+    })
+    .from(people)
+    .where(
+      and(
+        eq(people.organizationId, organizationId),
+        inArray(people.id, personIds),
+        isNull(people.deletedAt),
+      ),
+    );
+}
+
+export type AnnouncementDraftForEdit = {
+  id: string;
+  title: string;
+  body: string;
+  buildingId: string | null;
+  segment: SegmentCriteria;
+  templateId: string | null;
+  templateVariables: Record<string, string>;
+};
+
+// Carga un borrador YA EXISTENTE para reabrirlo en el editor (paso 8.3) --
+// la fuente de verdad detrás de "recargar la pantalla y que el estado
+// persista": esta consulta corre fresca en cada carga de
+// /panel/announcements/[id], nunca depende de estado de React. Solo
+// borradores (`status = 'draft'`) -- mismo criterio que
+// updateAnnouncementDraftAction (actions.ts): un aviso que ya avanzó de
+// estado no se reabre por esta vía. `segment`/`templateVariables` son
+// jsonb sin garantía de forma a nivel de base -- se revalidan con Zod acá
+// (mismo criterio que `ticket_events.payload` en describeTicketEvent, paso
+// 6.3): un valor viejo o corrupto cae al default vacío en vez de tirar,
+// nunca rompe la carga de la pantalla entera por un campo.
+export async function getAnnouncementDraftForEdit(
+  organizationId: string,
+  id: string,
+): Promise<AnnouncementDraftForEdit | null> {
+  const [row] = await db
+    .select({
+      id: announcements.id,
+      title: announcements.title,
+      body: announcements.body,
+      buildingId: announcements.buildingId,
+      segment: announcements.segment,
+      templateId: announcements.templateId,
+      templateVariables: announcements.templateVariables,
+    })
+    .from(announcements)
+    .where(
+      and(
+        eq(announcements.id, id),
+        eq(announcements.organizationId, organizationId),
+        eq(announcements.status, "draft"),
+        isNull(announcements.deletedAt),
+      ),
+    )
+    .limit(1);
+
+  if (!row) {
+    return null;
+  }
+
+  const parsedSegment = segmentCriteriaSchema.safeParse(row.segment);
+  const parsedVariables = z
+    .record(z.string(), z.string())
+    .safeParse(row.templateVariables);
+
+  return {
+    id: row.id,
+    title: row.title,
+    body: row.body,
+    buildingId: row.buildingId,
+    segment: parsedSegment.success
+      ? parsedSegment.data
+      : EMPTY_SEGMENT_CRITERIA,
+    templateId: row.templateId,
+    templateVariables: parsedVariables.success ? parsedVariables.data : {},
+  };
 }
