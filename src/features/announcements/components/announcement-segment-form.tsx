@@ -383,9 +383,18 @@ export function AnnouncementSegmentForm({
           <span className="text-ink-muted">
             Editando el borrador &quot;{initialAnnouncement.title}&quot;.
           </span>
-          <Button asChild variant="outline" size="sm">
-            <Link href="/panel/announcements/new">Crear otro aviso</Link>
-          </Button>
+          <div className="flex gap-2">
+            <Button asChild variant="outline" size="sm">
+              <Link
+                href={`/panel/announcements/${initialAnnouncement.id}/preview`}
+              >
+                Ver vista previa
+              </Link>
+            </Button>
+            <Button asChild variant="outline" size="sm">
+              <Link href="/panel/announcements/new">Crear otro aviso</Link>
+            </Button>
+          </div>
         </div>
       )}
 

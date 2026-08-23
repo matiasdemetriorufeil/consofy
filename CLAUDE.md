@@ -3942,6 +3942,176 @@ creado y borrado solo para esta verificación):**
 `app_users`) -- único uso de la service-role key en este paso, para crear
 y para borrar esa cuenta puntual.
 
+## Vista previa de un comunicado (paso 8.4)
+
+Pantalla de SOLO LECTURA que muestra, para el segmento y el cuerpo ya
+armados en el 8.2/8.3, el mensaje FINAL tal cual lo va a recibir cada
+destinatario -- con `{{nombre}}`/`{{unidad}}` resueltos contra sus datos
+reales, no un ejemplo genérico -- y la lista completa de destinatarios.
+Nada se envía acá (eso es 8.5): no hay ningún botón de confirmación ni
+acción de escritura en toda la pantalla.
+
+**Dónde vive -- ruta propia, no una sección del editor.**
+`/panel/announcements/[announcementId]/preview`, enlazada desde el editor
+(botón "Ver vista previa", solo visible editando un borrador ya guardado --
+la vista previa necesita un `id` real). Separada del editor (8.3) a
+propósito: son preguntas distintas ("¿cómo armo el aviso?" vs. "¿qué va a
+recibir cada persona, tal cual?"), y la segunda no tiene ningún control
+editable -- mezclarlas en una sola pantalla le agregaría al editor lógica
+de renderizado por persona que no necesita mientras se arma el aviso.
+
+**Criterio de UI -- LISTA COMPLETA, no acordeón ni selector.** Decisión
+propia: la cartera de este producto es chica (ver CLAUDE.md > Qué es este
+proyecto), así que un segmento típico son unas pocas decenas de personas
+como mucho -- se lee de arriba a abajo sin clicks intermedios. Un
+acordeón/selector escondería justo lo que este paso pide mostrar mejor
+("dos personas distintas del segmento muestran mensajes distintos entre
+sí") detrás de un click extra por persona. Si la cartera creciera a un
+tamaño donde una lista completa deja de ser cómoda, ahí se justifica
+reconsiderar (paginar, virtualizar) -- no hay evidencia de esa necesidad
+hoy.
+
+**Reuso, no una consulta paralela -- por qué la lista y el conteo del 8.2
+nunca pueden desincronizarse.** `getSegmentRecipientsForPreview()`
+(`announcements/queries.ts`, nuevo) llama a las MISMAS
+`findPeopleByCriteria`/`findPeopleByIds` que ya usa
+`countSegmentRecipients()` (8.2) -- mismo merge por `Map` keyeado por
+persona, mismo criterio AND/OR/unión. Se ensancharon esas dos funciones
+privadas (antes devolvían solo `{id, phoneE164}`, ahora también
+`firstName`/`lastName`) en vez de escribir una consulta aparte -- así la
+vista previa y el contador en vivo del editor parten literalmente del
+mismo resultado para el mismo segmento, no de dos caminos que podrían
+divergir con el tiempo.
+
+**`{{unidad}}` con más de una unidad vigente -- unidas con coma, no la
+primera a secas.** Una persona puede tener más de una ocupación vigente
+(confirmado con datos reales del seed: Roberto López es propietario de
+`Norte - 3°B` Y `Subsuelo 1°1` en Torre Central a la vez, ver paso 8.2) --
+mostrar solo una sería arbitrario y potencialmente engañoso. `unidad`
+resuelve a la unión de todas sus etiquetas de unidad vigentes DENTRO DEL
+ALCANCE del aviso (`getActiveUnitLabelsByPerson()`, queries.ts): si el
+aviso es de un edificio puntual, solo cuentan las unidades de ESE
+edificio (una persona agregada a mano podría tener unidades en otro
+edificio, que no vienen al caso); si es de "toda la organización"
+(`buildingId` NULL), cuentan todas sus unidades vigentes sin acotar --
+mismo criterio que ya usa `findPeopleByCriteria` con torres/pisos.
+Etiqueta de unidad: misma fórmula que `formatUnitLabel`
+(`public-form/components/unit-combobox.tsx`) y el `unitLabel` ya inline en
+`public-form/queries.ts` -- "torre - piso°número" o "piso°número" sin
+torre -- repetida una TERCERA vez en vez de extraída (mismo criterio ya
+aplicado ahí: duplicar dos líneas es más simple que armar un módulo
+compartido para una fórmula tan chica, documentado en el propio
+comentario de la función).
+
+**Qué pasa cuando falta un dato que la plantilla necesita -- decisión
+explícita, de las tres opciones que planteaba el enunciado.**
+`resolveRecipientPlaceholders()` (`templates.ts`, nuevo) reemplaza
+`{{nombre}}` (siempre resoluble: `people.first_name` es `NOT NULL`) y
+`{{unidad}}` (puede ser `null` -- una persona agregada a mano por
+`personIds` sin ninguna ocupación vigente, o sin ninguna dentro del
+edificio del aviso). Cuando `unidad` es `null`, se sustituye por un texto
+visible (`"(sin unidad asignada)"`), NUNCA por un string vacío ni dejando
+el placeholder crudo -- de las tres opciones del enunciado (vacío,
+placeholder crudo visible, excluir de la vista previa), un texto explícito
+es la única simultáneamente honesta (no finge que la persona tiene una
+unidad) y no rompe la lectura del mensaje completo. Además, cada tarjeta
+de un destinatario sin unidad muestra una segunda línea de aviso propia
+("Esta persona no tiene ninguna unidad vigente asignada...") -- no
+alcanza con que el propio mensaje ya lo diga, el enunciado pide
+explícitamente no dejarlo pasar en silencio. Un placeholder que NO sea
+"nombre" ni "unidad" (solo alcanzable en modo "sin plantilla", texto libre
+tipeado a mano -- paso 8.3) queda SIN TOCAR, visible tal cual
+(`{{telefono}}`, por ejemplo) -- la propia pantalla además muestra una
+alerta aparte avisando cuáles placeholders del cuerpo no se van a poder
+resolver, para que no haga falta descubrirlo leyendo mensaje por mensaje.
+
+**Comunicado sin plantilla y sin ningún placeholder -- mismo texto para
+todos, comportamiento esperado, no un caso especial.** Si el cuerpo no
+tiene ningún `{{token}}`, `resolveRecipientPlaceholders()` lo devuelve
+intacto para cualquier persona -- no hay nada que resolver. Verificado con
+datos reales (ver más abajo): un aviso de "Feliz año nuevo" mostró el
+mismo texto para las 27 personas del segmento, byte a byte.
+
+**Segmento sin ningún destinatario vs. destinatarios sin teléfono -- dos
+estados vacíos distintos, mismo criterio que ya separa estos casos en
+otras pantallas del proyecto (ver CLAUDE.md > Bandeja de reclamos).** Cero
+personas que califican en absoluto: `EmptyState` con acción "Volver al
+editor". Personas que califican pero NINGUNA tiene teléfono cargado: un
+`Alert` destructivo ("Nadie va a recibir este aviso todavía") en vez de
+una pantalla vacía confusa, con la lista de quiénes califican sin teléfono
+debajo -- pedido explícito del enunciado.
+
+**Ruta anidada y `not-found.tsx` -- bug real encontrado probando este
+mismo paso, no asumido de la documentación de Next.js.** Un `notFound()`
+tirado desde `preview/page.tsx` NO lo capturaba el `not-found.tsx` de
+`[announcementId]/` (la carpeta padre, sin `layout.tsx` propio) -- la
+respuesta real, confirmada con captura de pantalla, era el 404 GENÉRICO de
+toda la app (`src/app/not-found.tsx`, "Esta página no existe"), no el
+mensaje específico de aviso. A diferencia de
+`/panel/tickets/[ticketId]/not-found.tsx` (cuyo `page.tsx` que llama
+`notFound()` vive en la MISMA carpeta), acá el `page.tsx` que llama
+`notFound()` es el de `preview/`, una carpeta HIJA distinta de donde vive
+`../not-found.tsx` -- necesita su propia copia
+(`preview/not-found.tsx`, duplicado a propósito, no reutilizado).
+Confirmado el fix navegando a un `announcementId` real con la ruta
+`/preview` después de agregar el archivo: mensaje correcto
+("No encontramos ese borrador"), no el genérico.
+
+**Verificado con datos reales, admin de prueba dedicado (Playwright,
+creado y borrado solo para esta verificación), sobre el segmento real de
+Torre Central (16 propietarios con teléfono + Claudia Rojas agregada a
+mano, mismo segmento ya usado en el reporte del 8.2/8.3):**
+
+- **Caso 1 (nombre/unidad reales, mensajes distintos entre sí):** con la
+  plantilla "Corte de agua" ya completada, la vista previa mostró "16
+  destinatarios van a recibir este aviso" (mismo número que el contador
+  del editor) y cada tarjeta con el nombre/teléfono/unidad reales --
+  Roberto López mostró `"Tu unidad, Norte - 3°B, Subsuelo 1°1, va a estar
+sin servicio..."` (sus DOS unidades reales unidas), mientras que Jorge
+  Herrera mostró `"Tu unidad, Norte - 2°A, va a estar sin servicio..."` --
+  confirmado por comparación directa que los dos mensajes completos son
+  STRINGS DISTINTOS, no el mismo texto repetido.
+- **Caso 2 (falta un dato que la plantilla necesita):** Claudia Rojas
+  (agregada a mano, sin ninguna ocupación) apareció en la lista de
+  destinatarios CON teléfono (tiene uno cargado) pero con
+  `unitLabels: []` -- su mensaje mostró exactamente `"Tu unidad, (sin
+unidad asignada), va a estar sin servicio..."`, con la segunda línea de
+  aviso visible en su tarjeta ("Esta persona no tiene ninguna unidad
+  vigente asignada..."). La pantalla no rompió ni mostró el placeholder
+  crudo.
+- **Caso 3 (coincide exacto con el 8.2):** el contador del editor antes de
+  guardar (`"16 destinatarios van a recibir este aviso"`) y el de la vista
+  previa después de guardar coincidieron exacto, mismo número; Alejandro
+  Herrera (sin teléfono) apareció en la sección "1 persona más califica...
+  pero no tiene teléfono cargado" en los dos lugares, nunca en la lista de
+  mensajes completos.
+- **Caso 4 (sin plantilla):** dos sub-casos reales --
+  - Texto libre CON placeholders tipeados a mano
+    (`"...tu unidad es {{unidad}} y tu teléfono registrado es
+{{telefono}}."`) resolvió `{{nombre}}`/`{{unidad}}` igual que con
+    plantilla, y dejó `{{telefono}}` crudo en cada mensaje -- con una
+    alerta propia arriba de la pantalla avisando explícitamente que ese
+    placeholder no se resuelve.
+  - Texto libre SIN ningún placeholder (`"Feliz año nuevo a todos los
+vecinos del edificio."`) con un segmento de 27 personas (toda la
+    organización, sin ningún filtro puesto) mostró el mismo texto,
+    idéntico, en las 27 tarjetas -- confirmado comparando cada mensaje
+    contra el primero.
+- **Adicional, pedido explícito del enunciado (0 destinatarios con
+  teléfono válido):** un segmento acotado a Torre Central + torre "Norte"
+  + piso "Subsuelo 1" (combinación real sin ninguna unidad que la
+  cumpla, confirmado con `countSegmentRecipients` antes de armar el
+  caso) + Alejandro Herrera agregado a mano (sin teléfono) mostró la
+  alerta "Nadie va a recibir este aviso todavía" con su nombre en la
+  lista de sin teléfono, sin ninguna sección de mensajes completos.
+- **Adicional (segmento sin ningún destinatario):** el mismo combo
+  Norte + Subsuelo 1 SIN agregar a nadie a mano mostró el `EmptyState`
+  "Este segmento no tiene ningún destinatario".
+
+**Limpieza:** los 6 avisos de prueba de esta verificación: soft-borrados.
+Cuenta de prueba (`prueba-8-4-...@example.com`) eliminada por completo
+(Auth + `app_users`) -- único uso de la service-role key en este paso.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.

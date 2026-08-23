@@ -145,15 +145,81 @@ export function applyTemplateVariables(
 export const MIN_RECIPIENT_PLACEHOLDERS = ["nombre", "unidad"] as const;
 
 // Extrae los placeholders que quedan SIN resolver en un cuerpo ya guardado
-// (después de aplicar `applyTemplateVariables` en este paso) -- son, por
-// construcción, los placeholders POR DESTINATARIO que el paso 8.5 tiene que
-// resolver contra los datos reales de cada persona del segmento. Formato:
-// `{{clave}}`, `clave` = uno o más caracteres de \w (letras/números/guión
-// bajo), sin espacios adentro de las llaves.
+// (después de aplicar `applyTemplateVariables` en el paso 8.3) -- son, por
+// construcción, los placeholders POR DESTINATARIO que hay que resolver
+// contra los datos reales de cada persona del segmento. Primer consumidor
+// real: la vista previa del paso 8.4 (para avisar si el cuerpo usa un
+// placeholder que no es "nombre" ni "unidad" y por lo tanto no se va a
+// poder resolver, ver el comentario de resolveRecipientPlaceholders más
+// abajo). Formato: `{{clave}}`, `clave` = uno o más caracteres de \w
+// (letras/números/guión bajo), sin espacios adentro de las llaves.
 export function extractPlaceholderTokens(body: string): string[] {
   const matches = body.matchAll(/\{\{(\w+)\}\}/g);
   const tokens = [...matches]
     .map((m) => m[1])
     .filter((token): token is string => token !== undefined);
   return [...new Set(tokens)];
+}
+
+// Valores por destinatario reconocidos hoy (paso 8.4) -- `nombre` sale de
+// `people.first_name`/`last_name` (NOT NULL/nullable respectivamente, ver
+// src/db/schema/people.ts), así que SIEMPRE es un string no vacío para
+// cualquier persona real. `unidad` puede ser `null`: una persona agregada a
+// mano sin ninguna ocupación vigente (o sin ocupación dentro del edificio
+// del aviso) no tiene ninguna unidad que mostrar -- ver el comentario de
+// getSegmentRecipientsForPreview (queries.ts) para cómo se resuelve esa
+// lista.
+export type RecipientPlaceholderValues = {
+  nombre: string;
+  unidad: string | null;
+};
+
+// Texto visible cuando un placeholder RECONOCIDO no se puede resolver para
+// una persona puntual -- nunca se deja el placeholder crudo (`{{unidad}}`)
+// ni un string vacío que parezca un dato faltante por error. Decisión del
+// paso 8.4, de las tres opciones que planteaba el enunciado (texto vacío,
+// placeholder sin resolver visible, excluir de la vista previa): un texto
+// explícito es lo único de las tres que es simultáneamente honesto (no
+// pretende que la persona tiene una unidad que no tiene) y no rompe la
+// lectura del mensaje completo -- vacío se leería como un espacio en blanco
+// sin explicación, el placeholder crudo expondría una interioridad de
+// implementación al usuario del panel, y excluir a la persona escondería
+// que ese destinatario real existe y va a recibir un mensaje con este
+// texto.
+export const UNRESOLVED_PLACEHOLDER_FALLBACK: Record<string, string> = {
+  unidad: "(sin unidad asignada)",
+};
+
+// Resuelve, en un cuerpo YA con las variables de comunicado sustituidas
+// (paso 8.3), los placeholders POR DESTINATARIO reconocidos -- pensada para
+// que el paso 8.5 (envío real) reuse esta MISMA función, no solo la vista
+// previa del 8.4: es la única función de este módulo que conoce el shape
+// `RecipientPlaceholderValues`, así que cualquier cambio futuro al set de
+// placeholders reconocidos se hace en un solo lugar.
+//
+// Cualquier `{{token}}` que NO sea "nombre" ni "unidad" queda SIN TOCAR --
+// pasa esto en modo "sin plantilla" (paso 8.3), donde el administrador
+// puede tipear cualquier token a mano (ej. `{{telefono}}`, no soportado
+// hoy). Dejarlo visible tal cual (en vez de vaciarlo o tirar un error) es
+// la forma más honesta de mostrar "esto no se va a resolver" -- el propio
+// texto crudo es la señal, no algo que haya que adivinar.
+export function resolveRecipientPlaceholders(
+  body: string,
+  values: RecipientPlaceholderValues,
+): string {
+  return body.replace(/\{\{(\w+)\}\}/g, (match, key: string) => {
+    // Comparaciones directas, no una tabla genérica indexada por `key` --
+    // con solo dos claves reconocidas, es más simple y evita que TypeScript
+    // tenga que inferir un tipo `string | undefined` para un acceso
+    // dinámico (`noUncheckedIndexedAccess`) que acá nunca puede pasar.
+    if (key === "nombre") {
+      return values.nombre;
+    }
+    if (key === "unidad") {
+      return values.unidad === null
+        ? (UNRESOLVED_PLACEHOLDER_FALLBACK.unidad ?? match)
+        : values.unidad;
+    }
+    return match;
+  });
 }

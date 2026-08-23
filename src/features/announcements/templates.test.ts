@@ -4,6 +4,7 @@ import {
   applyTemplateVariables,
   extractPlaceholderTokens,
   getAnnouncementTemplate,
+  resolveRecipientPlaceholders,
 } from "./templates";
 
 // applyTemplateVariables/extractPlaceholderTokens son las dos funciones
@@ -92,5 +93,83 @@ describe("extractPlaceholderTokens", () => {
 
   it("devuelve un array vacío sin placeholders en el texto", () => {
     expect(extractPlaceholderTokens("Texto sin ninguna variable.")).toEqual([]);
+  });
+});
+
+// resolveRecipientPlaceholders es la función del paso 8.4 que resuelve lo
+// que applyTemplateVariables (paso 8.3) dejó sin tocar a propósito -- estos
+// casos prueban que dos personas distintas del mismo segmento producen
+// mensajes distintos entre sí (el requisito central de la vista previa) y
+// la frontera de qué pasa cuando falta un dato o el placeholder no se
+// reconoce.
+describe("resolveRecipientPlaceholders", () => {
+  it("resuelve nombre y unidad contra los datos reales de una persona", () => {
+    const result = resolveRecipientPlaceholders(
+      "Hola {{nombre}}, esto es para tu unidad {{unidad}}.",
+      { nombre: "Roberto López", unidad: "Norte - 4°A" },
+    );
+    expect(result).toBe(
+      "Hola Roberto López, esto es para tu unidad Norte - 4°A.",
+    );
+  });
+
+  it("dos personas distintas del mismo cuerpo producen mensajes distintos", () => {
+    const body = "Hola {{nombre}}, tu unidad es {{unidad}}.";
+    const a = resolveRecipientPlaceholders(body, {
+      nombre: "Roberto López",
+      unidad: "Norte - 4°A",
+    });
+    const b = resolveRecipientPlaceholders(body, {
+      nombre: "Claudia Rojas",
+      unidad: "Sur - 2°B",
+    });
+    expect(a).not.toBe(b);
+    expect(a).toBe("Hola Roberto López, tu unidad es Norte - 4°A.");
+    expect(b).toBe("Hola Claudia Rojas, tu unidad es Sur - 2°B.");
+  });
+
+  it("usa el texto de fallback visible cuando la unidad es null, sin dejar el placeholder crudo", () => {
+    const result = resolveRecipientPlaceholders(
+      "Hola {{nombre}}, tu unidad es {{unidad}}.",
+      { nombre: "Claudia Rojas", unidad: null },
+    );
+    expect(result).toBe(
+      "Hola Claudia Rojas, tu unidad es (sin unidad asignada).",
+    );
+    expect(result).not.toContain("{{unidad}}");
+  });
+
+  it("resuelve un placeholder repetido más de una vez con el mismo valor", () => {
+    const result = resolveRecipientPlaceholders(
+      "{{nombre}}, repetimos: {{nombre}}, no falte a la asamblea.",
+      { nombre: "Ana Álvarez", unidad: null },
+    );
+    expect(result).toBe(
+      "Ana Álvarez, repetimos: Ana Álvarez, no falte a la asamblea.",
+    );
+  });
+
+  it("deja intacto un placeholder no reconocido (modo sin plantilla, tipeado a mano)", () => {
+    const result = resolveRecipientPlaceholders(
+      "Hola {{nombre}}, tu teléfono registrado es {{telefono}}.",
+      { nombre: "Roberto López", unidad: "Norte - 4°A" },
+    );
+    expect(result).toBe(
+      "Hola Roberto López, tu teléfono registrado es {{telefono}}.",
+    );
+  });
+
+  it("un cuerpo sin ningún placeholder resuelve igual para todas las personas (texto libre sin variables)", () => {
+    const body = "Feliz año nuevo a todos los vecinos del edificio.";
+    const a = resolveRecipientPlaceholders(body, {
+      nombre: "Roberto López",
+      unidad: "Norte - 4°A",
+    });
+    const b = resolveRecipientPlaceholders(body, {
+      nombre: "Claudia Rojas",
+      unidad: null,
+    });
+    expect(a).toBe(body);
+    expect(b).toBe(body);
   });
 });

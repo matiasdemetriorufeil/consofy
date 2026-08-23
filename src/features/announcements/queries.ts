@@ -57,7 +57,19 @@ export async function getBuildingTowersAndFloors(
   return { towers, floors };
 }
 
-type SegmentPersonRow = { id: string; phoneE164: string | null };
+// Paso 8.4 -- se agregó firstName/lastName (antes solo id/phoneE164): la
+// vista previa de destinatarios necesita el nombre real de cada persona
+// para resolver {{nombre}}, y reusar la MISMA fila que ya calcula el
+// segmento (en vez de una consulta aparte) es lo que garantiza que la
+// lista de la vista previa y el conteo del paso 8.2 nunca puedan
+// desincronizarse entre sí -- las dos leen exactamente el mismo resultado
+// de findPeopleByCriteria/findPeopleByIds.
+type SegmentPersonRow = {
+  id: string;
+  firstName: string;
+  lastName: string | null;
+  phoneE164: string | null;
+};
 
 // Personas que califican por los criterios GENERALES (torre/piso/rol) --
 // AND entre categorías (una unidad tiene que matchear torre Y piso, si
@@ -107,7 +119,12 @@ async function findPeopleByCriteria(
   }
 
   return db
-    .selectDistinct({ id: people.id, phoneE164: people.phoneE164 })
+    .selectDistinct({
+      id: people.id,
+      firstName: people.firstName,
+      lastName: people.lastName,
+      phoneE164: people.phoneE164,
+    })
     .from(unitOccupancies)
     .innerJoin(
       units,
@@ -139,7 +156,12 @@ async function findPeopleByIds(
     return [];
   }
   return db
-    .select({ id: people.id, phoneE164: people.phoneE164 })
+    .select({
+      id: people.id,
+      firstName: people.firstName,
+      lastName: people.lastName,
+      phoneE164: people.phoneE164,
+    })
     .from(people)
     .where(
       and(
@@ -344,4 +366,141 @@ export async function getAnnouncementDraftForEdit(
     templateId: row.templateId,
     templateVariables: parsedVariables.success ? parsedVariables.data : {},
   };
+}
+
+// Etiqueta de unidad para un destinatario (paso 8.4) -- misma fórmula que
+// formatUnitLabel (public-form/components/unit-combobox.tsx) y que el
+// `unitLabel` ya inline en public-form/queries.ts: "torre - piso°número" o
+// "piso°número" sin torre. Se repite acá en vez de importar porque las dos
+// existentes viven una en un componente "use client" y otra ya se decidió
+// duplicar en vez de extraer para su primer consumidor server-side (mismo
+// criterio de ese archivo: dos líneas se duplican más simple que armar un
+// módulo compartido para una fórmula tan chica) -- este es un tercer
+// consumidor de la MISMA fórmula, no una versión distinta.
+function formatUnitLabelForPreview(unit: {
+  tower: string | null;
+  floor: string;
+  number: string;
+}): string {
+  const base = `${unit.floor}°${unit.number}`;
+  return unit.tower ? `${unit.tower} - ${base}` : base;
+}
+
+// Unidades VIGENTES de cada persona, acotadas al mismo alcance que el
+// segmento (paso 8.4) -- si el aviso es de un edificio puntual, solo cuentan
+// las unidades de ESE edificio (una persona agregada a mano podría tener
+// unidades en OTRO edificio, que no vienen al caso acá); si es de "toda la
+// organización" (buildingId null), cuentan todas sus unidades vigentes sin
+// importar el edificio -- no hay un edificio de referencia para acotar,
+// mismo criterio que ya usa findPeopleByCriteria con towers/floors. Una
+// persona con más de una ocupación vigente (ej. propietaria de dos
+// unidades) devuelve más de una etiqueta -- ver resolveRecipientPlaceholders
+// (templates.ts) para cómo se combinan en el texto final.
+async function getActiveUnitLabelsByPerson(
+  organizationId: string,
+  buildingId: string | null,
+  personIds: string[],
+): Promise<Map<string, string[]>> {
+  const result = new Map<string, string[]>();
+  if (personIds.length === 0) {
+    return result;
+  }
+
+  const conditions = [
+    eq(unitOccupancies.organizationId, organizationId),
+    isNull(unitOccupancies.endedOn),
+    isNull(unitOccupancies.deletedAt),
+    isNull(units.deletedAt),
+    inArray(unitOccupancies.personId, personIds),
+  ];
+  if (buildingId) {
+    conditions.push(eq(units.buildingId, buildingId));
+  }
+
+  const rows = await db
+    .select({
+      personId: unitOccupancies.personId,
+      tower: units.tower,
+      floor: units.floor,
+      number: units.number,
+    })
+    .from(unitOccupancies)
+    .innerJoin(
+      units,
+      and(
+        eq(units.id, unitOccupancies.unitId),
+        eq(units.organizationId, unitOccupancies.organizationId),
+      ),
+    )
+    .where(and(...conditions));
+
+  const collator = new Intl.Collator("es", { numeric: true });
+  for (const row of rows) {
+    const label = formatUnitLabelForPreview(row);
+    const existing = result.get(row.personId) ?? [];
+    if (!existing.includes(label)) {
+      existing.push(label);
+    }
+    result.set(row.personId, existing);
+  }
+  for (const labels of result.values()) {
+    labels.sort(collator.compare);
+  }
+  return result;
+}
+
+export type SegmentRecipientPreview = {
+  id: string;
+  firstName: string;
+  lastName: string | null;
+  phoneE164: string | null;
+  // Etiquetas de unidad vigente dentro del alcance del aviso -- array
+  // vacío = sin ninguna (ver el comentario de resolveRecipientPlaceholders
+  // en templates.ts para cómo se refleja eso en el mensaje final).
+  unitLabels: string[];
+};
+
+// Vista previa de destinatarios (paso 8.4) -- la MISMA lista que
+// countSegmentRecipients (paso 8.2) cuenta, ahora con los datos completos
+// para nombrar a cada persona y resolver sus placeholders por destinatario.
+// Reusa findPeopleByCriteria/findPeopleByIds TAL CUAL (mismo merge por Map
+// keyeado por persona, mismo criterio AND/OR/unión ya documentado) -- esto
+// es lo que garantiza, por construcción y no por casualidad, que esta lista
+// y el conteo del 8.2 nunca puedan mostrar números distintos para el mismo
+// segmento: las dos funciones parten de la misma consulta.
+export async function getSegmentRecipientsForPreview(
+  organizationId: string,
+  buildingId: string | null,
+  criteria: SegmentCriteria,
+): Promise<SegmentRecipientPreview[]> {
+  const [criteriaPeople, explicitPeople] = await Promise.all([
+    findPeopleByCriteria(organizationId, buildingId, criteria),
+    findPeopleByIds(organizationId, criteria.personIds),
+  ]);
+
+  const merged = new Map<string, SegmentPersonRow>();
+  for (const row of criteriaPeople) {
+    merged.set(row.id, row);
+  }
+  for (const row of explicitPeople) {
+    merged.set(row.id, row);
+  }
+
+  const personIds = [...merged.keys()];
+  const unitLabelsByPerson = await getActiveUnitLabelsByPerson(
+    organizationId,
+    buildingId,
+    personIds,
+  );
+
+  return personIds.map((id) => {
+    const person = merged.get(id)!;
+    return {
+      id,
+      firstName: person.firstName,
+      lastName: person.lastName,
+      phoneE164: person.phoneE164,
+      unitLabels: unitLabelsByPerson.get(id) ?? [],
+    };
+  });
 }
