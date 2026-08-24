@@ -55,6 +55,21 @@ export const announcementRecipients = pgTable(
     // que ticket_events.actor_label: es un registro histórico, no una
     // vista derivada.
     phoneSnapshot: text("phone_snapshot"),
+    // Paso 8.5 -- mismo criterio y mismo motivo que phoneSnapshot arriba,
+    // aplicado al TEXTO del mensaje: el cuerpo del aviso ya con las
+    // variables de comunicado sustituidas (paso 8.3) Y los placeholders
+    // por destinatario resueltos para ESTA persona puntual
+    // (resolveRecipientPlaceholders, paso 8.4) se congela en el momento de
+    // materializar. Si no se congelara, reabrir esta pantalla más tarde
+    // recalcularía el mensaje contra el estado ACTUAL de la persona (¿y si
+    // cambió de unidad, o el aviso se editó -- aunque editar ya no debería
+    // ser posible una vez que el estado pasa a "sending", ver
+    // announcements.status) -- el historial de "qué se mandó" tiene que
+    // seguir diciendo qué se mandó en su momento, no qué se mandaría hoy.
+    // Nullable por el mismo motivo que phoneSnapshot: una fila 'skipped'
+    // (sin teléfono) no tiene nada que mandar, así que no hay nada que
+    // congelar acá tampoco.
+    messageSnapshot: text("message_snapshot"),
     ...timestamps(),
   },
   (t) => [

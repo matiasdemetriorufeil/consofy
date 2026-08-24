@@ -103,11 +103,18 @@ export default async function AnnouncementPreviewPage({
         <h1 className="text-ink font-display text-xl font-semibold">
           Vista previa -- {draft.title}
         </h1>
-        <Button asChild variant="outline" size="sm">
-          <Link href={`/panel/announcements/${draft.id}`}>
-            Volver al editor
-          </Link>
-        </Button>
+        <div className="flex gap-2">
+          <Button asChild variant="outline" size="sm">
+            <Link href={`/panel/announcements/${draft.id}`}>
+              Volver al editor
+            </Link>
+          </Button>
+          <Button asChild size="sm">
+            <Link href={`/panel/announcements/${draft.id}/send`}>
+              Enviar aviso
+            </Link>
+          </Button>
+        </div>
       </div>
 
       {unrecognizedTokens.length > 0 && (

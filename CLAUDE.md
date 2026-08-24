@@ -4099,11 +4099,11 @@ vecinos del edificio."`) con un segmento de 27 personas (toda la
     contra el primero.
 - **Adicional, pedido explícito del enunciado (0 destinatarios con
   teléfono válido):** un segmento acotado a Torre Central + torre "Norte"
-  + piso "Subsuelo 1" (combinación real sin ninguna unidad que la
-  cumpla, confirmado con `countSegmentRecipients` antes de armar el
-  caso) + Alejandro Herrera agregado a mano (sin teléfono) mostró la
-  alerta "Nadie va a recibir este aviso todavía" con su nombre en la
-  lista de sin teléfono, sin ninguna sección de mensajes completos.
+  - piso "Subsuelo 1" (combinación real sin ninguna unidad que la
+    cumpla, confirmado con `countSegmentRecipients` antes de armar el
+    caso) + Alejandro Herrera agregado a mano (sin teléfono) mostró la
+    alerta "Nadie va a recibir este aviso todavía" con su nombre en la
+    lista de sin teléfono, sin ninguna sección de mensajes completos.
 - **Adicional (segmento sin ningún destinatario):** el mismo combo
   Norte + Subsuelo 1 SIN agregar a nadie a mano mostró el `EmptyState`
   "Este segmento no tiene ningún destinatario".
@@ -4111,6 +4111,362 @@ vecinos del edificio."`) con un segmento de 27 personas (toda la
 **Limpieza:** los 6 avisos de prueba de esta verificación: soft-borrados.
 Cuenta de prueba (`prueba-8-4-...@example.com`) eliminada por completo
 (Auth + `app_users`) -- único uso de la service-role key en este paso.
+
+## Pantalla de envío manual (paso 8.5)
+
+Lista de destinatarios YA MATERIALIZADOS en `announcement_recipients`, con
+un botón "Abrir WhatsApp" por cada `pending`, marcado automático a
+`link_opened` al hacer clic, y barra de progreso. Regla central del
+enunciado, no reinterpretada: la lista se materializa UNA sola vez -- la
+primera vez que se abre esta pantalla para un aviso -- y reabrirla
+después lee las filas ya escritas, nunca vuelve a correr la query de
+segmento.
+
+**Qué encontré del esquema antes de tocar nada:**
+
+- `announcement_recipients` (etapa 2.5, ya confirmado en el 8.1) tenía
+  exactamente lo documentado entonces: `delivery_status`
+  (`pending`/`link_opened`/`failed`/`skipped`), `sent_at`, `error_message`,
+  `phone_snapshot` -- reconfirmado leyendo el archivo completo. **No**
+  tenía ninguna columna para el cuerpo del mensaje ya resuelto por
+  persona -- confirmado, no asumido.
+- `announcements.status` (enum `announcement_status`:
+  `draft`/`scheduled`/`sending`/`sent`/`failed`) SÍ existe desde la etapa
+  2.5 -- ya lo había confirmado el 8.2 al leer el archivo completo por
+  otro motivo. Este paso es el primero que lo TRANSICIONA de verdad (hasta
+  ahora solo se leía/filtraba por `'draft'`).
+
+**Decisión: `message_snapshot`, columna nueva.** Mismo motivo exacto que
+`phone_snapshot` (ya documentado en el propio esquema): si no se
+congelara el mensaje ya resuelto para esa persona en el momento de
+materializar, reabrir esta pantalla más tarde -- o una futura pantalla de
+historial -- recalcularía el mensaje contra el estado ACTUAL de la
+persona (unidad, nombre), y el registro de "qué se mandó" dejaría de
+poder responder esa pregunta con certeza. Nullable, igual que
+`phone_snapshot`: una fila `skipped` no tiene nada que congelar.
+
+```sql
+-- 0032_jazzy_aqueduct.sql
+ALTER TABLE "announcement_recipients" ADD COLUMN "message_snapshot" text;
+```
+
+**Decisión sobre `announcements.status`: es la señal AUTORITATIVA de "¿ya
+se materializó?", no la cantidad de filas de `announcement_recipients`.**
+Evalué las dos (el enunciado lo dejaba abierto) -- un segmento
+genuinamente vacío materializado también tiene 0 filas, así que contar
+filas no alcanza para distinguir "nunca se materializó" de "se
+materializó y no había nadie". `status !== 'draft'` sí distingue los dos
+casos sin ambigüedad. Transiciones implementadas:
+
+- **`draft` -> `sending`**: al materializar (primera apertura de esta
+  pantalla), compare-and-swap contra `status = 'draft'` dentro de la
+  misma transacción que el `INSERT` de las filas.
+- **`sending` -> `sent`**: automática, sin ningún botón de "marcar como
+  enviado" (no la pide el enunciado) -- cuando ya no queda ningún
+  destinatario `pending` (todos terminaron en `link_opened`, `failed`, o
+  ya nacieron `skipped`), el envío está completo por definición.
+  Compare-and-swap contra `status = 'sending'`, revisado después de CADA
+  acción que cambia el estado de un destinatario.
+- **`failed` a nivel AVISO**: deliberadamente NO alcanzable desde este
+  paso. Es un concepto distinto de `failed` a nivel DESTINATARIO ("no
+  pude comunicarme con esta persona puntual") -- "el envío completo
+  falló" no tiene ningún escenario que lo dispare hoy, y agregar uno sin
+  necesidad real sería inventar un caso no pedido.
+
+**Decisión sobre "marcar como fallido" (destinatario): SÍ se agregó.**
+Caso real, no hipotético: el administrador abre (o intenta abrir)
+WhatsApp y descubre que el número no funciona -- algo que ningún chequeo
+de formato puede saber de antemano (el teléfono ya pasó la validación
+E.164 argentina al cargar la persona; lo que puede fallar es que el
+número no exista de verdad o no tenga WhatsApp). El enum ya lo
+contemplaba (`'failed'`) sin ningún consumidor hasta ahora. Permitido
+desde `pending` (nunca se llegó a intentar) O `link_opened` (se abrió el
+link y recién ahí se notó el problema) -- no desde `skipped`/`failed`
+(ya son estados terminales). Un motivo corto obligatorio (máx. 200
+caracteres), guardado en `error_message`.
+
+**Cómo se arma el link de WhatsApp sin arriesgar el bloqueador de
+pop-ups.** Evalué dos diseños:
+
+1. Click -> `await` una Server Action que llama a
+   `getMessagingProvider().sendToRecipient()` -> recién ahí
+   `window.open(url)`. Descartado: el gap async entre el click y
+   `window.open()` puede activar el bloqueador de pop-ups de varios
+   navegadores (no siempre, pero no es una garantía).
+2. **Elegida:** el Server Component de la página (`send/page.tsx`)
+   PRECALCULA el link de cada `pending` de antemano, siempre a través de
+   `getMessagingProvider()` (nunca a mano) -- ver `prepare-send.ts`. El
+   `<a href={urlYaResuelta} target="_blank">` abre al toque, sin ningún
+   round-trip -- mismo patrón ya probado en el flujo de ENTRADA
+   (`TicketForm`, paso 5.8: href resuelto de antemano). El `onClick` del
+   mismo `<a>` dispara la Server Action que marca `link_opened`
+   SIN esperar (`fire and forget`) -- mismo criterio exacto que
+   `registerWhatsappHandoffOpenedAction` (paso 5.9): no debe demorar ni
+   condicionar una apertura que ya ocurrió.
+
+**`prepare-send.ts`: `import "server-only"`, nunca `"use server"` --
+decisión de seguridad, no de estilo.** Toda función exportada de un
+archivo `"use server"` queda invocable como Server Action directa por
+cualquiera, con o sin sesión (ver CLAUDE.md > Autorización de rutas y
+Server Actions). `prepareWhatsAppLink()` no valida ninguna sesión (se
+llama desde un Server Component que YA resolvió `requireUser()` antes) --
+si viviera en `actions.ts`, sería una Server Action real invocable sin
+autorización, con teléfono y mensaje arbitrarios como argumento. Vive en
+su propio módulo, solo importable desde otro código de servidor.
+
+**Por qué la materialización corre en un `useEffect` de cliente
+(`MaterializeOnMount`), no directo en el Server Component de la
+página -- riesgo real, no un capricho de estilo.** El prefetch de
+`<Link>` (con pasar el mouse por encima, o con el link entrando en
+viewport) dispara un GET real a la ruta por adelantado, pero NO ejecuta
+ningún `useEffect` de cliente (esos solo corren tras un montaje real en
+el navegador). Si la materialización viviera directo en el `page.tsx`
+(evaluada en cada GET), un simple hover sobre el botón "Enviar aviso"
+podría materializar destinatarios y pasar el aviso a `'sending'` -- sin
+que el administrador llegara siquiera a abrir la pantalla. Con
+`useEffect`, el mismo hover no dispara nada; solo un montaje real
+(navegación efectiva) lo hace.
+
+**Progreso "optimista" en el cliente, verdad real en la base.** Cada fila
+actualiza su propio estado local apenas el administrador actúa (clickear
+"Abrir WhatsApp", confirmar "Marcar como fallido"), sin esperar la
+confirmación del servidor para que la barra de progreso se sienta
+instantánea -- la Server Action persiste el cambio real de forma
+independiente. Un F5 vuelve a leer `getMaterializedRecipients()` (la
+única fuente de verdad), sin depender de ningún estado de React.
+
+**Reuso, no reimplementación (pedido explícito del enunciado):**
+`getSegmentRecipientsForPreview` (8.4) para resolver el segmento la
+PRIMERA vez; `resolveRecipientPlaceholders` (8.4) para el mensaje por
+persona; la exclusión "sin teléfono" ya calculada ahí, sin recalcularla.
+`RecipientCountSummary` (componente nuevo) extrae la MISMA pluralización
+de "N destinatarios van a recibir este aviso / M personas más
+califican..." que ya estaba inline en `preview/page.tsx` -- usada en la
+pantalla de envío; `preview/page.tsx` se dejó sin tocar a propósito (ya
+verificado y funcionando desde el 8.4, este paso no pedía tocar esa
+pantalla).
+
+**`MESSAGING_PROVIDER=manual_link` configurado en `.env.local` -- criterio
+propio, no pedido textualmente.** Sin esto, `getMessagingProvider()` cae
+al default `"console"` (el comentario de `.env.local` decía literalmente
+"se completa en el paso que conecte el envío real" -- ESE es este paso).
+Con `console`, el botón "Abrir WhatsApp" no tendría ningún link real que
+abrir (`ConsoleProvider` devuelve `url: null`). Cambio de configuración
+local, gitignored, sin tocar producción.
+
+**Ruta nueva, mismo bug del 8.4 corregido de entrada.**
+`/panel/announcements/[id]/send/not-found.tsx`, copia deliberada de la
+del padre (mismo motivo ya documentado en CLAUDE.md > Vista previa de un
+comunicado -- una carpeta hija necesita su propio `not-found.tsx`, el del
+padre no la cubre).
+
+**Verificado con datos reales, admin de prueba dedicado (Playwright,
+creado y borrado solo para esta verificación), segmento real de Torre
+Central (Corte de agua, rol Propietario + Claudia Rojas agregada a mano
+-- 16 con teléfono + Alejandro Herrera sin teléfono, mismo segmento base
+del 8.2/8.3/8.4):**
+
+- **Materialización, primera apertura:** exactamente 17 filas escritas
+  (16 `pending` + 1 `skipped`), confirmado por SQL directo. Alejandro
+  Herrera: `phone_snapshot: null`, `message_snapshot: null`,
+  `error_message: "Sin teléfono cargado."`. `announcements.status` pasó
+  de `draft` a `sending`, confirmado.
+- **Abrir WhatsApp (Roberto López, 2 unidades vigentes):** URL real
+  capturada al hacer clic:
+  ```
+  https://api.whatsapp.com/send?phone=5493515000005&text=Hola%20Roberto%20L%C3%B3pez%2C%0A%0ATe%20avisamos%20que%20el%2020%2F09%2F2026%20vamos%20a%20cortar%20el%20suministro%20de%20agua%20del%20edificio%20de%2008%3A00%20a%2012%3A00hs%2C%20por%20reparaci%C3%B3n%20de%20la%20bomba%20principal.%0A%0ATu%20unidad%2C%20Norte%20-%203%C2%B0B%2C%20Subsuelo%201%C2%B01%2C%20va%20a%20estar%20sin%20servicio%20durante%20ese%20horario%20--%20te%20sugerimos%20juntar%20agua%20con%20anticipaci%C3%B3n%20si%20lo%20necesit%C3%A1s.%0A%0AGracias%20por%20la%20comprensi%C3%B3n.
+  ```
+  Decodificada, incluye sus DOS unidades reales unidas ("Norte - 3°B,
+  Subsuelo 1°1") -- no la de otra persona. Tras el clic, `sent_at` quedó
+  seteado (`2026-08-24T02:07:39.321Z`) y `delivery_status: link_opened`,
+  confirmado por SQL. La barra de progreso pasó de "1 de 17" (solo
+  Alejandro, `skipped` desde el arranque) a "2 de 17".
+- **Recargar tras procesar algunos:** total de filas siguió en 17 (sin
+  duplicar), Roberto siguió `link_opened` con su `sent_at` real, el resto
+  siguió `pending` con su botón visible -- confirmado en la UI y por SQL.
+- **Marcar como fallido (Jorge Herrera):** motivo real tipeado ("El
+  número no existe, probado en la práctica.") -- quedó en
+  `error_message`, `delivery_status: failed`, `sent_at: null` (nunca se
+  abrió). Confirmado que NO afectó a Roberto (siguió `link_opened`) ni al
+  conteo de los demás (progreso pasó a "3 de 17", sumando exactamente 1).
+- **Completado hasta el final** (bonus, no pedido explícito pero
+  necesario para probar la transición automática): se abrió WhatsApp
+  para los 14 `pending` restantes -- al llegar el último a `link_opened`,
+  `announcements.status` pasó de `sending` a `sent` automáticamente,
+  confirmado por SQL (`link_opened: 15, failed: 1, skipped: 1`, cero
+  `pending`).
+
+**Nota honesta sobre el proceso de verificación, no sobre la
+aplicación:** un primer intento de completar los 17 destinatarios con un
+script que clickeaba "Abrir WhatsApp" en un loop rápido (400ms entre
+clicks) dejó 8 sin procesar del lado del servidor pese a que el cliente
+mostraba "17 de 17" -- comportamiento consistente con una condición de
+carrera del PROPIO script de automatización (clicks disparados más rápido
+de lo que React re-renderiza para sacar el botón ya procesado de la
+consulta `getByRole` siguiente), no un bug de la Server Action: cada
+destinatario probado de forma individual y pausada (Roberto, Jorge,
+Sergio) persistió correctamente al primer clic, verificado por SQL las
+tres veces.
+
+**Limpieza:** el aviso de prueba y sus 17 filas de
+`announcement_recipients`: soft-borrados. Cuenta de prueba
+(`prueba-8-5-...@example.com`) eliminada por completo (Auth +
+`app_users`) -- único uso de la service-role key en este paso.
+
+### Corrección: la carrera de arriba SÍ era real -- diagnóstico y fix
+
+**El párrafo anterior ("comportamiento consistente con una condición de
+carrera del PROPIO script") estaba mal -- afirmado sin evidencia, corregido
+acá con evidencia real.** Un pedido posterior exigió diagnosticar antes de
+aprobar. Resultado: dos fenómenos DISTINTOS, uno inofensivo y uno real.
+
+**Doble clic sobre el MISMO destinatario -- confirmado inofensivo, con
+evidencia de red.** Dos clicks nativos sin pausa (`el.click(); el.click();`)
+sobre el mismo `<a>` disparaban dos invocaciones reales de
+`markRecipientLinkOpenedAction` con el mismo `recipientId` -- capturado en
+la red:
+
+```
+[REQ 1] ["413390b6-..."]
+[REQ 2] ["413390b6-..."]   <- mismo recipientId
+[RES] {"ok":false,"error":"No encontramos ese destinatario pendiente."}
+[RES] (la invocación que sí tuvo éxito, con su revalidación)
+```
+
+Sin excepción, sin sobrescribir `sent_at`, sin duplicar la fila -- el
+compare-and-swap (`WHERE delivery_status = 'pending'`) ya protegía esto
+correctamente. Esta parte nunca necesitó arreglo.
+
+**Clicks rápidos sobre destinatarios DISTINTOS -- real, confirmado con
+logging de red completo (`request`/`requestfinished`/`requestfailed`).**
+15 clicks sobre 15 personas distintas, 400ms entre cada uno:
+
+```
+Clicks disparados: 15
+Total: requests=11 finished=9 failed=0 clicks=15
+```
+
+**4 de los 15 clicks nunca llegaron a emitir ni un solo request de red**
+(no `requestfailed` -- directamente nunca se generaron). Confirmado por
+SQL minutos después (no es que llegaran tarde, quedaron así para
+siempre): 8 de 16 destinatarios reales quedaron en `'pending'` mientras el
+cliente mostraba "16 de 16". Reproducido de nuevo con un espaciado más
+realista (1200ms): 4 de 15 perdidos igual. La causa raíz más probable,
+según el patrón de timing observado (requests que se sirven de a uno, en
+serie, ~2-2.4s cada uno) es que el mecanismo de Server Actions de Next.js
+serializa las invocaciones sobre la MISMA ruta y una invocación nueva que
+llega mientras la anterior sigue en vuelo se pierde en vez de encolarse
+-- no llegué a confirmar esto línea por línea contra el código fuente de
+Next.js, queda como hipótesis fundamentada en la evidencia de timing, no
+como hecho verificado.
+
+**`max: 1` del pool (`src/db/index.ts`) -- confirmado el mismo valor en
+dev y en producción, sin ninguna rama por `NODE_ENV`.** El comentario que
+ya lo justifica explica por qué la severidad real es distinta en cada
+entorno pese a ser el mismo número: en dev, un único proceso Node
+persistente sirve TODOS los requests con esa única conexión -- serializa
+de verdad. En producción (Vercel serverless + Supavisor), cada instancia
+efímera tiene su propia conexión de `max:1`, pero Vercel puede levantar
+MUCHAS instancias concurrentes, cada una con la suya -- el cuello de
+botella de "una sola conexión total" que se ve en dev no se traduce
+directo a producción. Dicho esto, la evidencia de este diagnóstico apunta
+más al mecanismo de despacho de Server Actions del lado del cliente que
+al pool de Postgres como causa de los requests PERDIDOS (un cuello de
+botella de base los demoraría, no los haría desaparecer sin dejar rastro
+de red) -- `max: 1` explica el ritmo de ~2s por request, no la pérdida en
+sí.
+
+**El fix, decisión de diseño fijada, no reinterpretada:**
+
+1. El `<a href>` con el link de WhatsApp sigue abriendo de inmediato, sin
+   esperar al servidor -- sin cambios, sigue siendo el mismo mecanismo
+   del 8.5 original (href resuelto server-side de antemano).
+2. La confirmación (`markRecipientLinkOpenedAction`) se encola del lado
+   del cliente -- `AnnouncementSendList` (antes: `AnnouncementSendRecipientRow`
+   llamaba a la acción directo). Una cola FIFO (`queueRef`, un array en un
+   `useRef`) + un flag (`processingRef`) garantizan que nunca hay más de
+   una invocación en vuelo a la vez, sin importar cuántos clicks lleguen
+   mientras tanto -- exactamente el mecanismo que evita la pérdida
+   diagnosticada arriba (nunca hay una segunda invocación "en vuelo al
+   mismo tiempo" que la primera pueda pisar o descartar).
+3. **Se eliminó el estado optimista.** Antes, la fila pasaba a
+   `link_opened` en el momento del click, antes de que el servidor
+   confirmara. Ahora `deliveryStatus` de una fila SOLO cambia después de
+   que la Server Action realmente resuelve `{ok:true}` -- mientras tanto,
+   la fila muestra un badge "Confirmando…" (`confirmingIds`, un
+   `Set<string>` de estado). Consecuencia directa, no una lógica aparte:
+   la barra de progreso (`processed = recipients.filter(r =>
+r.deliveryStatus !== "pending").length`) por construcción nunca puede
+   mostrar más de lo confirmado real, porque nada se le suma hasta que el
+   servidor ya lo confirmó.
+4. Si la confirmación falla (`{ok:false}` o una excepción de red), la
+   fila vuelve a mostrar el botón "Abrir WhatsApp" (nunca cambió de
+   `deliveryStatus`, seguía siendo `'pending'` todo este tiempo) con un
+   aviso visible ("No pudimos confirmar que se abrió WhatsApp (...) --
+   probá de nuevo") -- `confirmErrors`, un `Record<string, string>`. Nunca
+   se descarta en silencio.
+5. **`enqueuedRef` (un `Set`, no `confirmingIds` del estado) es el guard
+   real contra encolar el mismo destinatario dos veces.** Un doble clic
+   nativo puede disparar el handler dos veces en el MISMO tick de JS,
+   antes de que React llegue a re-renderizar -- un guard basado en
+   `useState` todavía vería el valor viejo en la segunda invocación
+   (closure stale). Un `useRef` se lee/escribe sincrónicamente, sin
+   depender de ningún render -- confirmado en la práctica: con el fix, el
+   mismo doble clic agresivo sobre una persona ahora emite **UN SOLO**
+   request (antes del fix emitía dos, el segundo rechazado de forma
+   segura por el compare-and-swap del servidor; con el guard del cliente,
+   el segundo ni siquiera se encola).
+6. **NO se agregó reconciliación periódica** (`router.refresh()` en
+   intervalo o al recuperar foco) -- pedido explícito: con la cola
+   serializada, ningún click debería perderse para empezar, y la
+   verificación de abajo lo confirma. Si en el futuro aparece un caso
+   real donde algo se pierde pese a la cola, ESE es el momento de
+   evaluar esa capa extra, no antes.
+
+**`AnnouncementSendRecipientRow` ya NO llama a `markRecipientLinkOpenedAction`
+directo** -- recibe `isConfirming`/`confirmError` como props y notifica al
+padre con `onOpenClick()`; toda la orquestación de la cola vive en
+`AnnouncementSendList`. `markRecipientFailedAction` (marcar a mano) no se
+tocó -- ya esperaba su propia resolución antes de actualizar la UI (nunca
+fire-and-forget), así que no comparte la clase de bug diagnosticada acá;
+además es una acción deliberada con un formulario de texto por fila, no
+algo que un click rápido dispare en cadena sobre muchas filas a la vez.
+
+**Verificado con datos reales, admin de prueba dedicado, repitiendo
+EXACTAMENTE el experimento del diagnóstico con el fix aplicado:**
+
+- **15 clicks rápidos (400ms entre cada uno), Torre Central + Propietario
+  (15 pendientes + 1 sin teléfono, igual que en el diagnóstico):**
+  `Requests emitidos: 15 (deberían ser 15)` -- CERO perdidos (antes del
+  fix: 4 de 15). Progreso monótono confirmado durante toda la corrida
+  (nunca bajó, nunca saltó de más). Estado final en la base, sin recargar
+  la página, sin necesitar ningún click extra:
+  ```
+  Carlos Álvarez       link_opened  2026-08-24T19:56:42.355Z
+  Daniel Juárez        link_opened  2026-08-24T19:56:43.893Z
+  ...(13 más, cada uno con su propio sent_at, ~2.5s de diferencia)...
+  Sergio López         link_opened  2026-08-24T19:57:16.933Z
+  Alejandro Herrera    skipped      null
+  ```
+  16 filas, 15 `link_opened` + 1 `skipped`, CERO `pending` -- confirmado
+  por SQL.
+- **Mismo experimento con 1200ms entre clicks (más realista):** mismo
+  resultado -- `requests=15/15`, progreso monótono, 15 `link_opened` + 1
+  `skipped` en la base al terminar, sin recargar.
+- **Doble clic sobre la MISMA persona (Roberto López), repetido con el
+  fix:** UN SOLO request emitido (antes del fix eran dos, el segundo
+  rechazado por el servidor -- ahora el cliente ni siquiera lo encola).
+  Roberto quedó `link_opened`, sin ningún mensaje de error de
+  confirmación visible, progreso correcto.
+
+**Limpieza:** los avisos de prueba de esta verificación (incluidos dos
+intentos con fallas metodológicas propias del script -- navegar a la
+página siguiente antes de que la cola terminara de procesar, y una
+carrera de Playwright esperando un popup que nunca llegó -- documentadas
+acá para que quede claro que fueron errores del script, no del fix,
+descubiertos y corregidos ANTES de dar el resultado final por bueno):
+soft-borrados. Cuenta de prueba (`prueba-8-5-fix-...@example.com`)
+eliminada por completo (Auth + `app_users`).
 
 ## Reglas de seguridad (no negociables)
 

@@ -391,6 +391,13 @@ export function AnnouncementSegmentForm({
                 Ver vista previa
               </Link>
             </Button>
+            <Button asChild size="sm">
+              <Link
+                href={`/panel/announcements/${initialAnnouncement.id}/send`}
+              >
+                Enviar aviso
+              </Link>
+            </Button>
             <Button asChild variant="outline" size="sm">
               <Link href="/panel/announcements/new">Crear otro aviso</Link>
             </Button>

@@ -1,17 +1,20 @@
 "use server";
 
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
 import { db } from "@/db";
-import { announcements } from "@/db/schema";
+import { announcementRecipients, announcements } from "@/db/schema";
 import { getActiveBuildings } from "@/features/buildings/queries";
 import { authorizedAction } from "@/lib/auth";
 
 import {
   countSegmentRecipients,
+  getAnnouncementForSend,
   getBuildingTowersAndFloors,
+  getMaterializedRecipients,
+  getSegmentRecipientsForPreview,
   searchPeopleForSegment,
   type BuildingTowersAndFloors,
   type PersonSearchResult,
@@ -19,12 +22,16 @@ import {
 import {
   countSegmentInputSchema,
   createAnnouncementDraftSchema,
+  markRecipientFailedSchema,
   updateAnnouncementDraftSchema,
   type CreateAnnouncementDraftResult,
   type SegmentRecipientCount,
   type UpdateAnnouncementDraftResult,
 } from "./segment-schema";
-import { getAnnouncementTemplate } from "./templates";
+import {
+  getAnnouncementTemplate,
+  resolveRecipientPlaceholders,
+} from "./templates";
 
 // Nunca se confía en el buildingId que manda el cliente sin cruzarlo --
 // mismo criterio que setSelectedBuildingAction (buildings/actions.ts):
@@ -259,6 +266,243 @@ export const updateAnnouncementDraftAction = authorizedAction(
 
     revalidatePath("/panel/announcements");
     revalidatePath(`/panel/announcements/${id}`);
+    return { ok: true };
+  },
+);
+
+// Si ya no queda ningún destinatario 'pending' para este aviso, el envío
+// terminó -- transición automática 'sending' -> 'sent' (paso 8.5), sin
+// ninguna acción manual de "marcar como enviado" (no la pide el
+// enunciado, y el propio estado de los destinatarios ya alcanza para
+// derivarlo). Compare-and-swap contra `status = 'sending'`: nunca pisa un
+// estado que no sea ese.
+async function maybeMarkAnnouncementSent(
+  organizationId: string,
+  announcementId: string,
+): Promise<void> {
+  const [remaining] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(announcementRecipients)
+    .where(
+      and(
+        eq(announcementRecipients.announcementId, announcementId),
+        eq(announcementRecipients.organizationId, organizationId),
+        eq(announcementRecipients.deliveryStatus, "pending"),
+        isNull(announcementRecipients.deletedAt),
+      ),
+    );
+
+  if (remaining?.count !== 0) {
+    return;
+  }
+
+  await db
+    .update(announcements)
+    .set({ status: "sent" })
+    .where(
+      and(
+        eq(announcements.id, announcementId),
+        eq(announcements.organizationId, organizationId),
+        eq(announcements.status, "sending"),
+      ),
+    );
+}
+
+export type MaterializeRecipientsResult =
+  { ok: true } | { ok: false; error: string };
+
+// Materializa la lista de destinatarios de un aviso EN announcement_recipients
+// (paso 8.5) -- UNA SOLA VEZ por aviso, la primera vez que se abre la
+// pantalla de envío. Decisión explícita del enunciado, no reinterpretada:
+// si ya existen filas para este `announcementId`, esta acción es un no-op
+// (nunca vuelve a correr getSegmentRecipientsForPreview ni pisa ningún
+// status ya escrito) -- eso es lo que protege un envío ya empezado contra
+// cambios posteriores en los datos (alguien cambia de teléfono, deja de
+// calificar por el criterio). El chequeo "¿ya existen filas?" +el INSERT
+// tienen una ventana de carrera teórica entre sí (dos llamadas
+// concurrentes podrían ver 0 filas las dos) -- se cierra con
+// `.onConflictDoNothing()` sobre la unique constraint
+// (announcement_id, person_id): la segunda llamada, aunque alcance a
+// calcular las mismas filas, no inserta duplicados.
+export const materializeAnnouncementRecipientsAction = authorizedAction(
+  async (
+    context,
+    announcementId: string,
+  ): Promise<MaterializeRecipientsResult> => {
+    const parsedId = z.uuid().safeParse(announcementId);
+    if (!parsedId.success) {
+      return { ok: false, error: "Aviso inválido." };
+    }
+
+    const announcement = await getAnnouncementForSend(
+      context.organization.id,
+      parsedId.data,
+    );
+    if (!announcement) {
+      return { ok: false, error: "No encontramos ese aviso." };
+    }
+
+    const existing = await getMaterializedRecipients(
+      context.organization.id,
+      announcement.id,
+    );
+    if (existing.length > 0) {
+      return { ok: true };
+    }
+
+    const recipients = await getSegmentRecipientsForPreview(
+      context.organization.id,
+      announcement.buildingId,
+      announcement.segment,
+    );
+
+    const rows = recipients.map((r) => {
+      const hasPhone = !!r.phoneE164;
+      const nombre = [r.firstName, r.lastName].filter(Boolean).join(" ");
+      return {
+        organizationId: context.organization.id,
+        announcementId: announcement.id,
+        personId: r.id,
+        deliveryStatus: (hasPhone ? "pending" : "skipped") as
+          "pending" | "skipped",
+        // Congelados en el momento de materializar -- ver el comentario de
+        // estas dos columnas en src/db/schema/announcement-recipients.ts.
+        phoneSnapshot: hasPhone ? r.phoneE164 : null,
+        messageSnapshot: hasPhone
+          ? resolveRecipientPlaceholders(announcement.body, {
+              nombre,
+              unidad: r.unitLabels.length > 0 ? r.unitLabels.join(", ") : null,
+            })
+          : null,
+        // Mismo motivo de exclusión ya calculado en el 8.2/8.4 (sin
+        // teléfono cargado) -- no se recalcula, se documenta acá.
+        errorMessage: hasPhone ? null : "Sin teléfono cargado.",
+      };
+    });
+
+    await db.transaction(async (tx) => {
+      if (rows.length > 0) {
+        await tx
+          .insert(announcementRecipients)
+          .values(rows)
+          .onConflictDoNothing();
+      }
+      // 'draft' -> 'sending': el envío arranca acá. Compare-and-swap contra
+      // 'draft' -- si dos llamadas concurrentes llegan hasta acá, solo la
+      // primera cambia algo; la segunda actualiza 0 filas, sin error.
+      await tx
+        .update(announcements)
+        .set({ status: "sending" })
+        .where(
+          and(
+            eq(announcements.id, announcement.id),
+            eq(announcements.organizationId, context.organization.id),
+            eq(announcements.status, "draft"),
+          ),
+        );
+    });
+
+    // Segmento vacío, o compuesto enteramente por personas sin teléfono:
+    // no queda ningún 'pending' desde el arranque -- el envío ya está
+    // completo, no debería quedar mostrando "sending" para siempre.
+    await maybeMarkAnnouncementSent(context.organization.id, announcement.id);
+
+    revalidatePath(`/panel/announcements/${announcement.id}/send`);
+    return { ok: true };
+  },
+);
+
+export type MarkRecipientResult = { ok: true } | { ok: false; error: string };
+
+// Marca UN destinatario puntual como 'link_opened' + sent_at (paso 8.5) --
+// llamada por el cliente DESPUÉS de que el link real ya se abrió (fire and
+// forget, mismo criterio que registerWhatsappHandoffOpenedAction del flujo
+// de entrada, paso 5.9: no debe demorar ni condicionar la apertura del
+// link real, que ya ocurrió con un <a href> resuelto de antemano -- ver
+// el comentario del componente cliente). Compare-and-swap contra
+// `delivery_status = 'pending'`: un destinatario que ya cambió de estado
+// (doble click, dos pestañas) no se reescribe.
+export const markRecipientLinkOpenedAction = authorizedAction(
+  async (context, recipientId: string): Promise<MarkRecipientResult> => {
+    const parsed = z.uuid().safeParse(recipientId);
+    if (!parsed.success) {
+      return { ok: false, error: "Destinatario inválido." };
+    }
+
+    const [row] = await db
+      .update(announcementRecipients)
+      .set({ deliveryStatus: "link_opened", sentAt: new Date() })
+      .where(
+        and(
+          eq(announcementRecipients.id, parsed.data),
+          eq(announcementRecipients.organizationId, context.organization.id),
+          eq(announcementRecipients.deliveryStatus, "pending"),
+        ),
+      )
+      .returning({ announcementId: announcementRecipients.announcementId });
+
+    if (!row) {
+      return {
+        ok: false,
+        error: "No encontramos ese destinatario pendiente.",
+      };
+    }
+
+    await maybeMarkAnnouncementSent(
+      context.organization.id,
+      row.announcementId,
+    );
+
+    revalidatePath(`/panel/announcements/${row.announcementId}/send`);
+    return { ok: true };
+  },
+);
+
+// Marcar a mano un destinatario como 'failed' (paso 8.5) -- caso real: el
+// administrador abre (o intenta abrir) WhatsApp y descubre que el número
+// no funciona, algo que el sistema no puede saber de antemano (el
+// teléfono ya pasó la validación de formato E.164 argentino al cargar la
+// persona -- lo que puede fallar es que el NÚMERO no exista de verdad o
+// no tenga WhatsApp, algo que ningún chequeo de formato detecta). Permitido
+// desde 'pending' (nunca se llegó a intentar) O 'link_opened' (se abrió el
+// link y recién ahí se descubrió el problema) -- desde 'skipped' o
+// 'failed' no tiene sentido (ya están en un estado terminal).
+export const markRecipientFailedAction = authorizedAction(
+  async (context, input: unknown): Promise<MarkRecipientResult> => {
+    const parsed = markRecipientFailedSchema.safeParse(input);
+    if (!parsed.success) {
+      return {
+        ok: false,
+        error: parsed.error.issues[0]?.message ?? "Datos inválidos.",
+      };
+    }
+    const { recipientId, reason } = parsed.data;
+
+    const [row] = await db
+      .update(announcementRecipients)
+      .set({ deliveryStatus: "failed", errorMessage: reason })
+      .where(
+        and(
+          eq(announcementRecipients.id, recipientId),
+          eq(announcementRecipients.organizationId, context.organization.id),
+          inArray(announcementRecipients.deliveryStatus, [
+            "pending",
+            "link_opened",
+          ]),
+        ),
+      )
+      .returning({ announcementId: announcementRecipients.announcementId });
+
+    if (!row) {
+      return { ok: false, error: "No encontramos ese destinatario." };
+    }
+
+    await maybeMarkAnnouncementSent(
+      context.organization.id,
+      row.announcementId,
+    );
+
+    revalidatePath(`/panel/announcements/${row.announcementId}/send`);
     return { ok: true };
   },
 );

@@ -98,3 +98,21 @@ export type UpdateAnnouncementDraftInput = z.input<
 
 export type UpdateAnnouncementDraftResult =
   { ok: true } | { ok: false; error: string };
+
+// Paso 8.5 -- marcar a mano un destinatario 'pending'/'link_opened' como
+// 'failed', con un motivo corto (ej. "el número no existe", descubierto
+// recién al intentar abrir WhatsApp -- algo que el sistema no puede saber
+// de antemano). Mismo límite de largo que un motivo de error interno,
+// pensado para leerse de un vistazo en la lista, no para un relato largo.
+export const markRecipientFailedSchema = z.object({
+  recipientId: z.uuid(),
+  reason: z
+    .string()
+    .trim()
+    .min(1, "Contá brevemente qué pasó.")
+    .max(200, "Como máximo 200 caracteres."),
+});
+
+export type MarkRecipientFailedInput = z.input<
+  typeof markRecipientFailedSchema
+>;

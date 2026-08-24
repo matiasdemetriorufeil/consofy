@@ -4,7 +4,13 @@ import { and, eq, ilike, inArray, isNull, or, sql } from "drizzle-orm";
 import { z } from "zod";
 
 import { db } from "@/db";
-import { announcements, people, unitOccupancies, units } from "@/db/schema";
+import {
+  announcementRecipients,
+  announcements,
+  people,
+  unitOccupancies,
+  units,
+} from "@/db/schema";
 
 import {
   EMPTY_SEGMENT_CRITERIA,
@@ -503,4 +509,128 @@ export async function getSegmentRecipientsForPreview(
       unitLabels: unitLabelsByPerson.get(id) ?? [],
     };
   });
+}
+
+// Los cinco valores reales de announcements.status (enum de la base,
+// etapa 2.5) -- ver src/db/schema/announcements.ts. Repetido acá como tipo
+// literal en vez de derivado de Drizzle porque este archivo no necesita
+// importar el objeto del enum entero solo para su tipo.
+export type AnnouncementStatus =
+  "draft" | "scheduled" | "sending" | "sent" | "failed";
+
+export type AnnouncementForSend = {
+  id: string;
+  title: string;
+  body: string;
+  buildingId: string | null;
+  segment: SegmentCriteria;
+  status: AnnouncementStatus;
+};
+
+// Carga un aviso para la pantalla de envío (paso 8.5) -- a diferencia de
+// getAnnouncementDraftForEdit (8.3), NO filtra por `status = 'draft'`: el
+// editor y la vista previa dejan de ser alcanzables en cuanto el envío
+// arranca (materializar destinatarios pasa `status` a 'sending', ver
+// materializeAnnouncementRecipientsAction en actions.ts) a propósito --
+// un borrador que ya empezó a mandarse no debería poder editarse -- pero
+// ESTA pantalla es la que sigue viva durante todo ese tiempo (`sending` y
+// después `sent`), así que necesita poder cargar el aviso en cualquier
+// estado no borrado.
+export async function getAnnouncementForSend(
+  organizationId: string,
+  id: string,
+): Promise<AnnouncementForSend | null> {
+  const [row] = await db
+    .select({
+      id: announcements.id,
+      title: announcements.title,
+      body: announcements.body,
+      buildingId: announcements.buildingId,
+      segment: announcements.segment,
+      status: announcements.status,
+    })
+    .from(announcements)
+    .where(
+      and(
+        eq(announcements.id, id),
+        eq(announcements.organizationId, organizationId),
+        isNull(announcements.deletedAt),
+      ),
+    )
+    .limit(1);
+
+  if (!row) {
+    return null;
+  }
+
+  const parsedSegment = segmentCriteriaSchema.safeParse(row.segment);
+
+  return {
+    id: row.id,
+    title: row.title,
+    body: row.body,
+    buildingId: row.buildingId,
+    segment: parsedSegment.success
+      ? parsedSegment.data
+      : EMPTY_SEGMENT_CRITERIA,
+    status: row.status,
+  };
+}
+
+export type MaterializedRecipient = {
+  id: string;
+  personId: string;
+  firstName: string;
+  lastName: string | null;
+  phoneSnapshot: string | null;
+  messageSnapshot: string | null;
+  deliveryStatus: "pending" | "link_opened" | "failed" | "skipped";
+  errorMessage: string | null;
+  sentAt: Date | null;
+};
+
+// Filas YA MATERIALIZADAS de announcement_recipients (paso 8.5) -- nunca
+// vuelve a correr la query de segmento, a diferencia de
+// getSegmentRecipientsForPreview: una vez que existen filas para este
+// aviso, son la ÚNICA fuente de verdad (ver el comentario de
+// materializeAnnouncementRecipientsAction, actions.ts, para la regla
+// completa de "se materializa una sola vez"). Nombre sale de un JOIN en
+// vivo contra `people` (puede mostrar un nombre editado después, sin
+// problema -- lo que SÍ se congela es el teléfono/mensaje, ver el
+// comentario de esas dos columnas); nunca se filtra por
+// `people.deleted_at`: un destinatario de un envío ya hecho no debería
+// desaparecer de su propio historial solo porque la persona se dio de
+// baja después.
+export async function getMaterializedRecipients(
+  organizationId: string,
+  announcementId: string,
+): Promise<MaterializedRecipient[]> {
+  return db
+    .select({
+      id: announcementRecipients.id,
+      personId: announcementRecipients.personId,
+      firstName: people.firstName,
+      lastName: people.lastName,
+      phoneSnapshot: announcementRecipients.phoneSnapshot,
+      messageSnapshot: announcementRecipients.messageSnapshot,
+      deliveryStatus: announcementRecipients.deliveryStatus,
+      errorMessage: announcementRecipients.errorMessage,
+      sentAt: announcementRecipients.sentAt,
+    })
+    .from(announcementRecipients)
+    .innerJoin(
+      people,
+      and(
+        eq(people.id, announcementRecipients.personId),
+        eq(people.organizationId, announcementRecipients.organizationId),
+      ),
+    )
+    .where(
+      and(
+        eq(announcementRecipients.announcementId, announcementId),
+        eq(announcementRecipients.organizationId, organizationId),
+        isNull(announcementRecipients.deletedAt),
+      ),
+    )
+    .orderBy(people.firstName, people.lastName);
 }

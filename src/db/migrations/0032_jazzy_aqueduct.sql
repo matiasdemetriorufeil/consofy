@@ -1,0 +1,1 @@
+ALTER TABLE "announcement_recipients" ADD COLUMN "message_snapshot" text;
