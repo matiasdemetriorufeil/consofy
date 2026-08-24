@@ -4666,6 +4666,206 @@ para esta verificación). Las dos cuentas de prueba
 (`prueba-8-6-...@example.com`, `prueba-8-6-empty-...@example.com`)
 eliminadas por completo (Auth + `app_users`).
 
+## Validación de teléfonos (paso 8.7)
+
+Visibiliza, en el CONTEXTO de un comunicado (editor 8.2, vista previa 8.4,
+pantalla de envío 8.5), qué personas quedan excluidas de recibir un aviso
+y por qué motivo específico -- con un link directo a corregir la ficha.
+No agrega ningún validador nuevo en tiempo real al formulario de personas
+(4.x) -- eso ya existe si existía, este paso es sobre mostrar el problema
+donde importa, no sobre la carga en general.
+
+**Qué encontré antes de tocar nada -- la distinción faltante/mal-formateado
+NO existía, confirmado leyendo el código, no asumido:** `countSegmentRecipients`,
+`getSegmentRecipientsForPreview` (`queries.ts`, paso 8.2/8.4) y
+`materializeAnnouncementRecipientsAction` (`actions.ts`, paso 8.5) decidían
+"con teléfono" con un simple `!!phoneE164` -- truthiness, sin validar
+formato. Consecuencia real, no hipotética: `people.phone_e164` es NOT NULL
+pero sin ningún CHECK que exija el formato argentino estricto (ese CHECK
+solo exige un E.164 genérico, más permisivo -- ver CLAUDE.md > Acceso a
+datos), y `personFieldsSchema.refine()` (la única validación de formato
+estricto, ver abajo) solo protege altas/ediciones que pasan por la UI del
+panel -- un valor cargado por otra vía (import CSV, un seed, una edición
+futura fuera de esa UI) puede quedar con un `phone_e164` no-E.164-argentino
+sin que nadie lo detecte. Con el código de antes, esa persona contaba como
+"con teléfono", se materializaba `'pending'`, y el administrador hubiera
+intentado abrir un link de WhatsApp armado con un número que nunca iba a
+funcionar -- sin ningún aviso previo.
+
+**Validación de formato reusada, no reinventada:** `AR_WHATSAPP_E164_REGEX`
+(`src/lib/phone.ts`, paso 4.1/4.4 -- ya compartida entre el WhatsApp del
+administrador de un edificio y el teléfono de un vecino) es la MISMA regex
+que usa `personFieldsSchema.phoneE164` al cargar/editar una persona. Este
+paso agrega `getPhoneIssue(phone: string | null): "missing" | "invalid_format" | null`
+en ese mismo archivo (mismo criterio de "extraer con el segundo consumidor
+real" ya documentado ahí) -- prueba el valor CRUDO tal como está guardado,
+SIN normalizar primero: si un teléfono necesita normalizarse para
+matchear, ya cuenta como "mal formateado" desde la perspectiva de esta
+app, mismo estándar que ya exige el formulario de personas al guardar.
+Primer archivo de tests de `src/lib/phone.ts` (`phone.test.ts`, 6 tests
+nuevos) -- no tenía ninguno hasta ahora.
+
+**Dónde se usa ahora `getPhoneIssue`, reemplazando el `!!phoneE164` de
+cada lugar:**
+
+- `countSegmentRecipients` (8.2): `qualifiedWithPhone` ahora exige un
+  teléfono VÁLIDO, no solo cargado.
+- `getSegmentRecipientsForPreview` (8.4): `SegmentRecipientPreview` ganó
+  un campo `phoneIssue: PhoneIssue | null` -- `preview/page.tsx` separa
+  `withPhone`/`withoutPhone` por ese campo, no por truthiness.
+- `materializeAnnouncementRecipientsAction` (8.5) -- el fix más
+  importante: una persona con teléfono cargado pero inválido ahora
+  también nace `'skipped'` (antes nacía `'pending'` con un link roto),
+  con un `error_message` DISTINTO del de "sin teléfono cargado"
+  ("El teléfono cargado no tiene un formato válido -- corregilo en la
+  ficha del vecino.").
+
+**Detalle por persona -- tres superficies, una sola función de datos
+(`getExcludedSegmentRecipients`, queries.ts) que nunca puede desincronizarse
+del conteo agregado** (mismo criterio que ya garantiza esto entre
+`countSegmentRecipients`/`getSegmentRecipientsForPreview` desde el 8.2/8.4:
+las tres parten de `findPeopleByCriteria`/`findPeopleByIds`, el mismo merge
+por Map):
+
+1. **Editor (8.2, `AnnouncementSegmentForm`):** botón "Ver detalle" LAZY
+   -- solo pide el detalle (`getExcludedSegmentRecipientsAction`, acción
+   NUEVA y separada de `countSegmentRecipientsAction`) cuando el
+   administrador lo clickea, no en cada debounce del conteo (que ya corre
+   varias veces por minuto mientras se arma el segmento) -- resolver el
+   edificio de cada excluido es una consulta extra que no vale la pena
+   pagar todo el tiempo. Se cierra solo (con los datos viejos
+   descartados) si el criterio cambia mientras estaba abierto -- mismo
+   patrón de "estado derivado ajustado SÍNCRONAMENTE durante el render"
+   que ya usa este archivo para el reset de torres/pisos al cambiar de
+   edificio (un `useEffect` con `setState` síncrono acá dispara el mismo
+   error de lint `react-hooks/set-state-in-effect` que ese reset ya
+   documentaba evitar).
+2. **Vista previa (8.4, `preview/page.tsx`):** ya tenía un bloque
+   "personas más califican... pero no tienen teléfono" con una lista de
+   nombres (`Badge`) -- Server Component, sin necesidad de fetch lazy
+   (todo el segmento ya se resuelve en la carga de la página). Se
+   reemplazó esa lista de badges por `ExcludedRecipientsList` (componente
+   nuevo, compartido con el editor).
+3. **Envío (8.5, `send/page.tsx`/`AnnouncementSendRecipientRow`):** cada
+   fila `'skipped'` YA mostraba su propio `errorMessage` congelado (paso
+   8.5) -- este paso solo AGREGA el link de corrección + una aclaración
+   explícita al lado, reusando esa tarjeta existente en vez de construir
+   un bloque de resumen nuevo (pedido explícito del enunciado: "no hace
+   falta una pantalla nueva si ya hay un lugar natural").
+
+**`ExcludedRecipientsList`** (`announcements/components/excluded-recipients-list.tsx`,
+nuevo): componente PURO sin `"use client"` -- se importa igual desde un
+Server Component (preview) que desde uno de cliente (el editor, que lo
+pinta recién después del fetch lazy), sin duplicar el render en los dos
+lugares.
+
+**`getEditBuildingIdsForPeople`** (queries.ts, nuevo, exportado): resuelve
+a QUÉ edificio linkear "corregir esta ficha" para una lista de personas
+-- necesario porque un comunicado puede ser de TODA la organización (sin
+un edificio de referencia propio), y la única pantalla de edición
+individual que existe hoy (`/panel/buildings/[buildingId]/people`, ver
+abajo) vive bajo un edificio puntual. Una sola fila por persona
+(`selectDistinctOn`), prioriza una ocupación VIGENTE por sobre una
+finalizada, y la más reciente entre varias -- no hace falta más precisión
+que esa para un link que solo tiene que llevar al administrador al lugar
+correcto. **Límite real, documentado, no escondido:** una persona SIN
+ninguna ocupación en ningún edificio (agregada al segmento por
+`personIds` sin tener nunca una unidad asignada -- mismo caso ya
+documentado en CLAUDE.md > Pendientes, "un vecino sin ocupación es
+invisible en el panel") no tiene ningún edificio al que ir -- en ese caso
+`editHref` es `null` y `ExcludedRecipientsList` muestra un texto explícito
+("Sin ninguna unidad asignada -- no se puede editar desde acá todavía.")
+en vez de un link roto o silencio.
+
+**No existe una ruta de edición individual propia (`/panel/buildings/
+[buildingId]/people/[personId]`) -- confirmado antes de construir nada
+nuevo.** Editar una persona es un DIÁLOGO client-side dentro de
+`PeopleList` (`people-list.tsx`), no una ruta -- `PersonFormDialog` recibe
+la fila completa (`BuildingOccupancyRow`), no solo un id. Se agregó
+soporte para `?editPerson=<personId>` en `PeopleList`: si matchea una fila
+de `occupancies` (que YA llega completa como prop, sin consulta nueva del
+lado del cliente), abre el diálogo de edición automáticamente al montar.
+Estado inicial calculado en el INITIALIZER de `useState` (corre una sola
+vez, en el primer render) -- un `useEffect` con `setState` síncrono acá
+dispara el mismo error de lint ya evitado en el editor de comunicados (ver
+arriba). Un efecto SEPARADO (sin ningún `setState` de React, solo
+`router.replace` para limpiar el query param + un `toast.error` si el id
+no matcheó ninguna fila) corre una sola vez al montar.
+
+**El link abre en pestaña nueva (`target="_blank"`), decisión de diseño
+explícita, no un detalle cosmético.** El enunciado pedía confirmar que
+"volver de editar la persona no rompe ni resetea el comunicado en curso"
+-- la respuesta más fuerte a esa pregunta no es "confirmar que sobrevive a
+la navegación", es EVITAR la navegación por completo: con `target=
+"_blank"`, la pestaña del comunicado (editor, vista previa, o envío)
+JAMÁS se toca -- ni se navega afuera, ni depende de que el back/forward
+del navegador preserve nada. Mismo criterio ya usado en el propio botón
+"Abrir WhatsApp" de la pantalla de envío (paso 8.5).
+
+**Materializado (`sending`) -- NO se recalcula solo, documentado y
+verificado, no dejado en un estado confuso.** Corregir el teléfono de una
+persona ya materializada `'skipped'` no revive esa fila para ESE envío en
+curso -- la materialización sigue siendo de una sola vez (regla central
+del 8.5, sin tocar en este paso). El link de corrección + la aclaración
+que se agregó en cada fila `'skipped'` ("Esto no reenvía este aviso a
+esta persona -- corrige el dato para el próximo.") es la forma elegida de
+"no dejarlo confuso" sin construir un mecanismo de recálculo manual (que
+el enunciado pedía explícitamente no resolver si no es trivial) -- el
+administrador entiende, leyendo la propia fila, que corregir la ficha
+sirve para el PRÓXIMO comunicado, no para este.
+
+**Verificado con datos reales, admin de prueba dedicado (Playwright), un
+teléfono real corrompido a mano para la prueba y restaurado después
+(Daniel Juárez, Torre Central, `+5493515000014` -> `+54123456` ->
+`+5493515000014`):**
+
+- **Caso 1 (motivo específico, no genérico):** segmento con Alejandro
+  Herrera (sin teléfono, real), Daniel Juárez (corrompido a `+54123456`
+  para la prueba) y Carlos Álvarez (válido, control) agregados a mano. El
+  editor mostró "2 personas más califican... -- Ver detalle", y el
+  detalle mostró exactamente "Sin teléfono cargado" para Alejandro y
+  "Teléfono con formato inválido (+54123456)" para Daniel -- motivos
+  DISTINTOS, no un "sin teléfono" genérico para los dos. La vista previa
+  del mismo borrador mostró el mismo detalle, con "Corregir ficha" visible
+  para ambos.
+- **Caso 2 (link + corrección + borrador intacto + recalcula, sin
+  materializar):** se abrió el link de Daniel en una pestaña nueva
+  (`/panel/buildings/635818ab-.../people?editPerson=a829d5f5-...`), se
+  corrigió su teléfono a `+5493515000014` real y se guardó (confirmado
+  por SQL, `updated_at` cambiado). La pestaña ORIGINAL del borrador nunca
+  se tocó -- solo se recargó (F5) para releer el segmento: el título
+  ("Prueba 8.7 - Validación de teléfonos") siguió intacto, el conteo pasó
+  de 25 a 26 destinatarios con teléfono válido y de 2 a 1 sin teléfono
+  válido, "Teléfono con formato inválido" ya no apareció en ningún lado,
+  y Daniel apareció con su mensaje completo en la lista de "van a
+  recibir" (antes en la lista de excluidos) -- Alejandro siguió excluido,
+  sin tocar.
+- **Caso 3 (materializado, `sending`, no se recalcula solo):** mismo
+  segmento (Daniel corrompido de nuevo para esta prueba), materializado
+  en la pantalla de envío -- Alejandro y Daniel quedaron `'skipped'` con
+  sus dos motivos DISTINTOS visibles en su propia tarjeta
+  ("Sin teléfono cargado." / "El teléfono cargado no tiene un formato
+  válido -- corregilo en la ficha del vecino."), cada uno con su link
+  "Corregir ficha". Se corrigió el teléfono de Daniel de nuevo por el
+  mismo mecanismo (pestaña nueva) y se recargó SOLO la pantalla de envío
+  (F5, no la acción de materializar): Daniel siguió mostrando
+  `'skipped'` con el MISMO `errorMessage` congelado de antes ("El
+  teléfono cargado no tiene un formato válido...") y el progreso siguió
+  en "2 de 27" -- exactamente cero recálculo automático, confirmado.
+- **Caso 4 (teléfono válido nunca excluido):** Carlos Álvarez, presente
+  en los tres escenarios de arriba como control, confirmado por SQL
+  directo contra `announcement_recipients` del aviso materializado:
+  `delivery_status: 'pending'`, `error_message: null`,
+  `phone_snapshot: '+5493515000001'` -- nunca apareció en ninguna lista
+  de excluidos de ninguna de las tres superficies.
+
+**Limpieza:** los 2 avisos de prueba (editor/preview, y el materializado)
+y sus 27 filas de `announcement_recipients`: soft-borrados. El teléfono de
+Daniel Juárez, restaurado a su valor real original (`+5493515000014`,
+confirmado por SQL antes de cerrar el paso -- no queda ningún dato de
+producción alterado). Cuenta de prueba (`prueba-8-7-...@example.com`)
+eliminada por completo (Auth + `app_users`).
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.

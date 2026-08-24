@@ -12,6 +12,7 @@ import {
   unitOccupancies,
   units,
 } from "@/db/schema";
+import { getPhoneIssue, type PhoneIssue } from "@/lib/phone";
 
 import {
   EMPTY_SEGMENT_CRITERIA,
@@ -185,6 +186,16 @@ async function findPeopleByIds(
 // en un Map keyeado por persona (dedupe real, no solo "no debería
 // duplicarse"): una persona que calificaría por rol Y fue agregada a mano
 // aparece una sola vez.
+//
+// `qualifiedWithPhone` exige un teléfono VÁLIDO, no solo cargado (paso
+// 8.7) -- antes de esta corrección, una persona con un phone_e164 cargado
+// pero mal formateado (nunca pasó por personFieldsSchema.refine(), ver
+// CLAUDE.md > Validación de teléfonos) contaba acá como "con teléfono", y
+// terminaba materializada como 'pending' con un link de WhatsApp roto (ver
+// materializeAnnouncementRecipientsAction, actions.ts). `getPhoneIssue`
+// (src/lib/phone.ts) es el único punto que decide esto ahora, reusado
+// también por getExcludedSegmentRecipients (mismo criterio, detalle por
+// persona en vez de solo el número).
 export async function countSegmentRecipients(
   organizationId: string,
   buildingId: string | null,
@@ -206,7 +217,7 @@ export async function countSegmentRecipients(
   let qualifiedWithPhone = 0;
   let qualifiedWithoutPhone = 0;
   for (const phone of merged.values()) {
-    if (phone) {
+    if (getPhoneIssue(phone) === null) {
       qualifiedWithPhone++;
     } else {
       qualifiedWithoutPhone++;
@@ -465,6 +476,12 @@ export type SegmentRecipientPreview = {
   // vacío = sin ninguna (ver el comentario de resolveRecipientPlaceholders
   // en templates.ts para cómo se refleja eso en el mensaje final).
   unitLabels: string[];
+  // Paso 8.7 -- `null` = teléfono válido, va a recibir el aviso. Mismo
+  // criterio que countSegmentRecipients/getExcludedSegmentRecipients
+  // (getPhoneIssue, src/lib/phone.ts): distingue "nunca se cargó" de
+  // "cargado pero con formato inválido", en vez del `!!phoneE164` que
+  // usaba este campo antes de este paso.
+  phoneIssue: PhoneIssue | null;
 };
 
 // Vista previa de destinatarios (paso 8.4) -- la MISMA lista que
@@ -508,6 +525,134 @@ export async function getSegmentRecipientsForPreview(
       lastName: person.lastName,
       phoneE164: person.phoneE164,
       unitLabels: unitLabelsByPerson.get(id) ?? [],
+      phoneIssue: getPhoneIssue(person.phoneE164),
+    };
+  });
+}
+
+// Para cuántos edificios distintos tiene ocupación cada persona de una
+// lista (paso 8.7) -- resuelve a QUÉ edificio linkear "corregir esta
+// ficha" desde un comunicado, que puede ser de toda la organización (sin
+// un edificio de referencia propio). Una sola fila por persona
+// (`selectDistinctOn`), sin importar cuántas ocupaciones tenga: prioriza
+// una VIGENTE (`ended_on IS NULL`) por sobre una finalizada, y entre
+// varias vigentes/finalizadas, la de `started_on` más reciente -- no hace
+// falta más precisión que esa para un link que solo necesita llevar al
+// administrador a la pantalla correcta, no identificar "la" ocupación
+// canónica de la persona (no existe tal cosa). Una persona sin NINGUNA
+// ocupación (agregada al segmento por `personIds` sin tener ninguna unidad
+// asignada, ver CLAUDE.md > Constructor de segmentos) no aparece en el
+// resultado -- no hay ningún edificio al que enviar al administrador
+// (mismo límite ya documentado en CLAUDE.md > Pendientes, "un vecino sin
+// ocupación es invisible en el panel"). Exportada: dos consumidores reales
+// (getExcludedSegmentRecipients acá abajo, y send/page.tsx para el link de
+// corrección de un destinatario ya materializado 'skipped').
+export async function getEditBuildingIdsForPeople(
+  organizationId: string,
+  personIds: string[],
+): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  if (personIds.length === 0) {
+    return result;
+  }
+
+  const rows = await db
+    .selectDistinctOn([unitOccupancies.personId], {
+      personId: unitOccupancies.personId,
+      buildingId: units.buildingId,
+    })
+    .from(unitOccupancies)
+    .innerJoin(
+      units,
+      and(
+        eq(units.id, unitOccupancies.unitId),
+        eq(units.organizationId, unitOccupancies.organizationId),
+      ),
+    )
+    .where(
+      and(
+        eq(unitOccupancies.organizationId, organizationId),
+        inArray(unitOccupancies.personId, personIds),
+        isNull(unitOccupancies.deletedAt),
+        isNull(units.deletedAt),
+      ),
+    )
+    .orderBy(
+      unitOccupancies.personId,
+      desc(sql`(${unitOccupancies.endedOn} is null)`),
+      desc(unitOccupancies.startedOn),
+    );
+
+  for (const row of rows) {
+    result.set(row.personId, row.buildingId);
+  }
+  return result;
+}
+
+export type ExcludedSegmentRecipient = {
+  id: string;
+  name: string;
+  phoneE164: string | null;
+  issue: PhoneIssue;
+  // `null` cuando la persona no tiene NINGUNA ocupación en ningún
+  // edificio -- ver el comentario de getEditBuildingIdsForPeople. La UI
+  // que consume esto (ExcludedRecipientsList) muestra un texto explicando
+  // por qué no hay link, en vez de esconder a la persona de la lista.
+  editHref: string | null;
+};
+
+// Detalle de "quién queda excluido y por qué" (paso 8.7) -- reusa
+// findPeopleByCriteria/findPeopleByIds TAL CUAL (mismo merge que
+// countSegmentRecipients/getSegmentRecipientsForPreview), así que esta
+// lista nunca puede desincronizarse del conteo agregado que ya muestra el
+// editor (8.2) o la vista previa (8.4): las tres parten de la misma
+// consulta base. Se pide APARTE (no siempre junto al conteo) porque
+// resolver el edificio de cada excluido es una consulta extra --barata,
+// pero innecesaria mientras el administrador no pidió ver el detalle.
+export async function getExcludedSegmentRecipients(
+  organizationId: string,
+  buildingId: string | null,
+  criteria: SegmentCriteria,
+): Promise<ExcludedSegmentRecipient[]> {
+  const [criteriaPeople, explicitPeople] = await Promise.all([
+    findPeopleByCriteria(organizationId, buildingId, criteria),
+    findPeopleByIds(organizationId, criteria.personIds),
+  ]);
+
+  const merged = new Map<string, SegmentPersonRow>();
+  for (const row of criteriaPeople) {
+    merged.set(row.id, row);
+  }
+  for (const row of explicitPeople) {
+    merged.set(row.id, row);
+  }
+
+  const excluded = [...merged.values()]
+    .map((row) => ({ row, issue: getPhoneIssue(row.phoneE164) }))
+    .filter(
+      (entry): entry is { row: SegmentPersonRow; issue: PhoneIssue } =>
+        entry.issue !== null,
+    );
+
+  if (excluded.length === 0) {
+    return [];
+  }
+
+  const editBuildingIds = await getEditBuildingIdsForPeople(
+    organizationId,
+    excluded.map((entry) => entry.row.id),
+  );
+
+  return excluded.map(({ row, issue }) => {
+    const editBuildingId = editBuildingIds.get(row.id) ?? null;
+    return {
+      id: row.id,
+      name: [row.firstName, row.lastName].filter(Boolean).join(" "),
+      phoneE164: row.phoneE164,
+      issue,
+      editHref: editBuildingId
+        ? `/panel/buildings/${editBuildingId}/people?editPerson=${row.id}`
+        : null,
     };
   });
 }

@@ -8,15 +8,18 @@ import { db } from "@/db";
 import { announcementRecipients, announcements } from "@/db/schema";
 import { getActiveBuildings } from "@/features/buildings/queries";
 import { authorizedAction } from "@/lib/auth";
+import { getPhoneIssue } from "@/lib/phone";
 
 import {
   countSegmentRecipients,
   getAnnouncementForSend,
   getBuildingTowersAndFloors,
+  getExcludedSegmentRecipients,
   getMaterializedRecipients,
   getSegmentRecipientsForPreview,
   searchPeopleForSegment,
   type BuildingTowersAndFloors,
+  type ExcludedSegmentRecipient,
   type PersonSearchResult,
 } from "./queries";
 import {
@@ -129,6 +132,46 @@ export const countSegmentRecipientsAction = authorizedAction(
       segment,
     );
     return { ok: true, ...counts };
+  },
+);
+
+export type GetExcludedSegmentRecipientsResult =
+  | { ok: true; excluded: ExcludedSegmentRecipient[] }
+  | { ok: false; error: string };
+
+// Detalle de excluidos por teléfono (paso 8.7) -- acción APARTE de
+// countSegmentRecipientsAction, no agregada al mismo resultado: el conteo
+// se pide en cada debounce mientras el administrador arma el segmento
+// (varias veces por minuto), pero el detalle (con el edificio de cada
+// persona resuelto para armar el link de corrección) solo hace falta
+// cuando el administrador clickea "Ver detalle" -- pedirlo siempre sería
+// una consulta extra en cada debounce sin necesidad real la mayor parte
+// del tiempo. Mismo input que countSegmentRecipientsAction
+// (countSegmentInputSchema) -- es el mismo criterio, solo cambia qué
+// nivel de detalle se pide.
+export const getExcludedSegmentRecipientsAction = authorizedAction(
+  async (
+    context,
+    input: unknown,
+  ): Promise<GetExcludedSegmentRecipientsResult> => {
+    const parsed = countSegmentInputSchema.safeParse(input);
+    if (!parsed.success) {
+      return { ok: false, error: "Datos inválidos." };
+    }
+    const { buildingId, segment } = parsed.data;
+
+    if (
+      !(await isValidBuildingSelection(context.organization.id, buildingId))
+    ) {
+      return { ok: false, error: "Elegí un edificio válido." };
+    }
+
+    const excluded = await getExcludedSegmentRecipients(
+      context.organization.id,
+      buildingId,
+      segment,
+    );
+    return { ok: true, excluded };
   },
 );
 
@@ -365,7 +408,15 @@ export const materializeAnnouncementRecipientsAction = authorizedAction(
     );
 
     const rows = recipients.map((r) => {
-      const hasPhone = !!r.phoneE164;
+      // Paso 8.7 -- antes acá era `const hasPhone = !!r.phoneE164`: un
+      // teléfono CARGADO pero con formato inválido (ver getPhoneIssue,
+      // src/lib/phone.ts) pasaba como "con teléfono" y se materializaba
+      // 'pending' -- el administrador hubiera intentado abrir un link de
+      // WhatsApp armado con un número que nunca iba a funcionar.
+      // `phoneIssue` distingue los dos motivos de exclusión para el
+      // mensaje que queda congelado en `error_message`.
+      const phoneIssue = getPhoneIssue(r.phoneE164);
+      const hasPhone = phoneIssue === null;
       const nombre = [r.firstName, r.lastName].filter(Boolean).join(" ");
       return {
         organizationId: context.organization.id,
@@ -382,9 +433,12 @@ export const materializeAnnouncementRecipientsAction = authorizedAction(
               unidad: r.unitLabels.length > 0 ? r.unitLabels.join(", ") : null,
             })
           : null,
-        // Mismo motivo de exclusión ya calculado en el 8.2/8.4 (sin
-        // teléfono cargado) -- no se recalcula, se documenta acá.
-        errorMessage: hasPhone ? null : "Sin teléfono cargado.",
+        errorMessage:
+          phoneIssue === "missing"
+            ? "Sin teléfono cargado."
+            : phoneIssue === "invalid_format"
+              ? "El teléfono cargado no tiene un formato válido -- corregilo en la ficha del vecino."
+              : null,
       };
     });
 

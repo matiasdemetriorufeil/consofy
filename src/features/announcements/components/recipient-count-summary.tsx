@@ -29,7 +29,7 @@ export function RecipientCountSummary({
             ? "persona más califica"
             : "personas más califican"}{" "}
           por este segmento, pero no {withoutPhone === 1 ? "tiene" : "tienen"}{" "}
-          teléfono cargado.
+          un teléfono válido cargado.
         </p>
       )}
     </div>

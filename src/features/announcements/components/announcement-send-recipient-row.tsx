@@ -22,6 +22,11 @@ export type SendRecipientView = {
   // prepare-send.ts) para que el <a href> abra al toque, sin depender de
   // un round-trip async que un bloqueador de pop-ups podría frenar.
   whatsappUrl: string | null;
+  // Paso 8.7 -- solo tiene sentido para 'skipped' (sin teléfono válido).
+  // `null` si la persona no tiene ninguna unidad asignada (no hay ficha a
+  // la que linkear, ver getEditBuildingIdsForPeople) o si el estado no es
+  // 'skipped'.
+  editHref: string | null;
 };
 
 const STATUS_BADGE_VARIANT: Record<
@@ -116,6 +121,30 @@ export function AnnouncementSendRecipientRow({
           recipient.deliveryStatus === "failed") && (
           <p className="text-destructive text-xs">{recipient.errorMessage}</p>
         )}
+
+      {/* Paso 8.7 -- corregir la ficha acá NO revive a este destinatario
+          para ESTE envío: la materialización es de una sola vez (ver
+          CLAUDE.md > Validación de teléfonos), este link solo evita que
+          el mismo problema se repita en el PRÓXIMO comunicado. target=
+          "_blank" a propósito, mismo motivo que ExcludedRecipientsList. */}
+      {recipient.deliveryStatus === "skipped" && (
+        <p className="text-ink-muted text-xs">
+          {recipient.editHref ? (
+            <a
+              href={recipient.editHref}
+              target="_blank"
+              rel="noreferrer"
+              className="underline underline-offset-2"
+            >
+              Corregir ficha
+            </a>
+          ) : (
+            "Sin ninguna unidad asignada -- no se puede editar desde acá todavía."
+          )}{" "}
+          Esto no reenvía este aviso a esta persona -- corrige el dato para el
+          próximo.
+        </p>
+      )}
 
       {recipient.sentAtLabel && (
         <p className="text-ink-muted text-xs">

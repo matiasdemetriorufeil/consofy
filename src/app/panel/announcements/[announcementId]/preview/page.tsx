@@ -4,12 +4,14 @@ import { notFound } from "next/navigation";
 
 import { EmptyState } from "@/components/empty-state";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ExcludedRecipientsList } from "@/features/announcements/components/excluded-recipients-list";
 import {
   getAnnouncementDraftForEdit,
+  getEditBuildingIdsForPeople,
   getSegmentRecipientsForPreview,
+  type ExcludedSegmentRecipient,
   type SegmentRecipientPreview,
 } from "@/features/announcements/queries";
 import {
@@ -70,8 +72,35 @@ export default async function AnnouncementPreviewPage({
     draft.buildingId,
     draft.segment,
   );
-  const withPhone = recipients.filter((r) => r.phoneE164);
-  const withoutPhone = recipients.filter((r) => !r.phoneE164);
+  // Paso 8.7 -- `phoneIssue` (getPhoneIssue, src/lib/phone.ts) reemplaza
+  // el `!!phoneE164` que separaba estas dos listas antes: una persona con
+  // un teléfono cargado pero mal formateado ahora cae en "sin teléfono
+  // VÁLIDO" (withoutPhone), no en "con teléfono" -- antes hubiera
+  // aparecido acá como si fuera a recibir el aviso.
+  const withPhone = recipients.filter((r) => r.phoneIssue === null);
+  const withoutPhone = recipients.filter((r) => r.phoneIssue !== null);
+
+  const editBuildingIds =
+    withoutPhone.length > 0
+      ? await getEditBuildingIdsForPeople(
+          organization.id,
+          withoutPhone.map((r) => r.id),
+        )
+      : new Map<string, string>();
+  const excludedRecipients: ExcludedSegmentRecipient[] = withoutPhone.map(
+    (r) => {
+      const editBuildingId = editBuildingIds.get(r.id) ?? null;
+      return {
+        id: r.id,
+        name: recipientName(r),
+        phoneE164: r.phoneE164,
+        issue: r.phoneIssue!,
+        editHref: editBuildingId
+          ? `/panel/buildings/${editBuildingId}/people?editPerson=${r.id}`
+          : null,
+      };
+    },
+  );
 
   // Placeholders que el cuerpo YA GUARDADO usa (paso 8.3) que no son
   // "nombre" ni "unidad" -- solo puede pasar en modo "sin plantilla"
@@ -152,7 +181,8 @@ export default async function AnnouncementPreviewPage({
                 {withoutPhone.length === 1
                   ? "persona califica"
                   : "personas califican"}{" "}
-                para este segmento, pero ninguna tiene teléfono cargado.
+                para este segmento, pero ninguna tiene un teléfono válido
+                cargado.
               </AlertDescription>
             </Alert>
           )}
@@ -210,16 +240,12 @@ export default async function AnnouncementPreviewPage({
                     ? "persona más califica"
                     : "personas más califican"}{" "}
                   por este segmento, pero no{" "}
-                  {withoutPhone.length === 1 ? "tiene" : "tienen"} teléfono
-                  cargado
+                  {withoutPhone.length === 1 ? "tiene" : "tienen"} un teléfono
+                  válido cargado
                 </CardTitle>
               </CardHeader>
-              <CardContent className="flex flex-wrap gap-2">
-                {withoutPhone.map((recipient) => (
-                  <Badge key={recipient.id} variant="secondary">
-                    {recipientName(recipient)}
-                  </Badge>
-                ))}
+              <CardContent>
+                <ExcludedRecipientsList recipients={excludedRecipients} />
               </CardContent>
             </Card>
           )}

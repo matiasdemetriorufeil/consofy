@@ -8,6 +8,7 @@ import { RecipientCountSummary } from "@/features/announcements/components/recip
 import { prepareWhatsAppLink } from "@/features/announcements/prepare-send";
 import {
   getAnnouncementForSend,
+  getEditBuildingIdsForPeople,
   getMaterializedRecipients,
 } from "@/features/announcements/queries";
 import { formatExactDate } from "@/lib/format-date";
@@ -78,6 +79,22 @@ export default async function AnnouncementSendPage({
   const withPhone = recipients.filter((r) => r.phoneSnapshot).length;
   const withoutPhone = recipients.length - withPhone;
 
+  // Link de corrección para 'skipped' (paso 8.7) -- un destinatario
+  // materializado sin teléfono válido (missing o formato inválido, ver
+  // getPhoneIssue) no se recalcula solo si el administrador corrige la
+  // ficha después (la materialización es de una sola vez, ver el
+  // comentario de materializeAnnouncementRecipientsAction): esto SOLO da
+  // el link a la ficha para que la corrección quede hecha de cara a
+  // FUTUROS avisos -- no revive a esta persona para ESTE envío en curso,
+  // ver CLAUDE.md > Validación de teléfonos.
+  const skippedPersonIds = recipients
+    .filter((r) => r.deliveryStatus === "skipped")
+    .map((r) => r.personId);
+  const editBuildingIds =
+    skippedPersonIds.length > 0
+      ? await getEditBuildingIdsForPeople(organization.id, skippedPersonIds)
+      : new Map<string, string>();
+
   // Precomputa el link de WhatsApp de cada 'pending' server-side, SIEMPRE
   // a través de getMessagingProvider() (nunca a mano) -- ver
   // prepare-send.ts. Solo lectura: no marca nada, no escribe nada.
@@ -98,6 +115,10 @@ export default async function AnnouncementSendPage({
         );
         whatsappUrl = prepared.ok ? prepared.url : null;
       }
+      const editBuildingId =
+        r.deliveryStatus === "skipped"
+          ? (editBuildingIds.get(r.personId) ?? null)
+          : null;
       return {
         id: r.id,
         name,
@@ -109,6 +130,9 @@ export default async function AnnouncementSendPage({
           ? formatExactDate(r.sentAt, organization.timezone)
           : null,
         whatsappUrl,
+        editHref: editBuildingId
+          ? `/panel/buildings/${editBuildingId}/people?editPerson=${r.personId}`
+          : null,
       };
     }),
   );

@@ -1,7 +1,9 @@
 "use client";
 
 import { MoreHorizontal, Search, Users } from "lucide-react";
-import { useMemo, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
 
 import { EmptyState } from "@/components/empty-state";
 import { Badge } from "@/components/ui/badge";
@@ -52,8 +54,53 @@ export function PeopleList({
   units: BuildingUnitRow[];
   occupancies: BuildingOccupancyRow[];
 }) {
-  const [dialog, setDialog] = useState<DialogState>({ type: "closed" });
+  // Abre el diálogo de edición directo al llegar con `?editPerson=<id>`
+  // (paso 8.7) -- el link "Corregir ficha" de un comunicado (editor, vista
+  // previa o pantalla de envío) usa este mismo query param para mandar al
+  // administrador acá sin que tenga que buscar a la persona a mano. Se
+  // apoya en `occupancies`, que YA llega completo como prop
+  // (server-rendered) -- sin consulta nueva del lado del cliente.
+  //
+  // Estado inicial calculado en el initializer de useState (corre una
+  // sola vez, en el primer render), NO en un useEffect con setState
+  // síncrono -- eso dispara el error de lint `react-hooks/set-state-in-
+  // effect` (mismo motivo documentado para el reset de torres/pisos en
+  // announcement-segment-form.tsx: React recomienda no llamar setState
+  // síncronamente dentro de un efecto). Leer un query param al montar es
+  // exactamente el caso de "estado inicial derivado de algo externo", que
+  // si el initializer ya lo puede resolver, no necesita un efecto.
+  const searchParams = useSearchParams();
+  const router = useRouter();
+  const pathname = usePathname();
+  const [dialog, setDialog] = useState<DialogState>(() => {
+    const editPersonId = searchParams.get("editPerson");
+    if (!editPersonId) {
+      return { type: "closed" };
+    }
+    const match = occupancies.find((o) => o.personId === editPersonId);
+    return match ? { type: "edit", occupancy: match } : { type: "closed" };
+  });
   const [search, setSearch] = useState("");
+
+  // Limpia el query param SIEMPRE (haya o no match) para que no vuelva a
+  // disparar en cada recarga o cierre del diálogo, y avisa con un toast si
+  // el id no matcheó ninguna fila de este edificio (uuid viejo, o la
+  // persona no tiene ninguna ocupación EN ESTE edificio -- no debería
+  // pasar si el link se armó con getEditBuildingIdsForPeople, pero no se
+  // confía en el query param a ciegas). Corre solo al montar, a propósito
+  // -- no en cada cambio de `occupancies` (que cambia después de cada
+  // guardado real).
+  useEffect(() => {
+    const editPersonId = searchParams.get("editPerson");
+    if (!editPersonId) {
+      return;
+    }
+    if (!occupancies.some((o) => o.personId === editPersonId)) {
+      toast.error("No encontramos a esa persona en este edificio.");
+    }
+    router.replace(pathname, { scroll: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- deliberado, solo al montar (ver comentario de arriba); occupancies/searchParams ya se leyeron en el initializer de useState.
+  }, []);
 
   const filtered = useMemo(() => {
     const query = search.trim().toLowerCase();

@@ -25,10 +25,12 @@ import {
   countSegmentRecipientsAction,
   createAnnouncementDraftAction,
   getBuildingTowersAndFloorsAction,
+  getExcludedSegmentRecipientsAction,
   searchPeopleForSegmentAction,
   updateAnnouncementDraftAction,
 } from "../actions";
-import type { PersonSearchResult } from "../queries";
+import { ExcludedRecipientsList } from "./excluded-recipients-list";
+import type { ExcludedSegmentRecipient, PersonSearchResult } from "../queries";
 import type { SegmentCriteria } from "../segment-schema";
 import {
   ANNOUNCEMENT_TEMPLATES,
@@ -162,6 +164,17 @@ export function AnnouncementSegmentForm({
   const [countPending, setCountPending] = useState(false);
   const [countError, setCountError] = useState<string | null>(null);
 
+  // Detalle de excluidos por teléfono (paso 8.7) -- lazy, solo se pide
+  // cuando el administrador clickea "Ver detalle" (no en cada debounce
+  // del conteo de arriba, ver el comentario de
+  // getExcludedSegmentRecipientsAction en actions.ts).
+  const [excludedOpen, setExcludedOpen] = useState(false);
+  const [excluded, setExcluded] = useState<ExcludedSegmentRecipient[] | null>(
+    null,
+  );
+  const [excludedPending, setExcludedPending] = useState(false);
+  const [excludedError, setExcludedError] = useState<string | null>(null);
+
   const [savePending, setSavePending] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -263,6 +276,58 @@ export function AnnouncementSegmentForm({
       clearTimeout(timeout);
     };
   }, [buildingId, selectedTowers, selectedFloors, selectedRoles, addedPeople]);
+
+  // Cierra el detalle de excluidos (paso 8.7) cada vez que el criterio
+  // cambia -- sin esto, un "Ver detalle" abierto seguiría mostrando la
+  // lista vieja mientras counts.qualifiedWithoutPhone ya cambió de número
+  // para el criterio nuevo, dos piezas de la misma pantalla contando cosas
+  // distintas. Estado derivado del criterio, mismo patrón (ajustado
+  // SÍNCRONAMENTE durante el render, no en un useEffect) ya usado arriba
+  // para el reset de torres/pisos al cambiar de edificio -- un
+  // useEffect acá dispararía el error de lint `react-hooks/set-state-in-
+  // effect` (setState síncrono dentro de un efecto), exactamente el motivo
+  // por el que esos resets ya se escriben así en este archivo.
+  const excludedResetKey = JSON.stringify([
+    buildingId,
+    selectedTowers,
+    selectedFloors,
+    selectedRoles,
+    addedPeople.map((p) => p.id),
+  ]);
+  const [prevExcludedResetKey, setPrevExcludedResetKey] =
+    useState(excludedResetKey);
+  if (excludedResetKey !== prevExcludedResetKey) {
+    setPrevExcludedResetKey(excludedResetKey);
+    setExcludedOpen(false);
+    setExcluded(null);
+    setExcludedError(null);
+  }
+
+  async function handleToggleExcluded() {
+    if (excludedOpen) {
+      setExcludedOpen(false);
+      return;
+    }
+    setExcludedOpen(true);
+    setExcludedPending(true);
+    setExcludedError(null);
+    const segment: SegmentCriteria = {
+      towers: selectedTowers,
+      floors: selectedFloors,
+      roles: selectedRoles,
+      personIds: addedPeople.map((p) => p.id),
+    };
+    const result = await getExcludedSegmentRecipientsAction({
+      buildingId,
+      segment,
+    });
+    setExcludedPending(false);
+    if (result.ok) {
+      setExcluded(result.excluded);
+    } else {
+      setExcludedError(result.error);
+    }
+  }
 
   // Búsqueda de personas con debounce, mismo patrón -- el "limpiar
   // resultados si la búsqueda es muy corta" también vive adentro del
@@ -660,16 +725,43 @@ export function AnnouncementSegmentForm({
                   este aviso.
                 </p>
                 {counts.qualifiedWithoutPhone > 0 && (
-                  <p className="text-ink-muted text-xs">
-                    {counts.qualifiedWithoutPhone} persona
-                    {counts.qualifiedWithoutPhone === 1 ? "" : "s"} más califica
-                    {counts.qualifiedWithoutPhone === 1 ? "" : "n"} por este
-                    segmento, pero no tiene{" "}
-                    {counts.qualifiedWithoutPhone === 1 ? "" : "n"} teléfono
-                    cargado -- no va
-                    {counts.qualifiedWithoutPhone === 1 ? "" : "n"} a recibir el
-                    aviso.
-                  </p>
+                  <>
+                    <p className="text-ink-muted text-xs">
+                      {counts.qualifiedWithoutPhone} persona
+                      {counts.qualifiedWithoutPhone === 1 ? "" : "s"} más
+                      califica
+                      {counts.qualifiedWithoutPhone === 1 ? "" : "n"} por este
+                      segmento, pero no tiene
+                      {counts.qualifiedWithoutPhone === 1 ? "" : "n"} un
+                      teléfono válido cargado -- no va
+                      {counts.qualifiedWithoutPhone === 1 ? "" : "n"} a recibir
+                      el aviso.{" "}
+                      <button
+                        type="button"
+                        onClick={handleToggleExcluded}
+                        className="text-ink-muted hover:text-ink underline underline-offset-2"
+                      >
+                        {excludedOpen ? "Ocultar detalle" : "Ver detalle"}
+                      </button>
+                    </p>
+                    {excludedOpen && (
+                      <div className="mt-1">
+                        {excludedPending && (
+                          <p className="text-ink-muted text-xs">
+                            Buscando quiénes son…
+                          </p>
+                        )}
+                        {!excludedPending && excludedError && (
+                          <p className="text-destructive text-xs">
+                            {excludedError}
+                          </p>
+                        )}
+                        {!excludedPending && excluded && (
+                          <ExcludedRecipientsList recipients={excluded} />
+                        )}
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             )}

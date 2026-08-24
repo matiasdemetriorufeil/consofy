@@ -26,3 +26,25 @@ export const AR_WHATSAPP_HELP =
 export function normalizePhoneInput(value: string): string {
   return value.replace(/[\s().-]/g, "");
 }
+
+// Paso 8.7 -- distingue los dos motivos por los que un teléfono no sirve
+// para un comunicado: nunca se cargó (`null`) vs. se cargó pero no matchea
+// el formato argentino exigido acá arriba. Antes de este paso, todo el
+// flujo de comunicados (queries.ts, actions.ts) trataba los dos casos
+// igual con un simple `!!phoneE164` -- un valor cargado por una vía que no
+// pasa por `personFieldsSchema.refine()` (import CSV, un seed, una edición
+// futura fuera de la UI) contaba como "con teléfono" sin que nadie lo
+// validara, así que un comunicado podía intentar armar un link de
+// WhatsApp con un número que nunca iba a funcionar. Prueba contra el
+// valor CRUDO tal como está guardado, sin normalizar primero -- si hiciera
+// falta normalizar para que matchee, ya cuenta como "mal formateado" desde
+// la perspectiva de esta app (mismo criterio que exige el formulario de
+// alta/edición al guardar).
+export type PhoneIssue = "missing" | "invalid_format";
+
+export function getPhoneIssue(phone: string | null): PhoneIssue | null {
+  if (!phone) {
+    return "missing";
+  }
+  return AR_WHATSAPP_E164_REGEX.test(phone) ? null : "invalid_format";
+}
