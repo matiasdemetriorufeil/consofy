@@ -4468,6 +4468,204 @@ descubiertos y corregidos ANTES de dar el resultado final por bueno):
 soft-borrados. Cuenta de prueba (`prueba-8-5-fix-...@example.com`)
 eliminada por completo (Auth + `app_users`).
 
+## Historial de comunicados (paso 8.6)
+
+`/panel/announcements` (`src/app/panel/announcements/page.tsx`) reemplaza el
+`EmptyState` que hasta acá era la pantalla COMPLETA (paso 8.2) por un
+listado real -- una fila por aviso, más reciente primero, con estado,
+edificio, fecha y resumen de destinatarios. El `EmptyState` se mantiene,
+pero SOLO para el caso de cero avisos.
+
+**Qué encontré antes de tocar nada:**
+
+- `page.tsx` seguía siendo exactamente el `EmptyState` documentado en el
+  8.2 -- confirmado leyendo el archivo, no de memoria.
+- `announcements` ya tenía todas las columnas necesarias para armar el
+  resumen sin recalcular nada caro: `status`, `title`, `building_id`,
+  `created_at`, `sent_at`, `template_id` (paso 8.3) -- ninguna migración
+  hizo falta.
+- `announcement_recipients` ya tiene un índice
+  `(announcement_id, delivery_status)` (etapa 2.5/8.1) -- exactamente lo
+  que necesita un `GROUP BY announcement_id, delivery_status` para el
+  resumen "enviados/total, sin teléfono" sin volver a correr
+  `getSegmentRecipientsForPreview` (que sí sería caro: resuelve
+  torres/pisos/roles/personIds contra `unit_occupancies` en vivo).
+
+**Criterio de ruteo por click, documentado en el propio código
+(`hrefForAnnouncement`, page.tsx) -- no es una preferencia de UX, es lo
+único que funciona dado el esquema real:** `'draft'` es el ÚNICO estado
+que `getAnnouncementDraftForEdit` (paso 8.3) acepta -- llevar cualquier
+otro estado al editor devolvería 404 (esa consulta filtra
+`status = 'draft'` en el WHERE). Cualquier estado que NO sea `'draft'`
+(`'sending'`, `'sent'`, y los dos que ningún flujo construido hasta ahora
+alcanza -- `'scheduled'` sin feature de programación, `'failed'` a nivel
+aviso sin ningún disparador, ver CLAUDE.md > Pantalla de envío manual)
+va a la pantalla de envío (paso 8.5) tal cual, sin ninguna variante
+nueva: esa pantalla YA es de solo lectura por construcción en cuanto no
+queda ningún destinatario `'pending'` (los botones de acción solo se
+renderizan para `'pending'`, ver `AnnouncementSendRecipientRow`), así que
+sirve como vista de detalle de `'sent'` sin escribir una línea de código
+extra -- confirmado en la práctica (ver más abajo): la pantalla de envío
+de un aviso `'sent'` real muestra 0 botones "Abrir WhatsApp".
+
+**Resumen de destinatarios -- dos fuentes según si el aviso ya se
+materializó, nunca una tercera consulta redundante:**
+
+- **Ya materializado** (`status !== 'draft'`):
+  `getAnnouncementRecipientSummaries()` (queries.ts) -- UNA sola consulta
+  agrupada para TODOS los avisos de la página a la vez (mismo patrón que
+  `getTicketStatusCounts`, paso 6.6), no una por fila. `link_opened` es
+  "enviados" (el único estado terminal de éxito de Fase 1, ver
+  CLAUDE.md > MessagingProvider); `skipped` es siempre "sin teléfono" --
+  confirmado leyendo `materializeAnnouncementRecipientsAction` (actions.ts,
+  paso 8.5) antes de asumirlo: es la ÚNICA razón por la que esa acción
+  produce ese estado.
+- **Todavía en `'draft'`** (sin materializar): el conteo en vivo del
+  segmento, `countSegmentRecipients()` (paso 8.2, YA EXISTENTE) -- barato
+  de verdad, no una suposición: es la MISMA consulta que ya corre en cada
+  cambio del editor con debounce de 400ms, y con el volumen real de
+  avisos de esta organización (ver más abajo) correr uno por borrador no
+  agrega ninguna consulta apreciable.
+
+**Fecha mostrada: `created_at`, siempre -- no `sent_at`, hallazgo real
+probando este mismo paso.** El plan dejaba el criterio abierto ("tu
+criterio, documentalo"). Se evaluó mostrar `sent_at` para avisos
+`'sent'`, pero probando con datos reales se confirmó que
+`maybeMarkAnnouncementSent()` (`actions.ts`, paso 8.5) -- la función que
+transiciona un aviso a `'sent'` automáticamente cuando ya no queda ningún
+destinatario `'pending'` -- **nunca escribe `sent_at`**, solo cambia
+`status`. La columna existe en el esquema y el seed la usa (un aviso de
+ejemplo tiene `sent_at` real), pero el código de la app nunca la
+completa -- confirmado leyendo esa función antes de decidir, no asumido.
+`created_at` es la única fecha garantizada en TODOS los estados, así que
+es el criterio para ordenar Y para mostrar; `sent_at` se muestra igual
+como dato EXTRA cuando SÍ está cargada.
+
+**Corrección puntual (no un paso nuevo del plan):** el párrafo de arriba
+decía "no se arregla la función de 8.5 en este paso" -- eso cambió en un
+pedido posterior, específico y acotado a esta única línea. `sentAt` ahora
+se setea en la MISMA escritura que pasa `status` a `'sent'`
+(`maybeMarkAnnouncementSent`, `src/features/announcements/actions.ts`):
+
+```ts
+await db
+  .update(announcements)
+  .set({ status: "sent", sentAt: new Date() })
+  .where(...)
+```
+
+Sin tocar ninguna otra lógica de esa función (compare-and-swap contra
+`status = 'sending'` sin cambios). Verificado de punta a punta con un
+aviso real (27 destinatarios, formulario + panel real, Playwright): al
+completar el último destinatario, `announcements.sent_at` quedó en
+`2026-08-24T21:47:59.148Z` -- **0.6 segundos** después de la confirmación
+del último destinatario (`21:47:58.500Z`), consistente con que las dos
+escrituras ocurren en la misma invocación del servidor. `updated_at` del
+propio aviso (el trigger `set_updated_at`) quedó en `21:47:59.847Z`, a
+milisegundos de `sent_at` -- confirma que es la MISMA transacción de
+escritura, no dos pasos separados. La fila del historial (paso 8.6) de
+ese mismo aviso mostró la línea extra "Enviado hace 1 minuto" -- antes de
+esta corrección esa línea solo podía aparecer para el aviso de seed,
+ahora aparece para cualquier envío real que se complete.
+
+**Sin backfill retroactivo, confirmado por SQL** -- pedido explícito de
+no tocar nada más: el único aviso no-`'sent'` activo en la base al
+momento de esta corrección (el `'scheduled'` del seed, ver más arriba)
+siguió con `sent_at: null` después del cambio, sin ninguna migración ni
+UPDATE masivo. El aviso de seed que YA tenía `sent_at` real
+(`Corte de agua programado`, `2026-08-12T08:43:00.000Z`) tampoco se tocó
+-- su `updated_at` quedó igual que antes de esta corrección, confirmando
+que el UPDATE de `maybeMarkAnnouncementSent` (acotado a
+`status = 'sending'`) nunca lo alcanza, porque esa fila ya está en
+`'sent'`.
+
+**Paginación/filtros -- NO hacen falta, confirmado con el volumen real de
+la base antes de asumirlo (pedido explícito del enunciado):** al momento
+de este paso, la organización real tenía **2 avisos activos** (uno
+`'scheduled'` del seed sin ningún flujo que lo alcance, uno `'sent'` del
+seed) -- ver más abajo para el detalle. Con ese volumen, ni una tabla
+paginada ni filtros por URL (como sí hace falta en la bandeja de
+reclamos, paso 6.1, con cientos de filas) agregan nada -- una lista
+completa sin paginar es la misma comparación de costo/beneficio que ya
+resolvió el paso 8.4 para la vista previa de destinatarios ("la cartera
+de este producto es chica, se lee de arriba a abajo sin clicks
+intermedios"). Si el volumen de avisos creciera mucho (una organización
+que manda avisos con mucha frecuencia durante años), ahí se justificaría
+reconsiderar -- no hay evidencia de esa necesidad hoy.
+
+**El aviso `'scheduled'` real del seed, caso real no anticipado por el
+enunciado (que solo lista draft/sending/sent/failed):** el enum
+`announcement_status` tiene un quinto valor, `'scheduled'`, para una
+feature de programación de envíos que todavía no existe como código --
+ningún flujo construido hoy produce ni consume ese estado. Aun así hay un
+aviso de seed real con `status: 'scheduled'` (con `scheduled_for` a
+futuro). `AnnouncementStatusBadge`
+(`announcement-status-badge.tsx`, nuevo) traduce los CINCO valores del
+enum (no solo los cuatro del enunciado) -- dejar sin badge un estado real
+que existe en la base sería peor que traducirlo con un color propio
+(`media`, mismo tono que "en progreso" en otras partes del panel). Por el
+mismo criterio de ruteo de arriba (`'draft'` es el único caso especial),
+esta fila va a la pantalla de envío igual que `'sending'`/`'sent'` --
+funciona sin cambios porque esa pantalla no asume nada sobre CÓMO se
+llegó a tener destinatarios materializados, solo lee lo que hay.
+
+**Verificado con datos reales, admin de prueba dedicado (Playwright,
+creado y borrado solo para esta verificación), tres avisos nuevos en los
+tres estados pedidos + uno para soft-borrar:**
+
+- **Borrador** (Torre Central + 2 personas agregadas a mano, sin
+  materializar): fila con badge "Borrador", "Torre Central",
+  `created_at` relativo, y el resumen de segmento en vivo -- **"16
+  destinatarios · 1 sin teléfono"**. Confirmado por SQL directo contra
+  `unit_occupancies`/`people` de Torre Central (sin ningún filtro de
+  torre/piso/rol, mismo criterio que `findPeopleByCriteria`): **16 con
+  teléfono, 1 sin teléfono** -- coincide exacto.
+- **Envío mixto** (Los Álamos + 4 personas agregadas a mano -- el
+  segmento real terminó siendo TODO Los Álamos, no solo esas 4, porque
+  elegir un edificio sin ningún otro filtro ya califica a todo el
+  edificio, mismo comportamiento documentado desde el 8.2 -- hallazgo del
+  propio guion de prueba, no un bug): 2 de 11 destinatarios procesados
+  (2 `link_opened`, 9 `pending`) antes de detener el envío a propósito,
+  dejando el aviso en `status: 'sending'`. La fila mostró badge
+  "Enviando", "Los Álamos", **"2 de 11 enviados"** -- confirmado por SQL
+  directo sobre `announcement_recipients` (`link_opened: 2, pending: 9`),
+  coincide exacto.
+- **Enviado completo** (Edificio Cabildo + 2 personas -- el segmento real
+  fue 4 personas por el mismo motivo de arriba): se procesaron los 4
+  hasta que `announcements.status` pasó a `'sent'` automáticamente. La
+  fila mostró badge "Enviado", "Edificio Cabildo", **"4 de 4 enviados"**
+  -- confirmado por SQL (`link_opened: 4`, cero `pending`), coincide
+  exacto.
+- **Click en cada una de las tres, confirmado con la URL real después de
+  navegar:**
+  - Borrador -> `/panel/announcements/{id}` (el editor, paso 8.3).
+  - Envío mixto -> `/panel/announcements/{id}/send`, con **9 botones
+    "Abrir WhatsApp" visibles** (interactiva, quedan pendientes reales).
+  - Enviado completo -> `/panel/announcements/{id}/send`, con **0
+    botones "Abrir WhatsApp"** (de solo lectura, confirma el reuso de la
+    pantalla del 8.5 sin ninguna variante).
+- **Soft-borrado (un cuarto aviso, borrador sin materializar, soft-borrado
+  a mano por SQL -- no existe ninguna acción de borrado de avisos en el
+  panel todavía, fuera de alcance de este paso):** su título NO apareció
+  en el HTML de la lista, confirmado buscando el string exacto en el
+  body completo de la página.
+- **Caso de cero avisos:** organización sintética nueva (creada y borrada
+  solo para esta prueba, con su propio admin de prueba) sin ningún aviso
+  -- la pantalla mostró el `EmptyState` original completo ("Todavía no
+  hay avisos" + botón "Crear aviso"), sin el encabezado "Avisos" ni la
+  lista (esa fila de encabezado solo se renderiza cuando hay al menos un
+  aviso) -- mismo comportamiento que tenía la pantalla completa antes de
+  este paso.
+
+**Limpieza:** los 3 avisos de prueba (borrador, envío mixto, enviado
+completo) y sus 15 filas de `announcement_recipients`: soft-borrados
+(el cuarto, ya soft-borrado como parte de la propia prueba, quedó igual).
+La organización sintética del caso de cero avisos: borrada físicamente
+(no es un dato de negocio real, es un contenedor descartable creado solo
+para esta verificación). Las dos cuentas de prueba
+(`prueba-8-6-...@example.com`, `prueba-8-6-empty-...@example.com`)
+eliminadas por completo (Auth + `app_users`).
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.

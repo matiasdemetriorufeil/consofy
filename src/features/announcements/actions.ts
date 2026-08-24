@@ -276,6 +276,14 @@ export const updateAnnouncementDraftAction = authorizedAction(
 // enunciado, y el propio estado de los destinatarios ya alcanza para
 // derivarlo). Compare-and-swap contra `status = 'sending'`: nunca pisa un
 // estado que no sea ese.
+//
+// `sentAt` se setea EN esta misma escritura (corrección del paso 8.6,
+// hallazgo real: esta función cambiaba `status` a 'sent' sin completar
+// nunca `sent_at`, dejando la columna en null incluso para avisos
+// terminados de verdad -- el historial del 8.6 no podía mostrar la fecha
+// de envío real de ningún aviso nuevo, solo la del seed). Una sola
+// escritura, no dos: el momento en que se decide "ya está" es el mismo
+// momento en que hay que registrar cuándo pasó.
 async function maybeMarkAnnouncementSent(
   organizationId: string,
   announcementId: string,
@@ -298,7 +306,7 @@ async function maybeMarkAnnouncementSent(
 
   await db
     .update(announcements)
-    .set({ status: "sent" })
+    .set({ status: "sent", sentAt: new Date() })
     .where(
       and(
         eq(announcements.id, announcementId),

@@ -1,12 +1,13 @@
 import "server-only";
 
-import { and, eq, ilike, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, ilike, inArray, isNull, or, sql } from "drizzle-orm";
 import { z } from "zod";
 
 import { db } from "@/db";
 import {
   announcementRecipients,
   announcements,
+  buildings,
   people,
   unitOccupancies,
   units,
@@ -633,4 +634,127 @@ export async function getMaterializedRecipients(
       ),
     )
     .orderBy(people.firstName, people.lastName);
+}
+
+export type AnnouncementListRow = {
+  id: string;
+  title: string;
+  status: AnnouncementStatus;
+  buildingId: string | null;
+  buildingName: string | null;
+  createdAt: Date;
+  sentAt: Date | null;
+  segment: SegmentCriteria;
+};
+
+// Listado principal de /panel/announcements (paso 8.6) -- una fila por
+// aviso, más reciente primero. LEFT JOIN a buildings (no INNER): un aviso
+// de "toda la organización" tiene building_id NULL a propósito (ver el
+// comentario de esa columna) y tiene que seguir apareciendo en la lista, no
+// desaparecer por el JOIN. `segment` viaja crudo (revalidado acá con Zod,
+// mismo criterio que getAnnouncementDraftForEdit/getAnnouncementForSend)
+// porque los borradores sin materializar necesitan volver a contar su
+// segmento en vivo (ver getAnnouncementRecipientSummaries más abajo) -- sin
+// esto, page.tsx tendría que pedir el segmento aparte por cada borrador.
+export async function getAnnouncementsList(
+  organizationId: string,
+): Promise<AnnouncementListRow[]> {
+  const rows = await db
+    .select({
+      id: announcements.id,
+      title: announcements.title,
+      status: announcements.status,
+      buildingId: announcements.buildingId,
+      buildingName: buildings.name,
+      createdAt: announcements.createdAt,
+      sentAt: announcements.sentAt,
+      segment: announcements.segment,
+    })
+    .from(announcements)
+    .leftJoin(
+      buildings,
+      and(
+        eq(buildings.id, announcements.buildingId),
+        eq(buildings.organizationId, announcements.organizationId),
+      ),
+    )
+    .where(
+      and(
+        eq(announcements.organizationId, organizationId),
+        isNull(announcements.deletedAt),
+      ),
+    )
+    .orderBy(desc(announcements.createdAt));
+
+  return rows.map((row) => {
+    const parsedSegment = segmentCriteriaSchema.safeParse(row.segment);
+    return {
+      ...row,
+      segment: parsedSegment.success
+        ? parsedSegment.data
+        : EMPTY_SEGMENT_CRITERIA,
+    };
+  });
+}
+
+export type AnnouncementRecipientSummary = {
+  total: number;
+  linkOpened: number;
+  withoutPhone: number;
+};
+
+// Resumen "enviados/total, sin teléfono" para avisos YA MATERIALIZADOS
+// (paso 8.6) -- UNA sola consulta agrupada para TODOS los avisos de la
+// página a la vez (mismo patrón que getTicketStatusCounts, paso 6.6), no
+// una consulta por fila. `link_opened` es "enviados" (ver el comentario de
+// announcement_recipients.delivery_status: es el único estado terminal de
+// éxito de Fase 1); `skipped` es siempre "sin teléfono" -- la única razón
+// por la que materializeAnnouncementRecipientsAction (actions.ts) produce
+// ese estado (confirmado leyendo esa función antes de escribir esta
+// consulta, no asumido).
+export async function getAnnouncementRecipientSummaries(
+  organizationId: string,
+  announcementIds: string[],
+): Promise<Map<string, AnnouncementRecipientSummary>> {
+  const result = new Map<string, AnnouncementRecipientSummary>();
+  if (announcementIds.length === 0) {
+    return result;
+  }
+
+  const rows = await db
+    .select({
+      announcementId: announcementRecipients.announcementId,
+      deliveryStatus: announcementRecipients.deliveryStatus,
+      count: sql<string>`count(*)`,
+    })
+    .from(announcementRecipients)
+    .where(
+      and(
+        eq(announcementRecipients.organizationId, organizationId),
+        inArray(announcementRecipients.announcementId, announcementIds),
+        isNull(announcementRecipients.deletedAt),
+      ),
+    )
+    .groupBy(
+      announcementRecipients.announcementId,
+      announcementRecipients.deliveryStatus,
+    );
+
+  for (const row of rows) {
+    const count = Number(row.count);
+    const existing = result.get(row.announcementId) ?? {
+      total: 0,
+      linkOpened: 0,
+      withoutPhone: 0,
+    };
+    existing.total += count;
+    if (row.deliveryStatus === "link_opened") {
+      existing.linkOpened += count;
+    } else if (row.deliveryStatus === "skipped") {
+      existing.withoutPhone += count;
+    }
+    result.set(row.announcementId, existing);
+  }
+
+  return result;
 }
