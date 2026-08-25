@@ -1,0 +1,214 @@
+"use client";
+
+import { CalendarClock, MoreHorizontal, SearchX } from "lucide-react";
+import { useState } from "react";
+
+import { EmptyState } from "@/components/empty-state";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import type { ActiveBuildingOption } from "@/features/buildings/queries";
+
+import type { ReminderListRow } from "../queries";
+import { buildReminderListHref } from "../reminder-list-schema";
+import { RECURRENCE_LABEL } from "../reminder-schema";
+import { DeleteReminderDialog } from "./delete-reminder-dialog";
+import { ReminderFormDialog } from "./reminder-form-dialog";
+import { ReminderStatusBadge } from "./reminder-status-badge";
+
+type DialogState =
+  | { type: "closed" }
+  | { type: "create" }
+  | { type: "edit"; reminder: ReminderListRow }
+  | { type: "delete"; reminder: ReminderListRow };
+
+// "YYYY-MM-DD" -> "DD/MM/YYYY" sin pasar por Date/timezone -- `due_date` es
+// una columna `date` pura (ver el comentario de ReminderListRow en
+// queries.ts), así que parsearla con `new Date(...)` y formatearla con un
+// timezone arriesgaría correr la fecha un día para adelante o atrás según
+// el offset. Partir el string alcanza y es exacto.
+function formatDueDate(dueDate: string): string {
+  const [year, month, day] = dueDate.split("-");
+  return `${day}/${month}/${year}`;
+}
+
+// Listado de recordatorios (paso 9.1) -- mismo patrón que UnitsList (paso
+// 4.3): Client Component solo para manejar el estado de los diálogos, sin
+// paginación (ver el comentario de getReminderList) ni búsqueda de texto
+// (no pedida en este paso).
+export function RemindersList({
+  reminders,
+  totalCount,
+  buildingOptions,
+  lockedBuildingId,
+  showBuildingColumn,
+}: {
+  reminders: ReminderListRow[];
+  totalCount: number;
+  buildingOptions: ActiveBuildingOption[];
+  lockedBuildingId: string | null;
+  showBuildingColumn: boolean;
+}) {
+  const [dialog, setDialog] = useState<DialogState>({ type: "closed" });
+
+  const editDialogReminder =
+    dialog.type === "edit" ? dialog.reminder : undefined;
+  const isFormDialogOpen = dialog.type === "create" || dialog.type === "edit";
+
+  const newReminderButton = (
+    <Button onClick={() => setDialog({ type: "create" })}>
+      Nuevo recordatorio
+    </Button>
+  );
+
+  // Dos vacíos distintos, mismo criterio que la bandeja de reclamos
+  // (CLAUDE.md > Bandeja de reclamos con filtros): "este alcance no tiene
+  // NINGÚN recordatorio todavía" (invitación a cargar el primero) vs. "hay
+  // recordatorios, pero ninguno con este filtro" (invitación a limpiarlo) --
+  // dos mensajes que no deberían confundirse entre sí.
+  if (totalCount === 0) {
+    return (
+      <div className="flex flex-col gap-4">
+        <EmptyState
+          icon={CalendarClock}
+          title="Todavía no hay recordatorios cargados"
+          description="Cargá el primero -- una fumigación, un service, un vencimiento -- con su fecha límite, para que no se te pase."
+          action={{
+            label: "Cargar el primer recordatorio",
+            onClick: () => setDialog({ type: "create" }),
+          }}
+        />
+        <ReminderFormDialog
+          open={isFormDialogOpen}
+          onOpenChange={(open) => {
+            if (!open) {
+              setDialog({ type: "closed" });
+            }
+          }}
+          buildingOptions={buildingOptions}
+          lockedBuildingId={lockedBuildingId}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex justify-end">{newReminderButton}</div>
+
+      {reminders.length === 0 ? (
+        <EmptyState
+          icon={SearchX}
+          title="No encontramos recordatorios con este filtro"
+          description="Probá con otro estado, o mostrá todos los recordatorios de nuevo."
+          action={{ label: "Ver todos", href: buildReminderListHref("all") }}
+        />
+      ) : (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Título</TableHead>
+              {showBuildingColumn && <TableHead>Edificio</TableHead>}
+              <TableHead>Vencimiento</TableHead>
+              <TableHead>Anticipación</TableHead>
+              <TableHead>Recurrencia</TableHead>
+              <TableHead>Estado</TableHead>
+              <TableHead className="w-10">
+                <span className="sr-only">Acciones</span>
+              </TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {reminders.map((reminder) => (
+              <TableRow key={reminder.id}>
+                <TableCell className="max-w-64 truncate font-medium">
+                  {reminder.title}
+                </TableCell>
+                {showBuildingColumn && (
+                  <TableCell>{reminder.buildingName}</TableCell>
+                )}
+                <TableCell>{formatDueDate(reminder.dueDate)}</TableCell>
+                <TableCell>
+                  {reminder.noticeDays === 1
+                    ? "1 día antes"
+                    : `${reminder.noticeDays} días antes`}
+                </TableCell>
+                <TableCell>
+                  <Badge variant="outline" className="font-body">
+                    {RECURRENCE_LABEL[reminder.recurrence]}
+                  </Badge>
+                </TableCell>
+                <TableCell>
+                  <ReminderStatusBadge status={reminder.status} />
+                </TableCell>
+                <TableCell>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        aria-label={`Acciones para ${reminder.title}`}
+                      >
+                        <MoreHorizontal />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem
+                        onSelect={() => setDialog({ type: "edit", reminder })}
+                      >
+                        Editar
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        variant="destructive"
+                        onSelect={() => setDialog({ type: "delete", reminder })}
+                      >
+                        Dar de baja
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )}
+
+      <ReminderFormDialog
+        open={isFormDialogOpen}
+        onOpenChange={(open) => {
+          if (!open) {
+            setDialog({ type: "closed" });
+          }
+        }}
+        buildingOptions={buildingOptions}
+        lockedBuildingId={lockedBuildingId}
+        reminder={editDialogReminder}
+      />
+
+      {dialog.type === "delete" && (
+        <DeleteReminderDialog
+          reminder={dialog.reminder}
+          open
+          onOpenChange={(open) => {
+            if (!open) {
+              setDialog({ type: "closed" });
+            }
+          }}
+        />
+      )}
+    </div>
+  );
+}
