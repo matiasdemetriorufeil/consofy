@@ -4866,6 +4866,269 @@ confirmado por SQL antes de cerrar el paso -- no queda ningún dato de
 producción alterado). Cuenta de prueba (`prueba-8-7-...@example.com`)
 eliminada por completo (Auth + `app_users`).
 
+## CRUD de recordatorios por edificio (paso 9.1)
+
+Primer paso de la etapa 9 (recordatorios/notificaciones). `reminders` ya
+existía completa desde la etapa 2.5 (mismo patrón que `incidents`/
+`announcement_recipients`: esquema y RLS listos, sin código encima) --
+`series_id`/`status` (`pending`/`notified`/`done`/`dismissed`) ya
+documentados ahí para el flujo de recurrencia que este paso no construye
+todavía (ver el comentario de `seriesId` en `src/db/schema/reminders.ts`,
+y CLAUDE.md > Vistas de calendario y próximos vencimientos más abajo, paso
+9.2, sobre la consecuencia real de eso).
+
+**Selector de edificio, patrón reusado, no reinventado:** `/panel/reminders`
+usa `getSelectedBuilding()` (la cookie del header, CLAUDE.md > Selector de
+edificio activo) igual que el dashboard -- "todos los edificios" es una
+vista agregada real (columna Edificio, un recordatorio individual sigue
+perteneciendo a UN solo edificio, `building_id NOT NULL`). El diálogo de
+alta pide el edificio con un `<select>` propio SOLO cuando la vista
+agregada está activa; con un edificio puntual elegido, el campo ni se
+muestra -- el contexto ya lo fija.
+
+**Ningún índice único parcial nuevo (evaluado, descartado):** ningún campo
+de `reminders` tiene semántica de unicidad de negocio -- título y fecha se
+pueden repetir legítimamente (dos recordatorios distintos pueden vencer el
+mismo día, o compartir título en dos edificios). El único `UNIQUE(id,
+organization_id)` que existe es el de siempre para la FK compuesta desde
+`notifications`, ya estaba desde la 2.5.
+
+**Estado editable solo en el formulario de edición, no una acción
+aparte:** un recordatorio nuevo siempre nace `pending`. Mover un
+recordatorio a `notified`/`done`/`dismissed` en este paso se hace con un
+`<select>` de Estado dentro del mismo diálogo de edición -- no hay un botón
+"Marcar como hecho" dedicado. Elegido así para no construir el flujo de
+recurrencia (crear la fila siguiente de la serie al completar una
+ocurrencia) fuera de alcance de este paso; sin ALGUNA forma de cambiar el
+estado, el filtro por estado de la lista (chips) no tendría manera de
+mostrar nada más que "Pendiente".
+
+## Vistas de calendario y próximos vencimientos (paso 9.2)
+
+Se suma a la lista simple del 9.1 sin reemplazarla: dos vistas nuevas
+("Próximos vencimientos", "Calendario") conviven con la vista "Lista" ya
+existente, elegibles desde una tira de pestañas
+(`RemindersViewTabs`) arriba del contenido.
+
+**Por qué `?view=` en la MISMA ruta, no tres rutas separadas como
+`BuildingDetailTabs`:** evaluado explícitamente, porque el propio
+comentario de `BuildingDetailTabs` (paso 4.2) explica por qué ESE caso sí
+usa rutas reales -- "Unidades"/"Personas"/"Reclamos"/etc. son SECCIONES DE
+GESTIÓN distintas, cada una con su propia consulta y su propio significado
+de negocio. Acá no: las tres vistas son tres PRESENTACIONES del mismo
+conjunto de datos, ya resuelto una sola vez por `getReminderList()` (paso
+9.1) en `page.tsx` -- exactamente el caso que ese mismo comentario deja
+abierto para un query param en vez de una ruta. Con tres rutas, cada una
+tendría que repetir la resolución del edificio seleccionado y la consulta
+completa; con `?view=`, las tres parten del mismo `allReminders` ya
+cargado. Sigue siendo bookmarkeable/compartible (mismo criterio de "la URL
+decide" que ya rige `?status=` acá mismo y los filtros/orden de la bandeja
+de reclamos) -- no es un estado de cliente escondido.
+
+`status` no viaja al cambiar a "upcoming"/"calendar": es un filtro propio
+de "Lista" (chips del 9.1) sin equivalente en las otras dos vistas (ver
+abajo qué estados muestra cada una) -- `buildReminderViewHref()` nunca lo
+arrastra.
+
+### Semáforo de vencimientos -- umbrales, decisión de diseño propia
+
+Tres niveles, ninguno arbitrario -- los dos cortes usan datos que YA
+existen en el propio recordatorio, sin inventar una constante global
+nueva:
+
+- 🔴 **Vencido** (`overdue`): `due_date` ya pasó respecto de "hoy".
+- 🟡 **Próximo** (`upcoming`): `due_date` cae DENTRO de la ventana de aviso
+  propia de ESE recordatorio -- `due_date <= hoy + notice_days` (el mismo
+  campo `notice_days` que el administrador ya carga a mano en el 9.1 para
+  decir "avisame N días antes"). Dos recordatorios con la misma fecha de
+  vencimiento pueden estar en niveles distintos si tienen `notice_days`
+  distinto -- a propósito, verificado con un test (`reminder-urgency.
+test.ts`).
+- 🟢 **Tranquilo** (`ok`): más lejos que esa ventana.
+
+**Por qué reusar `notice_days` en vez de un umbral fijo (ej. "7 días"
+para todos):** un umbral único ignoraría que el propio dominio ya modela
+"cuánto antes me importa que me avisen" por fila -- un service de
+ascensor (`notice_days: 30`) y una fumigación (`notice_days: 7`) no
+deberían ponerse "en amarillo" al mismo tiempo relativo a su fecha. Fue
+una decisión de este paso, no algo que viniera pedido explícitamente --
+documentada acá, no dejada implícita en el código (pedido explícito del
+enunciado del 9.2).
+
+`getReminderUrgency(dueDate, noticeDays, today)`
+(`reminder-urgency.ts`, función PURA sin `import "server-only"`, mismo
+criterio que `normalize-ticket-text.ts`/`derive-affected-parties.ts`) --
+15 tests en `reminder-urgency.test.ts`, incluido el caso límite del borde
+exacto de `notice_days` (inclusive: `due_date == hoy + notice_days` cae en
+`upcoming`, no en `ok`). `today` SIEMPRE es un parámetro, nunca `new
+Date()` adentro de la función -- mismo criterio que
+`referenceReportedAt` en `findSimilarTickets` (paso 7.1), para poder
+testear contra fechas fijas.
+
+**Zona horaria de "hoy": la de la organización, no la del navegador --
+regla ya existente (CLAUDE.md > Convenciones) aplicada acá por primera vez
+a un cálculo de urgencia.** `page.tsx` calcula `today` una sola vez con
+`formatDateSlug(new Date(), organization.timezone)` y lo pasa a las dos
+vistas nuevas -- nunca se vuelve a calcular "hoy" del lado del cliente
+(que vería la hora del dispositivo del administrador, no la del
+edificio).
+
+### Recurrencia y el semáforo -- decisión tomada explícitamente con la persona
+
+**Pedido explícito del enunciado: si el semáforo debería considerar la
+recurrencia de algún modo particular, señalarlo en vez de asumir un
+criterio en silencio.** Se señaló (ver el reporte del 9.2), y la persona
+ya lo resolvió de forma explícita -- lo que sigue es esa decisión, no una
+inferencia ni un vacío que haya quedado sin cerrar.
+
+El semáforo de este paso evalúa cada FILA de `reminders` tal cual está
+guardada (`due_date`/`notice_days` propios), sin ninguna rama especial
+para `recurrence !== "none"`. Esto es consistente en el sentido de "todas
+las filas se tratan igual", pero tiene una consecuencia real sobre los
+recordatorios recurrentes, explicada abajo.
+
+**El flujo "al completar una ocurrencia recurrente, se crea la fila
+siguiente copiando el mismo `series_id`" NO está construido** (ver el
+comentario de `seriesId` en `reminders.ts`, que ya lo anticipaba desde la
+2.5 como pendiente de un paso posterior de la etapa 9). Consecuencia real:
+un recordatorio con `recurrence: "monthly"` marcado `done` en el 9.1 no
+genera ninguna fila nueva para el mes que viene -- simplemente desaparece
+de "Próximos vencimientos" (que solo muestra `pending`/`notified`) y de
+los meses futuros del calendario (que sí muestra `done`, pero solo la
+fila real que ya existe -- no hay una fila en octubre para un recordatorio
+mensual completado en agosto), aunque conceptualmente un recordatorio
+mensual "debería" seguir apareciendo cada mes indefinidamente.
+
+**Decisión tomada (no una inferencia propia): este comportamiento queda
+TAL CUAL está, a propósito, hasta que se construya el sistema completo de
+recurrencia.** Un recordatorio recurrente marcado "Hecho" sigue
+desapareciendo de "Próximos vencimientos" y del calendario de los meses
+siguientes, sin generar automáticamente la próxima ocurrencia -- ninguna
+fila proyectada, ningún "fantasma" en gris, ningún cálculo especial del
+semáforo basado en el ritmo de recurrencia. Se evaluaron explícitamente
+las dos alternativas que este mismo apartado había dejado planteadas
+(mostrar la ocurrencia recurrente completada con otro tratamiento visual
+en meses futuros; o darle al semáforo una noción de "vencido en relación
+al propio ritmo de recurrencia") y se descartaron las dos POR AHORA:
+fabricar una fecha proyectada sin una fila real en la base sería inventar
+un dato que no existe, y una noción de urgencia relativa a la recurrencia
+no tiene mucho sentido sin que el flujo de generación de la fila
+siguiente ya exista. La corrección real -- que un recordatorio recurrente
+vuelva a aparecer solo cuando corresponde -- llega junto con ESE flujo,
+no antes ni por separado.
+
+No se asumió ninguna respuesta por iniciativa propia -- el semáforo de
+este paso funciona correctamente para el caso real de HOY (una fila = una
+fecha real a vencer, sin importar si algún día se repite), y la mejora
+sobre recordatorios recurrentes completados queda para cuando el flujo de
+recurrencia se construya de verdad, no antes.
+
+### Vista "Próximos vencimientos"
+
+`UpcomingRemindersList` -- Server Component de SOLO LECTURA (sin
+`"use client"`, sin diálogos de edición/baja). Recibe únicamente
+recordatorios con estado ACTIVO (`REMINDER_ACTIVE_STATUSES`, pending +
+notified -- mismo set ya definido en el 9.1) -- pedido explícito del
+enunciado ("recordatorios activos"), ya vienen ordenados por `due_date`
+ascendente (mismo `ORDER BY` de `getReminderList`, sin lógica de orden
+propia: "más cerca de vencer" es simplemente la fecha más chica primero,
+tanto para uno vencido -- más días de atraso -- como para uno futuro).
+Cada fila muestra el badge de urgencia (`ReminderUrgencyBadge`) y una
+frase corta (`describeReminderDueDate`: "Venció hace 3 días" / "Vence
+hoy" / "Vence mañana" / "Vence en N días") más la fecha exacta.
+
+**Por qué de solo lectura, decisión propia:** esta vista y el calendario
+son de ORIENTACIÓN ("¿qué necesita atención pronto?"), no de gestión -- la
+gestión completa (crear, editar, dar de baja) ya la resuelve la pestaña
+"Lista" del 9.1. Duplicar `ReminderFormDialog`/`DeleteReminderDialog` (y
+su manejo de estado) en las dos vistas nuevas hubiera triplicado la
+lógica de diálogos sin agregar una capacidad real -- el administrador que
+necesita actuar sobre un recordatorio puntual cambia a "Lista" (un click
+de pestaña) para hacerlo.
+
+### Vista "Calendario"
+
+`ReminderCalendar` -- Client Component (necesita estado: mes visible, día
+elegido), construido sobre `Calendar` (`src/components/ui/calendar.tsx`,
+wrapper de `react-day-picker` v10) -- **primer uso real de ese componente
+fuera de `/dev/styleguide`**, sin agregar ninguna dependencia nueva
+(`react-day-picker` ya estaba en `package.json`, sin usar).
+
+**A diferencia de "Próximos vencimientos", el calendario muestra
+recordatorios de CUALQUIER estado, no solo los activos -- decisión propia,
+no pedida explícitamente en ninguno de los dos sentidos.** Un calendario
+es naturalmente una vista de "qué pasó/pasa/va a pasar este mes", más
+cercana a un historial que a una cola de pendientes -- ocultar los
+`done`/`dismissed` haría que un mes ya transcurrido se vea vacío aunque sí
+haya habido actividad real ese mes. Cada recordatorio en el detalle del
+día muestra su `ReminderStatusBadge` (estado) Y su `ReminderUrgencyBadge`
+(urgencia) por separado, para que la vista no mienta sobre cuál es cuál.
+
+**Navegación de mes: 100% del lado del cliente, SIN `?month=` en la URL ni
+round-trip al servidor -- desviación deliberada del criterio "la URL
+decide" que rige el resto del panel, documentada para que no se lea como
+un descuido.** Mismo razonamiento que ya justificó "sin paginación" en el
+9.1 (`getReminderList`, "la tabla de recordatorios de un edificio es
+chica"): `page.tsx` ya trae TODOS los recordatorios del alcance en una
+sola consulta; cambiar de mes en el calendario es simplemente mostrar
+otra porción de datos que YA están en memoria del lado del cliente, así
+que pedirle algo nuevo al servidor por cada click de "mes siguiente"
+sería un round-trip innecesario. Si el volumen de recordatorios por
+edificio creciera mucho (no hay evidencia de eso hoy), ahí se justificaría
+reconsiderar esto -- mismo criterio de "no pagines hasta que haga falta"
+ya aplicado en el resto del proyecto.
+
+**Marcado de días con recordatorios:** tres modificadores de
+`react-day-picker` (`reminderOverdue`/`reminderUpcoming`/`reminderOk`),
+cada uno con la lista de fechas cuyo peor recordatorio de ese día cae en
+ese nivel (si un día tiene varios recordatorios en niveles distintos, se
+queda con el más severo -- vencido > próximo > tranquilo). Un punto de
+color (`::after`, `bg-urgente`/`bg-alta`/`bg-resuelto`) debajo del número
+del día, con una referencia de colores (leyenda) al pie del calendario --
+sin esto, los tres colores no se explican solos.
+
+**Al tocar un día, un panel aparte muestra sus recordatorios** (título,
+edificio si la vista es agregada, estado, urgencia, descripción) --
+cualquier día es tocable, no solo los marcados (un día sin recordatorios
+muestra "Sin recordatorios este día.", nunca un error ni un día
+deshabilitado). El día inicial seleccionado es "hoy" (en la zona de la
+organización), para que la pantalla muestre algo útil apenas se entra a
+esta vista, sin depender de que el administrador toque algo primero.
+
+**Dos formas DISTINTAS de convertir "YYYY-MM-DD" a `Date`, a propósito, no
+una inconsistencia:** el resto del feature (`daysBetween`/`formatDueDate`
+en `reminder-urgency.ts`/`format-due-date.ts`) ancla todo a UTC
+(`Date.UTC(...)`) para que la aritmética de días nunca corra un día de
+más/menos por el offset del huso horario que ejecuta el código.
+`ReminderCalendar` NO puede usar ese mismo criterio para construir los
+`Date` que le pasa a `react-day-picker` como `modifiers`: esa librería
+compara/renderiza sus propias celdas por año/mes/día en la zona LOCAL del
+NAVEGADOR (vía el constructor de 3 argumentos `new Date(y, m, d)`, no
+`Date.UTC`) -- pasarle un `Date` anclado en UTC marcaría el día
+INCORRECTO en cualquier navegador con offset negativo (todo el huso
+horario de Argentina, entre otros: medianoche UTC de un día ya es la
+tarde-noche del día ANTERIOR en hora local). `dateKeyToLocalDate()`, la
+única función de este archivo que construye un `Date`, usa el constructor
+local a propósito -- documentado en el propio código para que nadie lo
+"corrija" para que coincida con el resto del feature sin entender por
+qué son casos distintos.
+
+**"Hoy" del calendario: forzado a la zona de la organización, no la del
+navegador.** `DayPicker` resalta "hoy" con `new Date()` interno (hora del
+NAVEGADOR) si no se le pasa nada -- acá se le pasa explícitamente el prop
+`today` (que sí acepta, `today?: Date`) con el mismo `today` ya calculado
+en `page.tsx` (zona de la organización), para que el resaltado visual de
+"hoy" nunca dependa del reloj/huso del dispositivo de quien mira la
+pantalla -- mismo criterio que el resto de CLAUDE.md > Convenciones,
+aplicado por primera vez a un componente de terceros que trae su propio
+default.
+
+**`locale={es}`** (`date-fns/locale`, el mismo objeto que ya importa
+`formatRelativeDate` en `src/lib/format-date.ts`, reusado -- no una
+segunda instancia): sin esto, `react-day-picker` muestra nombres de mes y
+día en inglés por default. Es la primera vez que `Calendar` se usa con un
+locale explícito -- `/dev/styleguide` lo usa sin ninguno.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.

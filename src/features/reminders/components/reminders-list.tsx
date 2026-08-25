@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/table";
 import type { ActiveBuildingOption } from "@/features/buildings/queries";
 
+import { formatDueDate } from "../format-due-date";
 import type { ReminderListRow } from "../queries";
 import { buildReminderListHref } from "../reminder-list-schema";
 import { RECURRENCE_LABEL } from "../reminder-schema";
@@ -34,16 +35,6 @@ type DialogState =
   | { type: "create" }
   | { type: "edit"; reminder: ReminderListRow }
   | { type: "delete"; reminder: ReminderListRow };
-
-// "YYYY-MM-DD" -> "DD/MM/YYYY" sin pasar por Date/timezone -- `due_date` es
-// una columna `date` pura (ver el comentario de ReminderListRow en
-// queries.ts), así que parsearla con `new Date(...)` y formatearla con un
-// timezone arriesgaría correr la fecha un día para adelante o atrás según
-// el offset. Partir el string alcanza y es exacto.
-function formatDueDate(dueDate: string): string {
-  const [year, month, day] = dueDate.split("-");
-  return `${day}/${month}/${year}`;
-}
 
 // Listado de recordatorios (paso 9.1) -- mismo patrón que UnitsList (paso
 // 4.3): Client Component solo para manejar el estado de los diálogos, sin
