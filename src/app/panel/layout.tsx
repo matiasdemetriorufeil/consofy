@@ -1,6 +1,7 @@
 import { getActiveBuildings } from "@/features/buildings/queries";
 import { getSelectedBuilding } from "@/features/buildings/selected-building";
 import { PanelUserProvider } from "@/features/auth/panel-user-context";
+import { getUnreadNotificationCount } from "@/features/notifications/queries";
 import { Sidebar } from "@/features/panel/components/sidebar";
 import { SiteHeader } from "@/features/panel/components/site-header";
 import { SkipLink } from "@/features/panel/components/skip-link";
@@ -40,10 +41,18 @@ export default async function PanelLayout({ children }: LayoutProps<"/panel">) {
   // consulta -- un solo round-trip real a la base para las dos cosas. Ver
   // CLAUDE.md > Selector de edificio activo sobre por qué esto nunca puede
   // fallar ni mostrar un edificio de otra organización o dado de baja.
-  const [buildings, selectedBuilding] = await Promise.all([
-    getActiveBuildings(organization.id),
-    getSelectedBuilding(organization.id),
-  ]);
+  //
+  // getUnreadNotificationCount() (paso 9.3) se pide en PARALELO acá, no
+  // adentro de NotificationBell -- así el número ya está pintado en el
+  // primer HTML que llega al navegador, sin esperar a que el Client
+  // Component hidrate para mostrar algo. El LISTADO de notificaciones en
+  // sí no se trae acá (ver el comentario de NotificationBell).
+  const [buildings, selectedBuilding, unreadNotificationCount] =
+    await Promise.all([
+      getActiveBuildings(organization.id),
+      getSelectedBuilding(organization.id),
+      getUnreadNotificationCount(organization.id),
+    ]);
 
   return (
     <PanelUserProvider value={{ appUser, organization }}>
@@ -54,6 +63,7 @@ export default async function PanelLayout({ children }: LayoutProps<"/panel">) {
           <SiteHeader
             buildings={buildings}
             selectedBuildingId={selectedBuilding?.id ?? null}
+            unreadNotificationCount={unreadNotificationCount}
           />
           <main
             id="main-content"

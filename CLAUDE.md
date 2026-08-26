@@ -5129,6 +5129,306 @@ segunda instancia): sin esto, `react-day-picker` muestra nombres de mes y
 día en inglés por default. Es la primera vez que `Calendar` se usa con un
 locale explícito -- `/dev/styleguide` lo usa sin ninguno.
 
+## Centro de notificaciones (paso 9.3)
+
+Campana en el header del panel (reemplaza el botón deshabilitado "espacio
+reservado para la etapa 9", paso 3.4) con contador de no leídas, listado
+desplegable, y marcado de lectura individual/masivo. `notifications` ya
+existía completa desde la etapa 2.5 (mismo patrón que `incidents`/
+`reminders`/`announcement_recipients`: esquema y RLS listos, sin código
+encima) -- verificado el esquema real (`src/db/schema/notifications.ts`)
+antes de escribir la primera consulta, no asumido del enunciado.
+
+**Este paso NO genera ninguna notificación real -- eso es la 9.4.** Sin
+ningún generador todavía, la tabla está vacía en cualquier base real;
+la verificación de este paso insertó filas a mano (ver más abajo, "Cómo se
+probó").
+
+**`notifications` es de ORGANIZACIÓN, no de edificio -- verificado en el
+esquema, no asumido.** A diferencia de `reminders`/`tickets`/
+`announcements`, la tabla no tiene columna `building_id` -- solo
+`organization_id` y tres FK opcionales (`related_ticket_id`/
+`related_reminder_id`/`related_incident_id`), cada una MATCH SIMPLE
+(nullable, como mucho una completa según el `type`). Consecuencia directa:
+el selector de edificio del header **no filtra nada acá**, mismo criterio
+que ya rige Edificios/Configuración (CLAUDE.md > Selector de edificio
+activo, "no es válida en las secciones de organización") -- ahora aplicado
+por primera vez a un widget del header en vez de a una sección completa de
+navegación. Coincide además con el punto 5 del enunciado del 9.3
+("Filtrado siempre por organización", sin mencionar edificio) -- no hizo
+falta reinterpretar nada, el esquema y el enunciado apuntan al mismo
+diseño.
+
+**Sin ítem de navegación propio -- vive solo en la campana, no una
+pantalla de historial aparte.** `panelNavItems` no tiene "Notificaciones"
+(a diferencia de Reclamos/Recordatorios/Comunicados) -- esto sigue siendo
+un widget del header, no una sección del panel. Ver el apartado siguiente
+para cómo se llega a las notificaciones más viejas que las primeras 20 sin
+necesitar esa pantalla.
+
+### Paginación real del listado ("Cargar más") -- decisión tomada CON LA PERSONA, no propia
+
+La primera versión de este paso (ver más arriba en el historial de este
+documento si hace falta el detalle) traía como máximo
+`NOTIFICATION_LIST_LIMIT = 20` notificaciones, sin ninguna forma de pedir
+más -- un tope DURO: una notificación que quedaba fuera de esas 20 (leída
+o no) no era recuperable desde ningún lugar de la UI. Revisando ese
+reporte, se identificó que ese límite no salía de ninguna instrucción
+concreta del enunciado del 9.3 (el punto 2 solo pide "listado de
+notificaciones ordenado por fecha descendente, con distinción visual
+entre leídas y no leídas" -- ni un número ni la palabra "recientes"), y
+que además dejaba una asimetría real: el contador de no leídas
+(`getUnreadNotificationCount`) cuenta TODA la organización sin límite, pero
+el listado que se podía abrir para actuar sobre ellas una por una se
+cortaba en 20 -- el badge podía decir "35 sin leer" mostrando apenas 20 de
+esas 35 con algún botón para marcarlas.
+
+**Se plantearon tres opciones, y la persona eligió la segunda -- no fue
+una decisión tomada en código:**
+
+1. Subir el número (por ejemplo, de 20 a 100) sin cambiar el mecanismo --
+   descartada: sigue siendo un tope duro, solo que más alto; el mismo
+   problema reaparece con más notificaciones acumuladas, apenas más tarde.
+2. **Agregar paginación real dentro del mismo Popover de la campana,
+   "Cargar más", sin límite real -- ELEGIDA.** Mantiene el centro de
+   notificaciones como el widget chico del header que ya es (sin una
+   pantalla nueva, sin un ítem de navegación nuevo), pero saca el tope
+   duro de raíz: cualquier notificación, sin importar cuán vieja, se
+   puede alcanzar pidiendo más bloques.
+3. Construir una pantalla de historial completo aparte (`/panel/
+notifications`, con su propia ruta, filtros, paginación de página
+   completa) -- descartada por ahora: es más construcción de la que este
+   ajuste puntual pedía, y la 9.4 (generación real de notificaciones)
+   todavía puede cambiar qué campos/volumen tendría sentido mostrar ahí.
+   Queda como opción futura si "Cargar más" alguna vez no alcanza (ej. un
+   caso de uso real de búsqueda/filtrado sobre el historial).
+
+**Cómo quedó implementado -- paginación por cursor (keyset), no por
+`OFFSET`/número de página.** La bandeja de reclamos (paso 6.2) sí usa
+`OFFSET` con página numerada en la URL (`?page=3`) -- ahí cada página es
+una carga de ruta completa, bookmarkeable, que arranca de cero. Acá
+"Cargar más" vive DENTRO de un Popover que puede quedar abierto un rato, y
+`notifications` es una tabla que va a recibir INSERTs en cualquier momento
+en cuanto exista un generador real (etapa 9.4) -- con `OFFSET`, una fila
+nueva insertada arriba de todo mientras el Popover sigue abierto corre el
+`OFFSET` un lugar y duplica o salta una fila del bloque siguiente. El
+cursor (`{createdAt, id}` de la ÚLTIMA fila ya mostrada, con `id` como
+desempate porque `created_at` no es único) no tiene ese problema: el corte
+es un valor real de una fila ya vista, no una posición numérica que se
+mueve. `getRecentNotifications(organizationId, cursor)` -- `cursor: null`
+para el primer bloque, `{createdAt, id}` para los siguientes.
+
+**`hasMore` sin un `COUNT(*)` aparte -- mismo patrón ya usado en el
+proyecto (`BULK_SELECTION_MAX`, tickets/queries.ts, paso 6.5): `LIMIT
+NOTIFICATION_PAGE_SIZE + 1`.** Si vuelven 21 filas, se devuelven las
+primeras 20 y `hasMore: true`; si vuelven 20 o menos, `hasMore: false` --
+sin pagar una segunda consulta solo para saber si queda algo más.
+`NOTIFICATION_PAGE_SIZE` sigue siendo 20 -- el número nunca fue el
+problema (opción 1, descartada arriba), lo que faltaba era el mecanismo
+para pedir el bloque siguiente.
+
+**`loadMoreNotificationsAction`, action nueva y separada de
+`getNotificationCenterDataAction`:** recibe el cursor, validado con Zod
+(`z.object({ createdAt: z.date(), id: z.uuid() })`) aunque sea un valor
+que el propio servidor ya le dio al cliente en la respuesta anterior --
+CLAUDE.md > Reglas de seguridad no hace esa excepción, toda entrada de una
+Server Action se valida en el servidor sin importar su origen. NO
+recalcula `unreadCount` (a diferencia de la action de apertura) -- pedir
+un bloque más viejo no cambia cuántas notificaciones hay sin leer, así que
+esa segunda consulta no hace falta ahí.
+
+**`NotificationBell`:** `hasMore`/`isLoadingMore` son estado propio,
+separado de `isLoading` (el de la apertura inicial) -- pedir el bloque
+siguiente no hace parpadear la lista entera a "Cargando…", solo el botón
+del pie cambia a ese texto mientras espera. "Cargar más" AGREGA filas al
+final del array que ya está en pantalla (nunca lo reemplaza), nunca cierra
+el Popover ni recarga la página -- pedido explícito de este ajuste,
+verificado en el navegador (ver "Cómo se probó" más abajo). El mismo guard
+de secuencia (`latestRequestId`, ya documentado arriba) cubre también esta
+acción -- si "marcar todas como leídas" resuelve mientras un "Cargar más"
+todavía está en vuelo, la respuesta más vieja del "Cargar más" no puede
+pisar el estado ya actualizado por la más nueva.
+
+**La asimetría queda resuelta, no solo maquillada:** con "Cargar más" sin
+límite real, cualquier notificación no leída es alcanzable pidiendo
+suficientes bloques -- puede tomar varios clics si hay muchas, pero
+ninguna queda estructuralmente fuera de alcance como pasaba con el tope
+duro. El botón "Marcar todas como leídas" seguía (y sigue) alcanzando a
+toda la organización de todas formas, sin depender de cuántos bloques
+hubiera cargado el cliente -- eso ya estaba bien desde la primera versión,
+lo que faltaba era que el camino INDIVIDUAL (ver una notificación puntual
+y marcarla de a una) también pudiera llegar a todas.
+
+**Conteo (badge) vs. listado: dos consultas con dos ciclos de vida
+distintos, a propósito.** `getUnreadNotificationCount()` se pide en
+`layout.tsx` (Server Component, en paralelo con `getActiveBuildings()`/
+`getSelectedBuilding()`) -- así el número ya está en el HTML de CUALQUIER
+página del panel, sin esperar a que el Popover se abra ni a que React
+hidrate. El LISTADO (`getRecentNotifications()`) se pide recién al abrir
+el Popover, vía `getNotificationCenterDataAction()` -- mismo criterio que
+`getUnitDependencyCountsAction` (paso 4.3, diálogo de baja de una unidad):
+datos que la MAYORÍA de las cargas de página no van a usar nunca no se
+piden por adelantado. Esa action devuelve conteo Y listado juntos, en la
+misma invocación -- si el conteo del layout quedó desactualizado (otra
+pestaña, otro dispositivo, minutos de diferencia), abrir el Popover lo
+refresca, así el número del badge y el estado leído/no leído de cada fila
+nunca pueden desincronizarse entre sí.
+
+**Marcado de lectura, dos caminos independientes (punto 3 del enunciado:
+individual + "marcar todas"), documentados en el propio código:**
+
+- **Al hacer click en una notificación con `link`:** SOLO navega -- no
+  marca nada leído por su cuenta. La primera versión de este paso SÍ
+  marcaba leída al navegar (fire-and-forget); se sacó por un bug real
+  encontrado probando el paso, ver el apartado siguiente.
+- **Botón "Marcar como leída" explícito, visible SOLO en filas no
+  leídas:** el ÚNICO camino para el marcado individual (punto 3 del
+  enunciado) -- sirve tanto para "ya sé de qué se trata, no necesito
+  entrar" como para una notificación sin `link` (`type: "system"`, por
+  ejemplo, puede no tener ningún recurso al que navegar). Vive como
+  HERMANO del `<Link>` de la fila, nunca anidado adentro -- un `<button>`
+  dentro de un `<a>` es HTML inválido, con problemas reales de foco/
+  lectura de pantalla (ver el comentario en `notification-item.tsx`).
+- **"Marcar todas como leídas":** un solo `UPDATE` contra TODA la
+  organización (`WHERE organization_id = ... AND read_at IS NULL`), no
+  contra los ids de las 20 filas que trajo el Popover -- si hubiera más de
+  20 no leídas, el botón tiene que dejar el contador en 0 igual (ver
+  CLAUDE.md > Voz y escritura: un botón que dice "todas" y deja algunas
+  sin marcar sería el mismo tipo de texto que miente que ese apartado ya
+  prohíbe).
+
+### Bug real encontrado probando este paso: marcar leída AL NAVEGAR rompía la navegación
+
+La primera versión de `onNavigate` (click en una notificación con `link`)
+marcaba la notificación leída fire-and-forget, sin esperar, ANTES de
+dejar que el `<Link>` seguido su curso normal -- mismo criterio que
+`registerWhatsappHandoffOpenedAction` (paso 5.9), que dispara su Server
+Action sin bloquear la apertura de WhatsApp. Ahí se rompía la analogía:
+funciona para el 5.9 porque esa Server Action NO revalida nada; ésta sí.
+
+**Síntoma real, reproducido varias veces, no una sola vez sospechosa:**
+clickear una notificación con link marcaba `read_at` correctamente en la
+base (confirmado por SQL directo, timestamps correctos y en el orden
+esperado), pero `page.url()` se quedaba en la página actual -- la
+navegación a la ruta del `link` nunca llegaba a completarse, ni esperando
+varios segundos.
+
+**Causa, confirmada eliminando UNA variable a la vez, no asumida a la
+primera sospecha:** `markNotificationReadAction` llama
+`revalidatePath("/panel", "layout")` (necesario para que el badge quede
+al día en la próxima navegación completa, ver más arriba). Next.js trata
+la respuesta de una Server Action que revalida como una señal de
+"refrescá la ruta actual" para el router del lado del cliente -- si esa
+señal llega mientras un `<Link>` todavía tiene una navegación EN CURSO
+hacia OTRA ruta, el router prioriza el refresh de la ruta actual y la
+navegación pendiente se pierde, sin ningún error visible en consola ni en
+red. Se descartó primero la hipótesis de "latencia de dev nomás" (real
+también, ver abajo) armando un control: la MISMA navegación, sin ninguna
+Server Action de por medio, completaba sola en 1-2 segundos una vez
+precompilada la ruta -- agregar la Server Action con `revalidatePath` de
+por medio es lo que la rompía, siempre, sin importar cuánto se esperara
+después.
+
+**El fix:** clickear una notificación con link deja de marcarla leída
+como efecto secundario -- solo navega. El marcado individual queda
+enteramente a cargo del botón explícito "Marcar como leída", que nunca
+compite con ninguna navegación (no hay ningún `<Link>` de por medio en
+ese click). Es una reducción de alcance real (se pierde el "marcado
+automático al entrar", una mejora de UX que este paso había agregado por
+iniciativa propia, no pedida en el enunciado) a cambio de que la
+navegación funcione siempre -- se priorizó lo pedido (punto 4: "cada
+notificación linkea al recurso relacionado") por sobre el agregado propio
+que lo rompía.
+
+**Segundo hallazgo, real pero de una clase distinta -- latencia de
+desarrollo, no un bug de código:** durante el mismo diagnóstico, marcar
+una notificación leída con el botón explícito tardó medidas reales de
+hasta ~1.4 segundos en reflejarse en el badge en este entorno de
+desarrollo (instrumentado con logs de render, no estimado) -- consistente
+con los números YA documentados en CLAUDE.md > Separación dev/producción
+(pooler de sesión Córdoba↔us-east-1, ~172ms p50 por round-trip; acá son
+dos round-trips, UPDATE + SELECT de conteo). Un primer intento de
+verificación con esperas de 500ms entre pasos leía el badge ANTES de que
+la Server Action hubiera terminado, y lo reportaba como "no se
+actualizó" -- error del script de verificación, no de la aplicación,
+corregido esperando lo suficiente. Se dejó igual, como refuerzo
+defensivo (no como el fix real de este síntoma puntual), un guard de
+secuencia en `NotificationBell` (`latestRequestId`, mismo patrón que la
+condición de carrera ya documentada en paso 8.2) para que ninguna
+respuesta vieja pueda pisar una más nueva sin importar cuánto tarde.
+
+**`read_at` no se pisa en un segundo click:** el `UPDATE` de marcado
+individual filtra `WHERE read_at IS NULL` en el propio WHERE -- no es una
+regla de negocio (releer algo ya leído no rompe nada), es para conservar
+el timestamp REAL del primer marcado si se clickea una fila ya leída por
+error o dos veces seguidas.
+
+**`revalidatePath("/panel", "layout")`, no el default `"page"`:** el
+conteo del badge lo pinta `layout.tsx`, que envuelve TODAS las rutas de
+`/panel/*` -- revalidar sirve para que la PRÓXIMA navegación completa
+(otra pestaña, o esta misma después de cerrar y reabrir) muestre el
+conteo real, incluso sin ningún estado de cliente vivo. Mientras el
+Popover sigue abierto en la misma carga de página, el número que se ve ya
+lo actualiza `NotificationBell` directo con lo que devuelve cada action
+(sin depender de este revalidate ni de un `router.refresh()`).
+
+**Tipos de notificación, mismo criterio que `OCCUPANCY_ROLE_LABEL`:**
+`NOTIFICATION_TYPE_LABEL` (`notification-type.ts`) traduce los cuatro
+valores de `notification_type` (`new_ticket`/`reminder_due`/
+`incident_updated`/`system`) -- las cuatro etiquetas existen aunque hoy
+ningún generador real produzca ninguna (eso es la 9.4); se muestran como
+texto chico junto a la fecha relativa de cada fila, para dar contexto sin
+necesitar un ícono por tipo (evaluado y descartado: cuatro íconos nuevos
+solo para esto no se justificaban frente a un texto corto).
+
+### Cómo se probó (sin generador real todavía)
+
+Sin ningún flujo de la aplicación que inserte filas en `notifications`
+(eso es la 9.4), la verificación de este paso insertó registros A MANO
+por SQL directo contra la base de DESARROLLO (confirmado el project ref
+antes de tocar nada, igual que en cada paso anterior) -- nunca vía el
+seed determinista de la 2.7 (pedido explícito del enunciado: el seed es
+para datos base reproducibles del proyecto, no para probar una pantalla
+puntual). Se insertaron algunas filas de prueba cubriendo los cuatro
+`type`, con y sin `link`, y con `read_at` ya seteado en alguna para
+probar el estado "leída" desde el primer render. **Dadas de baja
+(`deleted_at`) al terminar de verificar, nunca `DELETE` físico** -- mismo
+criterio que el resto del proyecto (CLAUDE.md > Reglas de entorno, "la
+limpieza es siempre borrado lógico en tablas de negocio"). El SQL exacto
+usado, y la confirmación de la baja, quedan en el reporte de este paso.
+
+**Verificación aparte para "Cargar más" (ajuste posterior de
+paginación), con volumen real por encima del tamaño de un bloque:** 25
+notificaciones de prueba insertadas a mano (mismo criterio de arriba --
+SQL directo contra desarrollo, prefijo identificable, nunca el seed),
+`created_at` escalonado minuto a minuto para que el orden esperado fuera
+determinístico y fácil de verificar a simple vista, una de ellas (la
+tercera más nueva) ya marcada leída desde el arranque. Con Playwright,
+usuario de prueba dedicado:
+
+- Al abrir el Popover: exactamente 20 filas, la más nueva primera
+  (`Notificación 25`) y la última del bloque siendo `Notificación 06` --
+  coincide exacto con `NOTIFICATION_PAGE_SIZE`. Botón "Cargar más"
+  visible.
+- Click en "Cargar más": el Popover **sigue abierto** (no se cierra, no
+  navega, no recarga la página -- verificado explícitamente, no
+  asumido), aparecen las 5 filas restantes (`Notificación 05` a
+  `Notificación 01`) AGREGADAS al final de las 20 ya visibles -- 25 en
+  total, contadas y comparadas contra un `Set` para confirmar CERO
+  duplicados y CERO saltos. El botón "Cargar más" desaparece solo, sin
+  ninguna lógica de conteo del lado del cliente (`hasMore: false` que
+  devolvió el propio servidor).
+- **La asimetría verificada, no solo argumentada:** se marcó como leída,
+  con el botón individual, una notificación que SOLO estaba disponible
+  después de "Cargar más" (fuera de las primeras 20) -- el badge bajó de
+  24 a 23 sin leer, confirmando que el camino individual ya alcanza
+  cualquier no leída, sin importar cuán vieja.
+
+**Limpieza:** las 25 notificaciones de prueba, dadas de baja
+(`deleted_at`), confirmado por SQL que el Popover queda vacío
+("Todavía no tenés notificaciones.") después. Cuenta de prueba dedicada
+eliminada por completo (Auth + `app_users`).
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
