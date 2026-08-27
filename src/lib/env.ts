@@ -10,14 +10,23 @@ import { publicEnv } from "./env.public";
 // (NEXT_PUBLIC_APP_URL, paso 4.6), src/lib/supabase/admin.ts
 // (SUPABASE_SERVICE_ROLE_KEY, paso 5.10: la única forma de generar URLs
 // firmadas para el bucket privado de adjuntos, ver CLAUDE.md > Reglas de
-// entorno sobre por qué esta clave se usa lo menos posible) y
+// entorno sobre por qué esta clave se usa lo menos posible),
 // src/features/announcements/messaging/get-messaging-provider.ts
 // (MESSAGING_PROVIDER, paso 8.1 -- el momento en que por fin algo la
 // importa de verdad, después de que esta misma regla bloqueó agregarla
-// antes de tiempo). Validar variables que nada consume obliga a
+// antes de tiempo) y src/features/notifications/email/resend-provider.ts
+// (RESEND_API_KEY, paso 9.5). Validar variables que nada consume obliga a
 // rellenarlas con dummies para poder probar cualquier otra cosa, y eso
 // invalida la validación -- no repitas ese error con la próxima variable
 // nueva.
+//
+// RESEND_API_KEY: sin `.default(...)` a propósito, a diferencia de
+// MESSAGING_PROVIDER -- no hay un "modo seguro" tipo `console` para
+// email (mandar de verdad es la única función de este proveedor); dejar
+// que la app arranque sin la key solo pospondría el error hasta el
+// primer envío real, en vez de avisar al arrancar. El paso 9.5 la agrega
+// solo cuando ya está confirmada en `.env.local` -- ver CLAUDE.md >
+// Envío de emails, "cuenta creada a mano, como las de la etapa 0".
 //
 // MESSAGING_PROVIDER: "console" | "manual_link" -- NO incluye "cloud_api"
 // todavía. CloudApiProvider es etapa 13, ni siquiera existe un stub (pedido
@@ -53,6 +62,7 @@ const schema = z.object({
   NEXT_PUBLIC_APP_URL: z.url(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
   MESSAGING_PROVIDER: z.enum(["console", "manual_link"]).default("console"),
+  RESEND_API_KEY: z.string().min(1),
 });
 
 // -----------------------------------------------------------------------
@@ -134,6 +144,7 @@ function parseEnv() {
     // vez de caer al default. `|| undefined` convierte ese vacío en
     // ausencia real, para que sí dispare el default.
     MESSAGING_PROVIDER: process.env.MESSAGING_PROVIDER || undefined,
+    RESEND_API_KEY: process.env.RESEND_API_KEY,
   });
 
   if (!parsed.success) {

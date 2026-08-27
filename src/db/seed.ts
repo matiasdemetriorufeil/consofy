@@ -1474,13 +1474,30 @@ async function main() {
   if (adminUserId) {
     const adminDisplayName =
       process.env.SEED_ADMIN_DISPLAY_NAME ?? "Administrador";
+    // Paso 9.5: app_users.email es NOT NULL (a dónde manda el resumen
+    // diario y las alertas de reclamo urgente por email -- ver
+    // CLAUDE.md > Envío de emails). El seed NO lo resuelve solo contra
+    // Supabase Auth (mismo motivo que no crea el usuario de Auth: ese
+    // paso es manual a propósito) -- lo tipea quien corre el seed, con el
+    // MISMO email que acaba de cargar a mano en el dashboard al crear el
+    // usuario. Falla fuerte y clara si falta, en vez de dejar que el
+    // INSERT reviente con el error genérico de un NOT NULL.
+    const adminEmail = process.env.SEED_ADMIN_EMAIL;
+    if (!adminEmail) {
+      throw new Error(
+        "SEED_ADMIN_USER_ID está seteada pero falta SEED_ADMIN_EMAIL -- app_users.email es obligatoria (paso 9.5). Usá el mismo email con el que creaste el usuario en el dashboard de Supabase Auth.",
+      );
+    }
     await db.insert(schema.appUsers).values({
       id: adminUserId,
       organizationId: organization.id,
       displayName: adminDisplayName,
+      email: adminEmail.toLowerCase(),
       role: "admin",
     });
-    console.log(`app_users: 1 (${adminDisplayName}, ${adminUserId})`);
+    console.log(
+      `app_users: 1 (${adminDisplayName}, ${adminEmail}, ${adminUserId})`,
+    );
   } else {
     console.log(
       "app_users: 0 (SEED_ADMIN_USER_ID no seteada -- ver CLAUDE.md > Datos de prueba (seed) para los pasos de creación manual)",

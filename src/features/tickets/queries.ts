@@ -239,6 +239,51 @@ export async function getAttentionTickets(
     .orderBy(sql`(${tickets.priority} = 'urgent') desc`, asc(lastChangeExpr));
 }
 
+export type TicketReportedRow = {
+  id: string;
+  publicCode: string;
+  title: string;
+  buildingName: string;
+};
+
+// "Reclamos nuevos del día" para el resumen diario por email (paso 9.5) --
+// org-wide (sin buildingId, a diferencia de la mayoría de las consultas de
+// este archivo): el resumen diario no tiene un edificio seleccionado, es
+// un email por organización. `start`/`end` ya vienen resueltos por el
+// caller (zonedDayBoundsToUtc, en la zona horaria de la organización, NO
+// UTC -- mismo criterio que el resto de CLAUDE.md > Convenciones) -- esta
+// función no decide qué es "hoy", solo filtra por el rango que le pasan.
+export async function getTicketsReportedInRange(
+  organizationId: string,
+  start: Date,
+  end: Date,
+): Promise<TicketReportedRow[]> {
+  return db
+    .select({
+      id: tickets.id,
+      publicCode: tickets.publicCode,
+      title: tickets.title,
+      buildingName: buildings.name,
+    })
+    .from(tickets)
+    .innerJoin(
+      buildings,
+      and(
+        eq(buildings.id, tickets.buildingId),
+        eq(buildings.organizationId, tickets.organizationId),
+      ),
+    )
+    .where(
+      and(
+        eq(tickets.organizationId, organizationId),
+        isNull(tickets.deletedAt),
+        gte(tickets.reportedAt, start),
+        lte(tickets.reportedAt, end),
+      ),
+    )
+    .orderBy(asc(tickets.reportedAt));
+}
+
 export type BuildingTicketRow = {
   id: string;
   publicCode: string;

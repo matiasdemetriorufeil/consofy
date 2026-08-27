@@ -1,4 +1,12 @@
-import { pgEnum, pgTable, text, unique, uuid } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import {
+  check,
+  pgEnum,
+  pgTable,
+  text,
+  unique,
+  uuid,
+} from "drizzle-orm/pg-core";
 
 import { denyAnonAuthenticated, timestamps } from "./_shared";
 import { organizations } from "./organizations";
@@ -21,6 +29,24 @@ export const appUsers = pgTable(
       .references(() => organizations.id, { onDelete: "restrict" }),
     displayName: text("display_name").notNull(),
     role: appUserRole("role").notNull().default("admin"),
+    // Paso 9.5 -- a dónde mandar el resumen diario y las alertas de
+    // reclamo urgente por email. Decisión tomada CON LA PERSONA: se
+    // GUARDA acá, no se resuelve contra Supabase Auth en cada envío (ver
+    // CLAUDE.md > Envío de emails). Mismo criterio de tipo/constraint que
+    // `people.email` (normalizado a minúsculas, con el mismo CHECK) --
+    // pero NOT NULL acá, a propósito, a diferencia de `people.email`: el
+    // email de un vecino es un dato opcional de contacto; el de un
+    // administrador es su credencial de login en Supabase Auth, así que
+    // SIEMPRE existe de verdad para cualquier fila real de esta tabla (ver
+    // el comentario de más abajo sobre por qué no hay FK a `auth.users`) --
+    // dejar la columna nullable acá solo invitaría a que el envío de
+    // emails "funcione a veces" según si alguien se olvidó de cargarla.
+    // Agregada en dos migraciones (columna nullable primero, backfill,
+    // recién después `SET NOT NULL`) porque ya existía al menos una fila
+    // real en desarrollo sin este dato -- ver el reporte del paso 9.5 para
+    // el script de backfill usado (Supabase Admin API, mismo patrón que
+    // las altas/bajas de cuentas de prueba).
+    email: text("email").notNull(),
     ...timestamps(),
   },
   (t) => [
@@ -30,6 +56,7 @@ export const appUsers = pgTable(
     // dejando de ser texto libre) va a necesitar esta constraint -- ver
     // CLAUDE.md > Integridad entre organizaciones.
     unique("app_users_id_organization_id_unique").on(t.id, t.organizationId),
+    check("app_users_email_lowercase", sql`${t.email} = lower(${t.email})`),
     denyAnonAuthenticated(),
   ],
 ).enableRLS();

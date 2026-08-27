@@ -11,6 +11,7 @@ import {
   unitBelongsToBuilding,
 } from "@/features/people/queries";
 import { PHONE_UNIQUE_CONSTRAINT } from "@/features/people/constraints";
+import { sendUrgentTicketAlertEmail } from "@/features/notifications/email/send-urgent-ticket-alert-email";
 import { insertNotification } from "@/features/notifications/create-notification";
 import {
   buildNewTicketNotification,
@@ -261,6 +262,23 @@ async function attemptCreateTicket(
     description: data.description,
     reportedAt: ticket.reportedAt,
   });
+
+  // Alerta inmediata por email (paso 9.5, punto 4) -- mismo evento que ya
+  // dispara la notificación `urgent_ticket` del centro de notificaciones
+  // (paso 9.4), mismo lugar (después del commit, nunca adentro de la
+  // transacción) y mismo motivo que detectAndFlagSimilarTickets arriba:
+  // sendUrgentTicketAlertEmail() ya garantiza con su propio try/catch que
+  // nunca tira (ver ese archivo) -- el alta del reclamo no puede depender
+  // de que Resend responda.
+  if (category.defaultPriority === "urgent") {
+    await sendUrgentTicketAlertEmail({
+      organizationId: building.organizationId,
+      buildingName: building.name,
+      ticketId: ticket.id,
+      ticketTitle,
+      ticketPublicCode: ticket.publicCode,
+    });
+  }
 
   return ticket;
 }

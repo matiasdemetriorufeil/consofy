@@ -239,6 +239,20 @@
       "when": 1787838344328,
       "tag": "0033_aromatic_grey_gargoyle",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1787842526658,
+      "tag": "0034_new_daimon_hellstrom",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1787842589480,
+      "tag": "0035_dear_joshua_kane",
+      "breakpoints": true
     }
   ]
 }

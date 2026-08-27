@@ -5895,6 +5895,203 @@ reclamos de prueba con texto parecido, también dadas de baja. Confirmado
 por SQL al final: cero reclamos de prueba activos. Cuenta de administrador
 de prueba eliminada por completo (Auth + `app_users`).
 
+## Envío de emails al administrador (paso 9.5)
+
+Red de seguridad ante que un vecino no llegue a mandar el WhatsApp del
+handoff (riesgo R8 del plan, ver CLAUDE.md > Evento de handoff): alerta
+inmediata de reclamo urgente + resumen diario, por email, vía Resend.
+
+### Los dos bloqueos previos -- resueltos, no asumidos
+
+Antes de escribir código se verificaron los dos puntos que el enunciado
+pidió chequear explícitamente, los dos dieron negativo la primera vez que
+se preguntó (ver el reporte de esa vuelta) y se resolvieron recién después,
+CON LA PERSONA:
+
+1. **`RESEND_API_KEY`:** no existía. La cuenta de Resend se creó a mano
+   (mismo criterio que las cuentas de la etapa 0 -- no es algo que Claude
+   Code pueda resolver solo) y la key se agregó a `.env.local` +
+   `.env.example` (sin valor, como el resto de las claves ahí) recién
+   cuando ya estaba confirmada.
+2. **Email del administrador:** no había ningún campo -- ni en
+   `organizations` ni en `app_users`, y `session.user.email` de Supabase
+   Auth solo existe dentro de una sesión activa, inalcanzable tanto desde
+   `createTicketAction` (pública, sin sesión) como desde el futuro cron de
+   9.6 (sin request de por medio). Decisión tomada CON LA PERSONA: se
+   agregó `app_users.email` (columna propia, NOT NULL, ver el comentario
+   completo en `src/db/schema/app-users.ts`) -- se GUARDA ahí, no se
+   resuelve contra Auth en cada envío.
+
+### `app_users.email` -- columna nueva, backfill, y por qué en dos migraciones
+
+Ya existía al menos una fila real en la base de desarrollo sin este dato
+(el admin de prueba del seed), así que agregar la columna directo como
+NOT NULL hubiera roto esa fila. Dos migraciones, no una:
+
+1. `0034_new_daimon_hellstrom.sql` -- columna `email` NULLABLE +
+   `CHECK (email = lower(email))` (mismo criterio que `people.email`).
+2. Backfill de una sola vez, script descartable (mismo patrón ya usado
+   para altas/bajas de cuentas de prueba): por cada `app_users` con
+   `email IS NULL`, `supabaseAdmin.auth.admin.getUserById(id)` (Admin API,
+   **service-role key usada acá** -- único uso de esta ronda) trae el
+   email real de Supabase Auth y lo escribe. Verificado por SQL antes de
+   seguir: `0` filas con `email IS NULL` después de correrlo.
+3. `0035_dear_joshua_kane.sql` -- recién ahí `ALTER COLUMN email SET NOT
+NULL`, con la garantía de que ninguna fila existente iba a romper la
+   migración.
+
+`app_users.email` es NOT NULL, a diferencia de `people.email` (nullable):
+decisión técnica, no una copia ciega del criterio de `people` -- el email
+de un vecino es un dato opcional de contacto; el de un administrador es su
+credencial de login en Supabase Auth, así que siempre existe de verdad
+para cualquier fila real de esta tabla. Ver también CLAUDE.md > Datos de
+prueba (seed) para el cambio correspondiente en el alta manual de un
+admin (`SEED_ADMIN_EMAIL`, y la nota de que cualquier alta real, no solo
+la del seed, tiene que cargar este campo de ahora en más -- señalado, no
+resuelto con una pantalla nueva, eso no es parte de este paso).
+
+### `EmailProvider` -- aislado en su propio módulo, mismo criterio que `MessagingProvider`
+
+`src/features/notifications/email/`:
+
+- `email-provider.ts` -- la interfaz (`EmailMessage`/`EmailSendResult`/
+  `EmailProvider`), sin SDK de Resend adentro. A diferencia de
+  `MessagingProvider` (paso 8.1), no tiene un `id` por implementación ni
+  una variable de entorno que elija entre varias -- hoy solo existe
+  Resend, y no hay (todavía) un caso de uso real de "modo seguro sin
+  mandar nada" como sí lo tenía WhatsApp (`ConsoleProvider`): el dominio
+  de prueba de Resend ya cumple ese rol en la práctica (ver más abajo).
+- `resend-provider.ts` -- la única implementación real. Remitente
+  hardcodeado (`Consofy <onboarding@resend.dev>`, dominio de prueba de
+  Resend, sin dominio propio verificado -- no pedido en este paso); único
+  lugar que cambia el día que se verifique un dominio propio.
+- `get-email-provider.ts` -- factory de un solo `case`, mismo motivo que
+  `getMessagingProvider()`: ningún caller importa `resendProvider`
+  directo, así que agregar un segundo proveedor real el día de mañana es
+  tocar solo este archivo.
+- `get-admin-emails.ts` -- a quién avisar: TODOS los `app_users.email` de
+  la organización, no "el primero" ni "el más viejo". **Decisión propia,
+  señalada, no de negocio:** `app_users.role` solo tiene un valor hoy
+  ("admin"), así que cualquier fila de la organización es, en los hechos,
+  un administrador -- no hay ninguna señal en el esquema para elegir uno
+  solo. En desarrollo esto es siempre 0 o 1 fila (ver seed.ts), pero la
+  función no lo asume: si una organización real llega a tener varios
+  administradores, todos reciben todo.
+
+### Contenido -- funciones puras, testeadas (`email-content.ts`)
+
+Mismo criterio que `notification-content.ts` (paso 9.4): reciben valores
+YA resueltos (URLs absolutas ya armadas con `NEXT_PUBLIC_APP_URL`, fechas
+ya formateadas en la zona de la organización), nunca leen `env` ni la hora
+actual por su cuenta.
+
+- `buildUrgentTicketAlertEmail({ buildingName, ticketTitle,
+ticketPublicCode, ticketUrl })` -- mismo evento que ya dispara la
+  notificación `urgent_ticket` del centro de notificaciones (paso 9.4),
+  canal distinto, mismo hecho de negocio.
+- `buildDailySummaryEmail({ organizationName, dateLabel, appUrl,
+newTickets, urgentUnresolvedTickets, remindersNeedingAttention })` --
+  **qué incluye es criterio propio, señalado, no una decisión de negocio
+  ya tomada** (el enunciado pidió explícitamente usar criterio y señalar
+  en el reporte):
+  - Reclamos nuevos del día (`reportedAt` dentro de "hoy" en la zona de
+    la organización).
+  - Reclamos urgentes sin resolver -- **no acotado a los de HOY**: un
+    urgente de ayer sin atender sigue siendo lo más importante que el
+    resumen puede decir; limitarlo a "hoy" hubiera escondido justo el
+    caso más grave.
+  - Recordatorios que necesitan atención -- overdue Y upcoming (semáforo
+    del paso 9.2), **no solo "upcoming" literal** pese a que el enunciado
+    decía "próximos a vencer": un recordatorio ya vencido es información
+    más urgente todavía, dejarlo afuera por seguir la letra exacta del
+    enunciado habría sido peor que el criterio propio.
+- HTML con estilos inline (obligatorio para email -- la mayoría de los
+  clientes ignora `<style>` en el `<head>` y ninguno entiende custom
+  properties de CSS), mismos colores que `globals.css` copiados literales
+  (`--primary #14484f`, `--urgente #b42318`, `--ink`/`--ink-muted`/
+  `--border`/`--canvas`) y pila tipográfica segura (Arial/Helvetica) con
+  Archivo/Inter como preferencia -- la mayoría de los clientes de email no
+  carga fuentes de Google. "Sin novedades para hoy." sin admiración
+  (CLAUDE.md > Voz y escritura) cuando las tres listas vienen vacías.
+- 7 tests (`email-content.test.ts`): subject exacto de los dos emails,
+  contenido de cada lista, el caso "sin novedades", y que vencidos/
+  próximos se distingan en el resumen.
+
+### Dónde se llama cada una
+
+- **Alerta de reclamo urgente:** `sendUrgentTicketAlertEmail()`
+  (`email/send-urgent-ticket-alert-email.ts`), llamada dentro de
+  `attemptCreateTicket()` (`public-form/actions.ts`), DESPUÉS de que la
+  transacción del ticket ya hizo commit -- mismo lugar y mismo motivo que
+  `detectAndFlagSimilarTickets()` (paso 7.2): un email que tarda o falla
+  no puede demorar ni arriesgar el alta del reclamo, que ya es un hecho
+  consumado para cuando esto corre. Gatillada por
+  `category.defaultPriority === "urgent"` -- el mismo dato que ya decide
+  `urgent_ticket` vs. `new_ticket` en el centro de notificaciones (9.4).
+- **Resumen diario:** `sendDailySummaryEmail(organizationId)`
+  (`email/send-daily-summary-email.ts`) -- hace TODO lo necesario para
+  mandar el resumen de UNA organización (junta los datos, arma el
+  contenido, resuelve a quién mandarlo, lo manda). **NO conectada a
+  ningún disparador automático** -- pedido explícito del enunciado, mismo
+  patrón que quedó pendiente con `ticket_overdue`/`reminder_due` en la
+  corrección del 9.4 (ver esa sección, "Qué falta para que se disparen
+  solos"). El disparo diario es el cron del paso 9.6: cuando exista, llama
+  a esta función una vez por organización activa, sin tener que armar
+  nada más.
+
+### Manejo de errores -- Resend nunca puede romper el alta del reclamo (punto 7)
+
+Mismo patrón que `detectAndFlagSimilarTickets` (paso 7.2): TODO el cuerpo
+de `sendUrgentTicketAlertEmail`/`sendDailySummaryEmail` vive adentro de un
+try/catch que loguea (`console.error`, con el nombre de la función entre
+corchetes) y nunca re-lanza -- ninguna de las dos funciones tiene un tipo
+de resultado que el caller necesite inspeccionar, porque no hay ninguna
+segunda escritura que dependa de si el envío salió bien.
+
+**Verificado en la práctica, no solo por lectura del código:** el primer
+intento real de la verificación de este paso usó el email ya backfillado
+del admin real de dev (`prueba-consofy-panel@example.com`) y Resend lo
+RECHAZÓ (`Invalid 'to' field. Please use our testing email address
+instead of domains like 'example.com'` -- restricción propia de cuentas
+sin dominio verificado, no un bug de este código). El reclamo (`TC-2026-
+1820`) se creó igual, sin ningún error visible para el vecino -- prueba
+real de la garantía, no solo teórica: apareció exactamente el escenario
+que el punto 7 pedía cubrir, sin haberlo buscado a propósito.
+
+### Cómo se probó -- reclamo urgente real, confirmado en el dashboard/logs de Resend
+
+Pedido explícito del enunciado: como el dominio de prueba no tiene una
+casilla real donde mirar, la confirmación de entrega se hizo contra la
+API de Resend (`resend.emails.list()`), no abriendo un email.
+
+1. Reclamo urgente real por `/r/[token]` (categoría "Ascensores", Torre
+   Central) con el email del admin todavía en `prueba-consofy-
+panel@example.com` -- **falló** con el error de dominio no verificado
+   de arriba (ver el apartado de manejo de errores). El ticket se creó
+   igual (`TC-2026-1820`), confirmando la garantía del punto 7.
+2. `app_users.email` de esa organización actualizado TEMPORALMENTE a
+   `delivered@resend.dev` (dirección oficial de prueba de Resend, entrega
+   simulada sin necesitar dominio verificado -- a diferencia de cualquier
+   `@example.com`).
+3. Nuevo reclamo urgente real por el mismo flujo (`TC-2026-1822`).
+   `resend.emails.list()` mostró la fila real: `to:
+["delivered@resend.dev"]`, `from: "Consofy <onboarding@resend.dev>"`,
+   `subject: "Reclamo urgente en Torre Central"`, **`last_event:
+"delivered"`** -- confirmación real de entrega, no solo de que la
+   llamada a la API no tiró error.
+4. `app_users.email` revertido al valor real backfillado
+   (`prueba-consofy-panel@example.com`), confirmado por SQL.
+
+**Limpieza:** los 3 reclamos de prueba generados en esta verificación
+(uno del intento fallido, dos del exitoso -- un tercero salió de un
+comando que el propio operador interrumpió a mitad de camino pero que ya
+había disparado el envío antes de la interrupción, visible como una
+segunda fila `delivered` en el log de Resend con timestamp anterior),
+sus 3 personas, y las 3 notificaciones `urgent_ticket` correspondientes,
+dados de baja lógica (`deleted_at`). Confirmado por SQL al final: `0`
+reclamos de prueba activos para "9.5", y el email del admin real de vuelta
+en su valor correcto.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
@@ -6383,10 +6580,25 @@ no por script). Pasos para crear uno:
    depender de un mail de confirmación.
 3. Copiar el **User UID** que Supabase le asigna (aparece en la lista de
    usuarios y en el detalle del usuario).
-4. Correr el seed con `SEED_ADMIN_USER_ID=<ese uuid>` (opcionalmente
+4. Correr el seed con `SEED_ADMIN_USER_ID=<ese uuid>`, **`SEED_ADMIN_EMAIL=<el
+mismo email cargado en el paso 2>`** (opcionalmente
    `SEED_ADMIN_DISPLAY_NAME="Nombre"`, default `"Administrador"`) además de
    `SEED_CONFIRM`. Sin `SEED_ADMIN_USER_ID`, el seed corre igual pero no
-   crea la fila en `app_users` (lo avisa por consola, no falla).
+   crea la fila en `app_users` (lo avisa por consola, no falla). Con
+   `SEED_ADMIN_USER_ID` pero SIN `SEED_ADMIN_EMAIL`, el seed falla fuerte
+   con un mensaje explícito (`app_users.email` es NOT NULL desde el paso
+   9.5, ver CLAUDE.md > Envío de emails) en vez de dejar que reviente con
+   el error genérico de Postgres.
+
+**Importante desde el paso 9.5, más allá del seed:** cualquier alta manual
+de un administrador (dev o real) tiene que cargar `email` en `app_users`
+además de `id`/`displayName`/`role` -- es el dato del que dependen el
+resumen diario y la alerta de reclamo urgente por email (ver CLAUDE.md >
+Envío de emails). Este paso NO construyó una pantalla de alta de
+administradores (no era parte del alcance) -- el proceso sigue siendo
+100% manual, esto es solo un campo más que ese proceso manual tiene que
+cargar de ahora en más, señalado acá para que no se pierda el día que
+alguien repita estos pasos sin releer este comentario.
 
 ## Pendientes
 
