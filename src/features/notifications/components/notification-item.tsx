@@ -2,11 +2,23 @@ import { Check } from "lucide-react";
 import Link from "next/link";
 
 import { RelativeDate } from "@/components/relative-date";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
-import { NOTIFICATION_TYPE_LABEL } from "../notification-type";
+import {
+  NOTIFICATION_TYPE_ACCENT,
+  NOTIFICATION_TYPE_LABEL,
+} from "../notification-type";
 import type { NotificationRow } from "../queries";
+
+// Mismos dos tokens que PriorityBadge/ReminderUrgencyBadge (ver el
+// comentario de NOTIFICATION_TYPE_ACCENT en notification-type.ts) --
+// ningún color nuevo definido acá.
+const ACCENT_CLASS = {
+  urgente: "bg-urgente/10 text-urgente",
+  alta: "bg-alta/10 text-alta",
+} as const;
 
 // Una fila del centro de notificaciones (paso 9.3). `<Link>` y el botón de
 // "marcar como leída" son HERMANOS, nunca uno anidado dentro del otro --
@@ -27,6 +39,7 @@ export function NotificationItem({
   isPending: boolean;
 }) {
   const isUnread = !notification.readAt;
+  const accent = NOTIFICATION_TYPE_ACCENT[notification.type];
 
   const content = (
     <div className="min-w-0 flex-1">
@@ -34,10 +47,19 @@ export function NotificationItem({
         {notification.title}
       </p>
       <p className="text-ink-muted line-clamp-2 text-sm">{notification.body}</p>
-      <p className="text-ink-muted mt-0.5 text-xs">
+      <p className="text-ink-muted mt-1 flex items-center gap-1.5 text-xs">
         <RelativeDate date={notification.createdAt} timezone={timezone} />
-        {" · "}
-        {NOTIFICATION_TYPE_LABEL[notification.type]}
+        <span aria-hidden="true">·</span>
+        {accent ? (
+          <Badge
+            variant="outline"
+            className={cn("font-body border-transparent", ACCENT_CLASS[accent])}
+          >
+            {NOTIFICATION_TYPE_LABEL[notification.type]}
+          </Badge>
+        ) : (
+          NOTIFICATION_TYPE_LABEL[notification.type]
+        )}
       </p>
     </div>
   );

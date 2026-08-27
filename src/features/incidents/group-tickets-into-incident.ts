@@ -3,7 +3,16 @@ import "server-only";
 import { and, eq, inArray, isNull } from "drizzle-orm";
 
 import { db } from "@/db";
-import { buildings, categories, incidents, tickets } from "@/db/schema";
+import {
+  buildings,
+  categories,
+  incidents,
+  notifications,
+  tickets,
+  units,
+} from "@/db/schema";
+import { insertNotification } from "@/features/notifications/create-notification";
+import { buildIncidentMultiUnitNotification } from "@/features/notifications/notification-content";
 
 // Tipo del cliente transaccional que arma db.transaction() -- extraído del
 // propio tipo de la función en vez de importar un tipo de drizzle-orm a
@@ -60,6 +69,108 @@ async function buildIncidentTitle(
     .from(categories)
     .where(eq(categories.id, categoryId));
   return `${category?.name ?? "Reclamos"} en ${building?.name ?? "el edificio"}`;
+}
+
+// Evento 4 de la corrección de 9.4 (ver CLAUDE.md > Generación automática
+// de notificaciones): un incidente que pasa a tener tickets de 2+ unidades
+// DISTINTAS genera una notificación -- llamada al final de cada rama de
+// applyIncidentGrouping() que puede haber sumado un ticket nuevo a un
+// incidente (casos 1, 2 y 4; nunca en el caso 3, que es no-op explícito).
+//
+// Unidad = mismo dedupe que deriveAffectedParties() (paso 7.4, ya usado en
+// la vista de detalle del incidente): por el label RENDERIZADO (tower-piso-
+// número si hay unit_id, o unit_label_raw si no) -- mismo criterio en los
+// dos lugares que cuentan "unidades afectadas" de un incidente, no dos
+// definiciones distintas de la misma idea.
+//
+// Idempotencia -- criterio elegido (pedido explícito: "algo que puedas
+// chequear contra las notificaciones ya existentes para ese incidente", sin
+// inventar un mecanismo más complejo): antes de insertar, se chequea si YA
+// existe una notificación `type: "incident_multi_unit"` con
+// `related_incident_id` = este incidente. Si existe, no se inserta una
+// segunda -- así, seguir agregando tickets a un incidente que ya cruzó el
+// umbral (ej. un tercer, cuarto ticket) no genera un aviso nuevo por cada
+// uno. No hace falta una columna ni una tabla nueva para esto: la propia
+// tabla notifications ya es la fuente de verdad de "¿esto ya se avisó?".
+// Por qué esto es SEGURO sin un compare-and-swap explícito (a diferencia de
+// resolveIncidentAction, paso 7.5): applyIncidentGrouping() SIEMPRE corre
+// dentro de la transacción de resolveSimilarityCandidateAction, que ya trae
+// su propio compare-and-swap contra el candidato (status='pending', ver
+// tickets/actions.ts) -- dos clicks sobre el MISMO candidato no pueden
+// ejecutar esta función dos veces. Dos candidatos DISTINTOS que ambos
+// empujan al mismo incidente sobre el umbral, casi al mismo tiempo, sí
+// podrían en teoría correr esta consulta concurrentemente antes de que
+// cualquiera de las dos inserte -- una ventana angosta y de bajísima
+// probabilidad (dos resoluciones manuales de candidatos de similaridad
+// distintos, sobre el mismo incidente, en el mismo instante), que en el
+// peor caso deja DOS notificaciones en vez de una. Se documenta acá en vez
+// de resolverse con un índice único: agregar esa constraint por un caso tan
+// angosto sería el mecanismo complejo que el enunciado pidió explícitamente
+// evitar si no hace falta.
+async function maybeNotifyMultiUnitIncident(
+  tx: DbTransaction,
+  organizationId: string,
+  incidentId: string,
+  incidentTitle: string,
+): Promise<void> {
+  const ticketRows = await tx
+    .select({
+      unitTower: units.tower,
+      unitFloor: units.floor,
+      unitNumber: units.number,
+      unitLabelRaw: tickets.unitLabelRaw,
+    })
+    .from(tickets)
+    .leftJoin(
+      units,
+      and(
+        eq(units.id, tickets.unitId),
+        eq(units.organizationId, tickets.organizationId),
+      ),
+    )
+    .where(
+      and(
+        eq(tickets.incidentId, incidentId),
+        eq(tickets.organizationId, organizationId),
+        isNull(tickets.deletedAt),
+      ),
+    );
+
+  const distinctUnitLabels = new Set<string>();
+  for (const row of ticketRows) {
+    const label = row.unitTower
+      ? `${row.unitTower} - ${row.unitFloor}°${row.unitNumber}`
+      : row.unitFloor && row.unitNumber
+        ? `${row.unitFloor}°${row.unitNumber}`
+        : row.unitLabelRaw;
+    if (label) {
+      distinctUnitLabels.add(label);
+    }
+  }
+
+  if (distinctUnitLabels.size < 2) {
+    return;
+  }
+
+  const [alreadyNotified] = await tx
+    .select({ id: notifications.id })
+    .from(notifications)
+    .where(
+      and(
+        eq(notifications.relatedIncidentId, incidentId),
+        eq(notifications.type, "incident_multi_unit"),
+      ),
+    )
+    .limit(1);
+  if (alreadyNotified) {
+    return;
+  }
+
+  await insertNotification(tx, {
+    organizationId,
+    relatedIncidentId: incidentId,
+    ...buildIncidentMultiUnitNotification({ incidentId, incidentTitle }),
+  });
 }
 
 // Aplica la agrupación en incidentes que dispara "Agrupar" (paso 7.4) --
@@ -185,6 +296,13 @@ export async function applyIncidentGrouping(
         ),
       );
 
+    await maybeNotifyMultiUnitIncident(
+      tx,
+      organizationId,
+      winner.id,
+      winner.title,
+    );
+
     return {
       events: affectedTickets.map((t) => ({
         organizationId,
@@ -226,6 +344,13 @@ export async function applyIncidentGrouping(
           eq(tickets.organizationId, organizationId),
         ),
       );
+
+    await maybeNotifyMultiUnitIncident(
+      tx,
+      organizationId,
+      incident.id,
+      incident.title,
+    );
 
     return {
       events: [
@@ -274,6 +399,13 @@ export async function applyIncidentGrouping(
         eq(tickets.organizationId, organizationId),
       ),
     );
+
+  await maybeNotifyMultiUnitIncident(
+    tx,
+    organizationId,
+    newIncident.id,
+    newIncident.title,
+  );
 
   return {
     events: [ticketA, ticketB].map((t) => ({

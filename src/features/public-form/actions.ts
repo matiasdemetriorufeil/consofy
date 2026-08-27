@@ -11,6 +11,11 @@ import {
   unitBelongsToBuilding,
 } from "@/features/people/queries";
 import { PHONE_UNIQUE_CONSTRAINT } from "@/features/people/constraints";
+import { insertNotification } from "@/features/notifications/create-notification";
+import {
+  buildNewTicketNotification,
+  buildUrgentTicketNotification,
+} from "@/features/notifications/notification-content";
 import { detectAndFlagSimilarTickets } from "@/features/tickets/detect-similar-tickets-on-create";
 import { getClientIp } from "@/lib/request-ip";
 import { UNIQUE_VIOLATION, unwrapPostgresError } from "@/lib/postgres-errors";
@@ -201,6 +206,38 @@ async function attemptCreateTicket(
       actorType: "neighbor",
       actorLabel: [data.firstName, data.lastName].filter(Boolean).join(" "),
       payload: { source: "public_form" },
+    });
+
+    // Notificación para el panel (paso 9.4) -- DENTRO de esta misma
+    // transacción, no después del commit como detectAndFlagSimilarTickets
+    // más abajo: acá sí es correcto que un rollback (ej. la carrera de
+    // teléfono, ver isPhoneRaceError) se lleve la notificación puesta con
+    // el resto -- si el reintento de attemptCreateTicket vuelve a pasar
+    // por acá, es porque este ticket nunca llegó a existir de verdad, así
+    // que tampoco debería quedar una notificación apuntando a él.
+    //
+    // UNA sola notificación por reclamo, nunca dos: si la prioridad (que
+    // sale de category.defaultPriority, no del formulario -- paso 5.2, "sin
+    // prioridad en el formulario público") es "urgent", esta rama reemplaza
+    // a la genérica en vez de sumarse a ella -- ver el comentario de
+    // buildUrgentTicketNotification (notification-content.ts) para por qué
+    // es un type de enum propio y no new_ticket con otro texto.
+    const notificationContent =
+      category.defaultPriority === "urgent"
+        ? buildUrgentTicketNotification({
+            ticketId: ticket.id,
+            buildingName: building.name,
+            ticketTitle,
+          })
+        : buildNewTicketNotification({
+            ticketId: ticket.id,
+            buildingName: building.name,
+            ticketTitle,
+          });
+    await insertNotification(tx, {
+      organizationId: building.organizationId,
+      relatedTicketId: ticket.id,
+      ...notificationContent,
     });
 
     return ticket;

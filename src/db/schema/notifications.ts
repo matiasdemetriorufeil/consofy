@@ -15,16 +15,34 @@ import { organizations } from "./organizations";
 import { reminders } from "./reminders";
 import { tickets } from "./tickets";
 
-// Lista mínima ligada a las tres columnas related_*_id de abajo, no el
-// listado completo del paso 9.4 (todavía no definido en este punto del
-// plan) -- inventar ahora los casos exactos de un paso futuro sería
-// modelar sobre una especificación que no existe. Postgres permite
-// ALTER TYPE ... ADD VALUE más adelante sin reescribir la tabla, así que
-// ampliar esta lista en 9.4 es barato.
+// Ampliado en 9.4 (corrección de alcance, ver CLAUDE.md > Generación
+// automática de notificaciones) a los 5 eventos reales del plan --
+// `ALTER TYPE ... ADD VALUE` es barato, como ya anticipaba este comentario
+// desde el paso 9.3.
+//
+// - new_ticket / urgent_ticket: dos tipos separados para el mismo evento
+//   ("se creó un reclamo") en vez de uno solo con contenido condicional --
+//   ver el razonamiento en CLAUDE.md, es una decisión técnica (mantener
+//   `type` como señal confiable de qué clase de notificación es cada fila,
+//   sin tener que mirar el título) no de negocio.
+// - ticket_overdue: reclamo abierto hace más de N días (paso 9.4, función
+//   pura lista; el disparo automático es del cron de 9.6, ver CLAUDE.md).
+// - reminder_due: ya existía desde 9.3 sin generador; ahora tiene su
+//   función de contenido (9.4), pero el disparo sigue siendo del cron de
+//   9.6, igual que ticket_overdue.
+// - incident_updated / incident_multi_unit: mismo criterio que new_ticket/
+//   urgent_ticket -- dos eventos reales distintos sobre un incidente
+//   (se resolvió vs. pasó a afectar varias unidades), cada uno con su
+//   propio type para poder chequear idempotencia sin ambigüedad (ver el
+//   comentario de maybeNotifyMultiUnitIncident en
+//   group-tickets-into-incident.ts).
 export const notificationType = pgEnum("notification_type", [
   "new_ticket",
+  "urgent_ticket",
   "reminder_due",
   "incident_updated",
+  "incident_multi_unit",
+  "ticket_overdue",
   "system",
 ]);
 

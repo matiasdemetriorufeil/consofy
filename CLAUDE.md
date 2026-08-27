@@ -5429,6 +5429,472 @@ usuario de prueba dedicado:
 ("Todavía no tenés notificaciones.") después. Cuenta de prueba dedicada
 eliminada por completo (Auth + `app_users`).
 
+## Generación automática de notificaciones (paso 9.4)
+
+Primer generador real de filas en `notifications` -- hasta acá (paso 9.3)
+la tabla se llenaba solo a mano.
+
+### Alcance real, corregido -- el primer reporte de este paso no coincidía con el plan
+
+La primera pasada de este paso interpretó el enunciado como pidiendo
+**dos** eventos nomás (`new_ticket`, `incident_updated`), señalando
+`reminder_due` como "no pedido acá, depende de un cron". Eso no era lo que
+el plan real pedía: el plan tiene **cinco** eventos para esta etapa --
+reclamo nuevo, reclamo urgente, reclamo sin resolver hace más de N días,
+recordatorio próximo a vencer, e incidente que afecta a varias unidades.
+Corregido con la persona en una vuelta posterior. Estado real, por evento:
+
+1. **`new_ticket`** (reclamo nuevo) -- construido en la primera pasada,
+   sigue igual.
+2. **`urgent_ticket`** (reclamo urgente) -- agregado en la corrección, ver
+   más abajo.
+3. **`ticket_overdue`** (reclamo sin resolver hace más de N días) --
+   función pura de calificación + contenido lista y testeada; el disparo
+   automático NO está conectado todavía, es alcance del cron del paso 9.6
+   (ver más abajo, "Qué falta para que 2 y 3 se disparen solos").
+4. **`reminder_due`** (recordatorio próximo a vencer) -- función pura de
+   contenido lista y testeada; mismo caso que el punto 3, disparo
+   automático pendiente del cron de 9.6.
+5. **`incident_multi_unit`** (incidente que afecta a varias unidades) --
+   agregado en la corrección, ver más abajo. A diferencia de 3 y 4, este
+   SÍ es un evento real disparado por una Server Action -- no depende de
+   ningún cron.
+
+**`incident_updated` (incidente resuelto) no es uno de los cinco eventos
+del plan -- se mantiene igual, decisión tomada CON LA PERSONA, no propia.**
+La primera pasada de este paso lo había agregado por iniciativa propia
+(mismo criterio que ya generaba `new_ticket`, aplicado también a la única
+transición de estado real que tenía `incidents` en ese momento). Al
+corregir el alcance, la persona pidió explícitamente mantenerlo tal cual
+está, además de sumar los cinco del plan -- no reemplazarlo. Sigue siendo
+la única transición de estado real que existe para un incidente hoy
+(`incidents.status` es `open`/`resolved`, ver `src/db/schema/incidents.ts`,
+y `resolveIncidentAction` es la única Server Action que lo cambia).
+
+**`type: "system"` sigue sin usarse** -- sin un caso de uso real, como ya
+documentaba el paso 9.3.
+
+Los cinco/seis types nuevos que necesitó esta corrección
+(`urgent_ticket`, `ticket_overdue`, `incident_multi_unit` -- `reminder_due`
+ya existía desde 9.3 sin generador) se agregaron al enum
+`notification_type` con `ALTER TYPE ... ADD VALUE`
+(`src/db/migrations/0033_aromatic_grey_gargoyle.sql`), mismo mecanismo ya
+usado varias veces en el proyecto para `ticket_event_type` (migraciones
+0025/0027/0028/0029) -- no hace falta reescribir la tabla.
+
+**Contenido de cada notificación, en funciones puras separadas y
+testeadas** (`src/features/notifications/notification-content.ts`, mismo
+criterio que `buildIncidentTitle()` en `group-tickets-into-incident.ts`,
+paso 7.4: separar "qué dice" de "cuándo se genera"):
+
+- `buildNewTicketNotification({ ticketId, buildingName, ticketTitle })` --
+  título `"Nuevo reclamo en {edificio}"`, body el título corto del
+  reclamo (`deriveTicketTitle()`, ya existente del paso 5.5), link
+  `/panel/tickets/{id}`.
+- `buildUrgentTicketNotification({ ticketId, buildingName, ticketTitle })`
+  (corrección de 9.4) -- título `"Reclamo urgente en {edificio}"`, mismo
+  body/link que la anterior. Type de enum PROPIO (`urgent_ticket`), no
+  `new_ticket` con contenido condicional -- **decisión técnica, no de
+  negocio** (así lo pidió el enunciado de la corrección). Motivo: `type`
+  es la única columna que la UI usa para decidir la etiqueta chica de cada
+  fila (`NOTIFICATION_TYPE_LABEL`, paso 9.3) -- si un reclamo urgente
+  insertara `type: "new_ticket"` con otro texto, esa columna dejaría de
+  alcanzar sola para distinguir "qué clase de aviso es este", y cualquier
+  filtro futuro por tipo tendría que parsear el título. El costo de un
+  valor de enum más es bajo frente a esa ambigüedad permanente. Sigue
+  siendo UNA sola notificación por reclamo creado: el caller
+  (`createTicketAction`) elige esta función O `buildNewTicketNotification`
+  según `category.defaultPriority === "urgent"` (la prioridad sale de la
+  categoría, no del formulario público -- paso 5.2), nunca las dos.
+- `ticketQualifiesAsOverdue({ status, reportedAt }, now, thresholdDays?)` +
+  `buildTicketOverdueNotification({ ticketId, buildingName, ticketTitle })`
+  (corrección de 9.4, punto 3 del enunciado de la corrección) -- "abierto"
+  = ni `resolved` ni `closed` ni `discarded` (reusa `TicketStatusValue` de
+  `ticket-actions-schema.ts`, no un tipo propio); "más de N días" = la
+  edad de `reportedAt` respecto de `now` (parámetro explícito, nunca `new
+Date()` interno, para que sea determinística y testeable -- mismo
+  criterio que `getReminderUrgency`). `TICKET_OVERDUE_THRESHOLD_DAYS = 3`
+  -- **decisión de PRODUCTO tomada explícitamente por la persona** al
+  pedir esta corrección ("reclamo sin resolver hace más de 3 días"), no
+  elegida por criterio propio. Distinta de `STALE_TICKET_DAYS`
+  (`tickets/queries.ts`, = 5): esa mide días desde el ÚLTIMO CAMBIO DE
+  ESTADO para la sección "atención inmediata" del dashboard (paso 3.5);
+  esta mide días desde `reported_at`. Dos métricas distintas con dos
+  números distintos que la persona fijó por separado -- no se
+  reutilizó una ni se unificaron a propósito. Type de enum propio
+  (`ticket_overdue`), mismo criterio que `urgent_ticket`.
+- `buildReminderDueNotification({ buildingName, reminderTitle, dueDate,
+today })` (corrección de 9.4, punto 3) -- título `"Vencimiento próximo
+en {edificio}"`, body reusando `describeReminderDueDate(dueDate, today)`
+  (paso 9.2, `reminder-urgency.ts`) para la frase de vencimiento ("Vence
+  en N días"/"Vence mañana"/etc.) en vez de reimplementar ese cálculo.
+  Type `reminder_due`, que YA existía en el enum desde 9.3 (anticipado sin
+  generador) -- reusado tal cual. Sin función de "califica" nueva para
+  recordatorios (a diferencia de `ticketQualifiesAsOverdue`): esa lógica
+  YA existe, `getReminderUrgency(dueDate, noticeDays, today) === "upcoming"`
+  (paso 9.2), construida en su momento para el semáforo de vencimientos --
+  el enunciado de esta corrección solo pidió la función de CONTENIDO para
+  este evento, y la de calificación no hacía falta reconstruirla. El cron
+  de 9.6 puede llamar directo a `getReminderUrgency()`. Sin página de
+  detalle por recordatorio (viven en una lista por edificio/organización),
+  el link va a `/panel/reminders`, no a un recurso que no existe.
+- `buildIncidentResolvedNotification({ incidentId, incidentTitle })` --
+  título fijo `"Problema en común resuelto"`, body el título del
+  incidente. Nombrada "Resolved", no "Updated": es la única transición
+  real que existe hoy (ver arriba); si aparece otra transición real en el
+  futuro, esta función gana un parámetro o una hermana recién ahí, no
+  antes. `incidentTitle` ya trae el edificio adentro (`` `${categoría} en
+${edificio}` ``, `buildIncidentTitle()`, paso 7.4) -- no hizo falta
+  volver a pedirlo.
+- `buildIncidentMultiUnitNotification({ incidentId, incidentTitle })`
+  (corrección de 9.4, punto 4) -- título fijo `"Problema en común afecta
+a varias unidades"`, mismo body/link que la anterior. Type de enum
+  PROPIO (`incident_multi_unit`), no `incident_updated` reusado -- misma
+  decisión técnica que `urgent_ticket`/`new_ticket`, con un motivo
+  adicional acá: la idempotencia de este evento (ver más abajo) se
+  resuelve chequeando si YA existe una notificación para
+  `related_incident_id` de este type puntual. Si compartiera type con
+  "resuelto" (`incident_updated`), ese chequeo encontraría la notificación
+  de resolución de un incidente ya resuelto y creería, de arranque, que el
+  aviso de "varias unidades" ya se mandó sin haberlo mandado nunca -- un
+  bug de idempotencia cruzada, no solo una ambigüedad de UI.
+
+14 tests en total (`notification-content.test.ts`, verificado con
+`npx vitest run` -- eran 2 antes de esta corrección): título/body/link
+exactos para cada función de contenido, más los casos de
+`ticketQualifiesAsOverdue` (abierto/cerrado × dentro/fuera del umbral, el
+límite exacto de N días, y que resolved/closed/discarded nunca califican
+sin importar la antigüedad).
+
+**Inserción, `insertNotification()`** (`create-notification.ts`): recibe
+`db` suelto o una transacción abierta (mismo patrón `DbTransaction` que
+`group-tickets-into-incident.ts`) y hace `insert(notifications).values(...)`.
+Separada de las funciones de contenido para poder testear el contenido sin
+tocar la base, y de cada Server Action para no repetir el `insert` dos
+veces.
+
+**Dónde se llama cada una, y por qué ahí:**
+
+- **`new_ticket`:** DENTRO de la misma `db.transaction()` que ya arma
+  `attemptCreateTicket()` (persona + ticket + adjuntos + `ticket_events`),
+  justo después del `insert` de `ticket_events`. No después del commit
+  (a diferencia de `detectAndFlagSimilarTickets()`, que sí corre después a
+  propósito, ver el comentario de esa llamada): acá si la transacción hace
+  rollback, la notificación tiene que desaparecer con el resto.
+- **`incident_updated`:** con `db` suelto, después de que el
+  compare-and-swap (`UPDATE incidents SET status='resolved' WHERE
+status='open' ...`, ya existente del paso 7.5) devolvió una fila real,
+  antes de los `revalidatePath`.
+- **`urgent_ticket`:** mismo lugar exacto que `new_ticket` (son
+  mutuamente excluyentes para el mismo reclamo, ver arriba) -- no agrega
+  un segundo punto de inserción.
+- **`incident_multi_unit`:** dentro de `applyIncidentGrouping()`
+  (`src/features/incidents/group-tickets-into-incident.ts`), la función
+  que YA arma/mantiene el incidente detrás de "Agrupar" (paso 7.4) --
+  vive DENTRO de la misma `tx` que `resolveSimilarityCandidateAction`
+  (`tickets/actions.ts`) abre para toda la resolución del candidato,
+  nunca con `db` suelto: si esa transacción hace rollback, la
+  notificación tiene que desaparecer con el resto, igual que `new_ticket`.
+  Llamada `maybeNotifyMultiUnitIncident()` al final de los tres casos de
+  `applyIncidentGrouping()` que pueden haber sumado un ticket a un
+  incidente (crear uno nuevo, sumarse a uno existente, o fusionar dos) --
+  nunca en el caso "ya estaban en el mismo incidente" (no-op explícito, no
+  cambió nada que revisar). Cuenta unidades DISTINTAS con el mismo dedupe
+  que `deriveAffectedParties()` (paso 7.4, ya usado en la vista de
+  detalle del incidente) -- por el label renderizado (tower-piso-número
+  si hay `unit_id`, o `unit_label_raw` si no), mismo criterio en los dos
+  lugares que cuentan "unidades afectadas" de un incidente.
+
+**Duplicados -- se reusó la garantía de idempotencia que cada Server
+Action YA tenía donde alcanzaba, y se agregó un chequeo puntual contra
+`notifications` donde no había ninguna garantía previa que reusar (no hay
+un patrón general de idempotencia establecido en el proyecto para esto, y
+el enunciado pidió explícitamente no inventar uno complejo si no hace
+falta):**
+
+- `createTicketAction` reintenta `attemptCreateTicket()` una sola vez,
+  pero SOLO tras la carrera de teléfono (`isPhoneRaceError`, ver el
+  comentario de esa función) -- y solo se reintenta porque el primer
+  intento **falló y su transacción hizo rollback**, así que ese ticket
+  (y, ahora, esa notificación, sea `new_ticket` o `urgent_ticket`) nunca
+  llegaron a existir de verdad. Un segundo llamado no puede generar una
+  segunda notificación para el mismo reclamo porque el primero nunca se
+  confirmó.
+- `resolveIncidentAction` ya usaba el compare-and-swap contra
+  `status='open'` como defensa contra doble click/dos pestañas (paso
+  7.5). Si esta acción se reintenta sobre un incidente que ELLA MISMA ya
+  resolvió, `updatedIncident` sale vacío y la función corta antes de
+  llegar al `insertNotification()` -- la misma guardia que ya evitaba
+  resolver dos veces evita, gratis, notificar dos veces.
+- **`incident_multi_unit` (corrección de 9.4, punto 4 del enunciado --
+  "algo que puedas chequear contra las notificaciones ya existentes para
+  ese incidente"):** acá NO hay un compare-and-swap previo que reusar --
+  seguir sumando tickets a un incidente que YA cruzó el umbral de 2+
+  unidades (un tercer, cuarto ticket) es un caso real, no un reintento de
+  la misma operación. `maybeNotifyMultiUnitIncident()` chequea, antes de
+  insertar, si YA existe una notificación `type: "incident_multi_unit"`
+  con `related_incident_id` = ese incidente -- si existe, no inserta una
+  segunda. No hace falta una columna ni una tabla nueva: la propia
+  `notifications` ya es la fuente de verdad de "¿esto ya se avisó?". Por
+  qué esto es seguro sin un índice único explícito: `applyIncidentGrouping()`
+  SIEMPRE corre dentro de la transacción de
+  `resolveSimilarityCandidateAction`, que ya trae su propio
+  compare-and-swap contra el candidato (`status='pending'`) -- dos clicks
+  sobre el MISMO candidato no pueden ejecutar la función dos veces. Dos
+  candidatos DISTINTOS que empujan al MISMO incidente sobre el umbral casi
+  al mismo tiempo sí podrían, en teoría, correr la consulta de chequeo
+  concurrentemente antes de que cualquiera de las dos inserte -- una
+  ventana angosta y de bajísima probabilidad (dos resoluciones manuales de
+  candidatos distintos, sobre el mismo incidente, en el mismo instante)
+  que en el peor caso deja dos notificaciones en vez de una. Documentado
+  en el código en vez de resuelto con una constraint: agregar un índice
+  único por un caso tan angosto sería el mecanismo complejo que el
+  enunciado pidió explícitamente evitar si no hace falta.
+
+Ninguno de los cuatro casos necesitó una clave de idempotencia propia ni
+una tabla nueva.
+
+**No se tocó `revalidatePath`:** las dos Server Actions ya revalidaban
+`/panel` con `"layout"` por otros motivos (el layout del panel es donde
+vive el contador de la campana) -- la notificación nueva queda cubierta
+por eso mismo, sin ningún cambio ahí.
+
+### Cómo se probó `new_ticket` e `incident_updated` (en el navegador, con datos reales de la app, no insertados a mano)
+
+A diferencia del paso 9.3 (sin generador, insertaba filas por SQL), acá
+la verificación pasó por el flujo real: cargar un reclamo de verdad por
+`/r/[token]` y resolver un incidente de verdad por el botón del panel, sin
+tocar `notifications` directamente en ningún momento.
+
+**Datos de prueba usados, ninguno vía el seed de la 2.7:**
+
+- Building/categoría/organización: los tres edificios y ocho categorías ya
+  seedeados (`Rivadavia Administraciones` / `Torre Central`) -- reusados
+  tal cual, sin crear organización nueva.
+- Un incidente de prueba propio, insertado a mano por SQL directo (título
+  con prefijo identificable, `status: 'open'`) -- **no** el único
+  incidente que ya trae el seed (`"Ascensor torre Norte con fallas
+recurrentes"`): resolverlo lo hubiera dejado mutado para cualquier otra
+  prueba futura contra esos datos base, y no hay acción de "reabrir" un
+  incidente en este proyecto (ver CLAUDE.md > Modelo de incidentes) para
+  revertirlo.
+- Cuenta de administrador de prueba dedicada, creada vía Supabase Admin
+  API + `app_users` (mismo patrón que el paso 9.3).
+- El reclamo en sí se creó DE VERDAD por el formulario público (Playwright
+  llenando los 4 pasos), no por SQL -- es el único de los dos eventos de
+  este paso para el que eso era practicable de punta a punta.
+
+**Verificado, con Playwright, en orden:**
+
+1. Reclamo cargado por `/r/{token de Torre Central}` (nombre, teléfono de
+   prueba nunca usado antes, unidad "no encuentro la mía" con texto
+   libre, categoría "Ascensores", descripción de prueba) -- pantalla de
+   confirmación con código real (`TC-2026...`).
+2. Login con la cuenta de administrador de prueba.
+3. Campana: **1 fila nueva**, exactamente `"Nuevo reclamo en Torre
+Central"` / `"Prueba 9.4: el ascensor de la torre sur quedó trabado
+entre pisos."` (el body es el título corto derivado de la descripción,
+   `deriveTicketTitle()`) / `"· Nuevo reclamo"`.
+4. Click en esa notificación: navega a `/panel/tickets/{id}` del ticket
+   real recién creado -- confirmado con el `id` de la URL Y con el
+   contenido de la página (la descripción de prueba visible en el
+   detalle).
+5. Se resolvió el incidente de prueba desde `/panel/incidents/{id}` con el
+   botón "Resolver incidente" -- toast `"Problema en común resuelto."`.
+6. Campana otra vez: **2 filas** (la del punto 3 sigue, sin marcar leída
+   -- clickear una notificación con link solo navega, no marca leída, ver
+   paso 9.3), más una nueva: `"Problema en común resuelto"` /
+   `"Prueba 9.4 - Ascensor torre Sur sin funcionar"` (el título del
+   incidente de prueba) / `"· Problema en común"`. Contador de la campana:
+   `"2 sin leer"`, coincidiendo exacto con las dos filas.
+7. Click en esa notificación: navega a `/panel/incidents/{id}` del
+   incidente de prueba (mismo id que se resolvió en el punto 5).
+8. Sin errores de consola ni de red en ningún paso.
+
+**Un hallazgo falso en el camino, descartado antes de reportarlo como
+bug -- investigado a fondo y CONFIRMADO como falso, no solo descartado por
+no reproducirse:** una corrida intermedia del script de prueba leyó **0**
+filas en el popover justo después de resolver el incidente, en vez de 2.
+Reabrir la campana con una consulta independiente, unos segundos después,
+mostró las 2 filas correctas de punta a punta. Reproducido después con
+instrumentación (`elementFromPoint` en las coordenadas del click, más
+medición del tiempo real entre el click y que el fetch resolviera, contra
+8 resoluciones reales de incidente en esta misma base de dev): en las 8,
+el click SIEMPRE cae sobre el botón real de la campana (nunca sobre el
+toast, descartando la hipótesis original de "el toast tapa el click"), y
+el Popover SIEMPRE se abre -- lo que varía es cuánto tarda
+`getNotificationCenterDataAction` en resolver justo después de que
+`resolveIncidentAction` ya hizo varios round-trips contra la misma base:
+medido entre 2.6s y más de 3s sin resolver, en una sesión "tibia" (mismas
+condiciones que el hallazgo original). Mientras tanto el Popover muestra
+correctamente "Cargando…" (0 `<li>`, indistinguible de "0 filas" para un
+script que no distingue ambos estados). Es la misma clase de hallazgo que
+el "Segundo hallazgo" del paso 9.3 (badge leído antes de que la Server
+Action terminara) -- latencia real de este entorno de desarrollo, leída
+demasiado pronto por el script de verificación, no un bug de la
+aplicación ni una condición de carrera del código (a diferencia del
+`revalidatePath` del 9.3, que rompía la navegación SIEMPRE que se daba la
+condición, de forma determinística -- esto es lo opuesto: determinismo en
+la CAUSA -- latencia -- con un margen de tiempo variable, no una condición
+de carrera intermitente).
+
+**Limpieza, dada de baja lógica (`deleted_at`), nunca `DELETE` físico:**
+las 2 notificaciones generadas, el ticket de prueba, la persona nueva que
+creó (teléfono nunca antes visto) y el incidente de prueba. Cuenta de
+administrador de prueba eliminada por completo (Auth + `app_users`).
+Confirmado por SQL, al final: cero notificaciones activas para la
+organización.
+
+### Distinción visual de `urgent_ticket`/`incident_multi_unit` en la campana -- decisión tomada CON LA PERSONA, no propia
+
+La primera pasada de esta corrección le dio a `urgent_ticket` e
+`incident_multi_unit` el MISMO label chico que su "hermana"
+(`new_ticket`/`incident_updated`), con el argumento de que el título de
+cada notificación ya alcanzaba para distinguirlas. La persona pidió,
+después de ver eso, que se distingan visualmente en la campana -- no solo
+en el texto del cuerpo -- con su propio label y algún tratamiento acorde a
+la urgencia, "reconocible de un vistazo" pero sin hace falta que sea
+alarmante. Dos cambios, ninguno inventado desde cero:
+
+- **Label propio en `NOTIFICATION_TYPE_LABEL`** (`notification-type.ts`):
+  `urgent_ticket` -> `"Reclamo urgente"`, `incident_multi_unit` ->
+  `"Varias unidades"` -- dejan de compartir texto con `new_ticket`/
+  `incident_updated`.
+- **Color, reusando los MISMOS dos tokens semánticos que ya usan
+  `PriorityBadge`** (tickets, paso 6.3) **y `ReminderUrgencyBadge`**
+  (reminders, paso 9.2) -- pedido explícito del enunciado ("seguí el
+  mismo criterio que ya se usó para el semáforo de recordatorios del 9.2,
+  o el patrón de badges de prioridad/estado ya existente"), no una
+  paleta nueva para este widget. `NOTIFICATION_TYPE_ACCENT`
+  (`notification-type.ts`) mapea:
+  - `urgent_ticket` -> `"urgente"` (mismo tono que `PriorityBadge
+priority="urgente"`): es, literalmente, un reclamo con
+    `ticketPriority: "urgent"`.
+  - `incident_multi_unit` -> `"alta"` (mismo tono que
+    `ReminderUrgencyBadge urgency="upcoming"`): amerita más atención que
+    un aviso genérico, pero no es una alarma -- mismo nivel de
+    intensidad que "próximo a vencer" en el semáforo de vencimientos, no
+    el rojo de "urgente"/"vencido". Un incidente multi-unidad es
+    relevante, pero no es la misma clase de urgencia que un reclamo
+    marcado `urgent` por su categoría.
+
+`NotificationItem` (`components/notification-item.tsx`) renderiza el
+label chico como `<Badge variant="outline">` con esos tokens
+(`bg-urgente/10 text-urgente` / `bg-alta/10 text-alta`, mismas clases que
+los otros dos badges) SOLO para los types con acento -- el resto
+(`new_ticket`, `ticket_overdue`, `reminder_due`, `incident_updated`,
+`system`) sigue mostrando el label como texto plano, sin Badge, igual que
+desde el paso 9.3: no hay necesidad de "vestir" tipos que no la pidieron.
+
+**Sin ícono nuevo por type -- mismo criterio ya fijado en 9.3, no una
+omisión.** El enunciado de esta corrección permitía color O ícono; se
+eligió solo color porque el paso 9.3 ya había evaluado y descartado un
+ícono por type ("cuatro íconos nuevos solo para esto no se justificaban
+frente a un texto corto") -- agregar un ícono ahora para dos types
+puntuales tendría la misma desproporción que esa decisión ya rechazó, y
+el color ya cumple el pedido concreto ("reconocible de un vistazo... no
+hace falta que sea alarmante").
+
+**Cómo se probó -- en el navegador, contra el render real, no solo
+leyendo el código.** Un reclamo urgente real (categoría "Ascensores") y
+un incidente multi-unidad real (dos reclamos reales, unidades distintas,
+agrupados vía "Agrupar" -- mismo mecanismo ya descripto arriba), con la
+cuenta de administrador de prueba. Abierta la campana, por cada fila se
+leyó con Playwright si tenía un `<Badge>` (`[data-slot="badge"]`) y, si lo
+tenía, su texto y su color COMPUTADO (`getComputedStyle`, no la clase CSS
+a ojo):
+
+- Fila del reclamo urgente: badge con texto `"Reclamo urgente"`,
+  `color: rgb(180, 35, 24)` -- exactamente `--urgente` (`#b42318` en
+  `globals.css`), el mismo tono que ya pinta "Urgente" en `PriorityBadge`
+  de la bandeja de reclamos (visible de fondo en la misma captura).
+- Fila del incidente multi-unidad: badge con texto `"Varias unidades"`,
+  `color: rgb(181, 71, 8)` -- exactamente `--alta` (`#b54708`).
+- Las dos filas de `new_ticket` normal (sin urgencia) de la misma
+  campana: SIN badge, label chico como texto plano ("Nuevo reclamo") --
+  confirmando que el resto de los types no cambió.
+
+Captura de pantalla tomada y revisada visualmente además de leída por
+código: el color del badge de "Reclamo urgente" es indistinguible, a
+simple vista, del badge "Urgente" que ya usa `PriorityBadge` en la lista
+de reclamos de atrás -- exactamente el efecto pedido ("mismo criterio que
+el patrón de badges de prioridad").
+
+**Limpieza:** los 3 reclamos de prueba, las 3 personas, el incidente y
+las 4 notificaciones generadas, dados de baja lógica (`deleted_at`).
+Cuenta de administrador de prueba eliminada por completo (Auth +
+`app_users`). Confirmado por SQL al final: cero reclamos de prueba
+activos para esta verificación.
+
+### Qué falta para que `ticket_overdue` y `reminder_due` se disparen solos
+
+No están "sin terminar" -- las funciones puras (calificación + contenido
+para `ticket_overdue`; contenido, reusando `getReminderUrgency()` para la
+calificación, en `reminder_due`) están listas, testeadas, y no conectadas
+a nada a propósito, tal como pidió el enunciado de esta corrección. Lo que
+falta es exactamente el mecanismo que las dispare: un barrido periódico
+(cron, paso 9.6) que recorra los tickets abiertos y los recordatorios
+activos de cada organización, llame a `ticketQualifiesAsOverdue()` /
+`getReminderUrgency()` por cada uno, y para los que califiquen inserte la
+notificación correspondiente -- con su propia idempotencia (algo como "no
+avisar dos veces por el mismo ticket/recordatorio en la misma ventana",
+que este paso no resuelve, porque resolverla bien depende de decisiones
+del propio 9.6: cada cuánto corre el barrido, qué pasa si un ticket sigue
+abierto varios barridos seguidos). Ninguna Server Action de este paso las
+llama.
+
+### Cómo se probó la corrección (eventos 2 y 5: `urgent_ticket` e `incident_multi_unit`) -- en el navegador, código real, sin insertar nada a mano
+
+Mismo criterio que la verificación original de este paso: nada insertado
+directo en `notifications` ni en las tablas que la alimentan. Datos de
+prueba con prefijo identificable (`"Prueba 9.4b-..."`/`"Prueba 9.4c-..."`),
+Torre Central reusada tal cual, cuenta de administrador de prueba propia
+(Supabase Admin API + `app_users`, **service-role key usada para crear y
+para borrar esta cuenta al final, únicos dos usos**).
+
+**`urgent_ticket` -- reclamo real por `/r/[token]`, categoría "Ascensores"
+(`default_priority: "urgent"` en el seed):** cargado de punta a punta con
+Playwright (los 4 pasos del formulario). Campana, tras loguear con la
+cuenta de prueba: exactamente `"Reclamo urgente en Torre Central"` /
+título corto derivado de la descripción. Confirmado además por SQL: la
+fila de `notifications` quedó con `type = 'urgent_ticket'`, no
+`'new_ticket'`. (El label chico y el color del badge se verificaron por
+separado, en una vuelta posterior -- ver "Distinción visual..." más
+abajo, con los valores de esa verificación.)
+
+**`incident_multi_unit` -- flujo completo, no solo la función aislada:**
+tres reclamos reales por el formulario público, misma categoría
+("Electricidad"), descripción IDÉNTICA a propósito (similarity ~1.0,
+bien por encima del umbral 0.20 de la organización) para garantizar que
+`detectAndFlagSimilarTickets` los flaguee como candidatos, cada uno en
+una unidad REAL distinta de Torre Central (tres filas de `units`, no
+texto libre -- ejercita el mismo JOIN que usa
+`maybeNotifyMultiUnitIncident()`). Con la cuenta de administrador de
+prueba, desde el panel:
+
+1. "Agrupar" sobre el candidato del ticket 2 contra el ticket 1 (banner
+   `SimilarTicketBanner`, paso 7.3) -- crea un incidente NUEVO con los dos
+   (caso 1 de `applyIncidentGrouping()`), ya con 2 unidades distintas.
+   Confirmado por SQL: **una** notificación `incident_multi_unit` para
+   ese incidente, título/body exactos
+   (`"Problema en común afecta a varias unidades"` /
+   `"Electricidad en Torre Central"`).
+2. "Agrupar" sobre el candidato del ticket 3 contra el ticket 2 -- el
+   ticket 3 se SUMA al incidente ya existente (caso 2), que pasa a tener
+   3 unidades distintas. Confirmado por SQL: **sigue habiendo una sola**
+   notificación `incident_multi_unit` para ese incidente -- la
+   idempotencia funcionó, sumar una tercera unidad a un incidente que ya
+   había cruzado el umbral no generó un segundo aviso.
+
+**Limpieza:** 15 reclamos de prueba (los 3 reales del multi-unidad más
+varios generados mientras se ajustaba el script de verificación),
+15 personas, el incidente de prueba, y 16 notificaciones -- todo dado de
+baja lógica (`deleted_at`), nunca `DELETE` físico. 42 filas de
+`ticket_similarity_candidates` generadas por el cruce entre tantos
+reclamos de prueba con texto parecido, también dadas de baja. Confirmado
+por SQL al final: cero reclamos de prueba activos. Cuenta de administrador
+de prueba eliminada por completo (Auth + `app_users`).
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.

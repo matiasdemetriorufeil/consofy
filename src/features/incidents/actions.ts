@@ -5,6 +5,8 @@ import { revalidatePath } from "next/cache";
 
 import { db } from "@/db";
 import { incidents, ticketEvents, tickets } from "@/db/schema";
+import { insertNotification } from "@/features/notifications/create-notification";
+import { buildIncidentResolvedNotification } from "@/features/notifications/notification-content";
 import {
   isValidStatusTransition,
   timestampFieldsForStatus,
@@ -140,6 +142,23 @@ export const resolveIncidentAction = authorizedAction(
         })),
       );
     }
+
+    // Notificación para el panel (paso 9.4) -- sin transacción propia
+    // acá (a diferencia de createTicketAction), pero no hace falta: el
+    // compare-and-swap de arriba (UPDATE ... WHERE status = 'open') ya es
+    // la garantía de idempotencia -- si esta acción se reintenta (doble
+    // click, dos pestañas) sobre un incidente que ESTA MISMA llamada ya
+    // resolvió, `updatedIncident` sale vacío y la función corta antes de
+    // llegar acá, así que nunca se genera una segunda notificación para la
+    // misma resolución.
+    await insertNotification(db, {
+      organizationId: context.organization.id,
+      relatedIncidentId: incidentId,
+      ...buildIncidentResolvedNotification({
+        incidentId,
+        incidentTitle: updatedIncident.title,
+      }),
+    });
 
     revalidatePath(`/panel/incidents/${incidentId}`);
     revalidatePath("/panel/tickets");
