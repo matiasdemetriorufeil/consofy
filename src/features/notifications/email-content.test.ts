@@ -32,6 +32,7 @@ describe("buildDailySummaryEmail", () => {
       appUrl: "https://consofy.com.ar",
       newTickets: [],
       urgentUnresolvedTickets: [],
+      overdueTickets: [],
       remindersNeedingAttention: [],
     });
 
@@ -40,19 +41,23 @@ describe("buildDailySummaryEmail", () => {
     );
   });
 
-  it("muestra 'Sin novedades' cuando las tres listas están vacías", () => {
+  it("muestra 'Sin novedades' cuando las cuatro listas están vacías", () => {
     const result = buildDailySummaryEmail({
       organizationName: "Rivadavia Administraciones",
       dateLabel: "27 de agosto de 2026",
       appUrl: "https://consofy.com.ar",
       newTickets: [],
       urgentUnresolvedTickets: [],
+      overdueTickets: [],
       remindersNeedingAttention: [],
     });
 
     expect(result.html).toContain("Sin novedades para hoy.");
     expect(result.html).toContain("Reclamos nuevos hoy (0)");
     expect(result.html).toContain("Reclamos urgentes sin resolver (0)");
+    expect(result.html).toContain(
+      "Reclamos sin resolver hace más de 3 días (0)",
+    );
     expect(result.html).toContain("Recordatorios que necesitan atención (0)");
   });
 
@@ -70,6 +75,7 @@ describe("buildDailySummaryEmail", () => {
         },
       ],
       urgentUnresolvedTickets: [],
+      overdueTickets: [],
       remindersNeedingAttention: [],
     });
 
@@ -90,6 +96,7 @@ describe("buildDailySummaryEmail", () => {
         },
       ],
       urgentUnresolvedTickets: [],
+      overdueTickets: [],
       remindersNeedingAttention: [],
     });
 
@@ -116,12 +123,48 @@ describe("buildDailySummaryEmail", () => {
           publicCode: "LA-2026-0007",
         },
       ],
+      overdueTickets: [],
       remindersNeedingAttention: [],
     });
 
     expect(result.html).toContain("Reclamos urgentes sin resolver (1)");
     expect(result.html).toContain("LA-2026-0007");
     expect(result.html).toContain("Ascensor sin funcionar");
+  });
+
+  // Decisión tomada con la persona (ver CLAUDE.md > Cron diario): los
+  // vencidos no urgentes se repiten día a día en el resumen, mismo
+  // criterio que los urgentes -- este es el test de esa sección nueva,
+  // por separado de "urgentes" (paso 9.6, corrección posterior).
+  it("lista los reclamos vencidos no urgentes por separado de los urgentes", () => {
+    const result = buildDailySummaryEmail({
+      organizationName: "Rivadavia Administraciones",
+      dateLabel: "27 de agosto de 2026",
+      appUrl: "https://consofy.com.ar",
+      newTickets: [],
+      urgentUnresolvedTickets: [],
+      overdueTickets: [
+        {
+          id: "55555555-5555-5555-5555-555555555555",
+          title: "Falta pintura en el hall",
+          buildingName: "Edificio Cabildo",
+          publicCode: "EC-2026-0099",
+        },
+      ],
+      remindersNeedingAttention: [],
+    });
+
+    expect(result.html).toContain(
+      "Reclamos sin resolver hace más de 3 días (1)",
+    );
+    expect(result.html).toContain("EC-2026-0099");
+    expect(result.html).toContain("Falta pintura en el hall");
+    expect(result.html).toContain(
+      "https://consofy.com.ar/panel/tickets/55555555-5555-5555-5555-555555555555",
+    );
+    // La sección de urgentes sigue en 0 -- las dos listas son
+    // independientes, esta función no las mezcla.
+    expect(result.html).toContain("Reclamos urgentes sin resolver (0)");
   });
 
   it("distingue recordatorios vencidos de próximos a vencer", () => {
@@ -131,6 +174,7 @@ describe("buildDailySummaryEmail", () => {
       appUrl: "https://consofy.com.ar",
       newTickets: [],
       urgentUnresolvedTickets: [],
+      overdueTickets: [],
       remindersNeedingAttention: [
         {
           id: "33333333-3333-3333-3333-333333333333",

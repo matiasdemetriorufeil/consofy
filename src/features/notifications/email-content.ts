@@ -19,6 +19,8 @@
 // email no cargan fuentes de Google, así que la pila seguro es la que
 // manda en la práctica, no un capricho de simplificación.
 
+import { TICKET_OVERDUE_THRESHOLD_DAYS } from "./notification-content";
+
 export type EmailContent = { subject: string; html: string };
 
 const COLOR_PRIMARY = "#14484f";
@@ -90,12 +92,16 @@ export function buildUrgentTicketAlertEmail(input: {
 // decisión de negocio ya tomada: (1) reclamos nuevos del día, (2) reclamos
 // urgentes sin resolver (no solo los de hoy -- un urgente de ayer sin
 // atender sigue siendo lo más importante que el resumen puede decir), (3)
-// recordatorios que necesitan atención, con su nivel de urgencia
-// (`getReminderUrgency`, paso 9.2) -- overdue Y upcoming, no solo
-// "upcoming" literal: un recordatorio ya vencido es información más
-// urgente todavía que uno próximo a vencer, dejarlo afuera del resumen
-// diario porque el enunciado dijo "próximos a vencer" habría escondido
-// justo el caso más grave.
+// reclamos vencidos NO urgentes (agregado en una corrección del paso
+// 9.6, DECISIÓN TOMADA CON LA PERSONA -- ver CLAUDE.md > Cron diario:
+// mismo criterio "todos los días hasta que se resuelva" que ya usan los
+// urgentes, resolviendo la asimetría que el reporte original del 9.6
+// había señalado sin resolver), (4) recordatorios que necesitan
+// atención, con su nivel de urgencia (`getReminderUrgency`, paso 9.2) --
+// overdue Y upcoming, no solo "upcoming" literal: un recordatorio ya
+// vencido es información más urgente todavía que uno próximo a vencer,
+// dejarlo afuera del resumen diario porque el enunciado dijo "próximos a
+// vencer" habría escondido justo el caso más grave.
 export type DailySummaryTicketRow = {
   id: string;
   title: string;
@@ -157,6 +163,21 @@ export function buildDailySummaryEmail(input: {
   appUrl: string;
   newTickets: DailySummaryTicketRow[];
   urgentUnresolvedTickets: DailySummaryTicketRow[];
+  // Vencidos NO urgentes (paso 9.6, corrección posterior -- decisión
+  // tomada con la persona, ver CLAUDE.md > Cron diario): la asimetría que
+  // el reporte original del 9.6 había señalado y no resuelto -- los
+  // urgentes sin resolver ya se repetían día a día en el resumen, pero un
+  // reclamo `ticket_overdue` no urgente solo tenía el aviso puntual del
+  // barrido (sweepOverdueTickets), sin visibilidad continua. Mismo
+  // criterio EXACTO que `urgentUnresolvedTickets`: se repite todos los
+  // días hasta que el reclamo se resuelva, no una vez y desaparece --
+  // reusa `ticketQualifiesAsOverdue()` (notification-content.ts, paso
+  // 9.4), no una condición nueva. El caller (send-daily-summary-email.ts)
+  // es responsable de que un reclamo urgente Y vencido a la vez aparezca
+  // acá y NO en `urgentUnresolvedTickets` (o viceversa, nunca en las
+  // dos) -- esta función solo renderiza lo que recibe, no dedupea entre
+  // listas.
+  overdueTickets: DailySummaryTicketRow[];
   remindersNeedingAttention: DailySummaryReminderRow[];
 }): EmailContent {
   const subject = `Resumen diario de ${input.organizationName} -- ${input.dateLabel}`;
@@ -164,6 +185,7 @@ export function buildDailySummaryEmail(input: {
   const totalItems =
     input.newTickets.length +
     input.urgentUnresolvedTickets.length +
+    input.overdueTickets.length +
     input.remindersNeedingAttention.length;
 
   // Sin admiración salvo algo genuino que celebrar (CLAUDE.md > Voz y
@@ -179,6 +201,7 @@ export function buildDailySummaryEmail(input: {
     ${summaryLine}
     ${renderSection("Reclamos nuevos hoy", input.newTickets.length, renderTicketList(input.newTickets, input.appUrl))}
     ${renderSection("Reclamos urgentes sin resolver", input.urgentUnresolvedTickets.length, renderTicketList(input.urgentUnresolvedTickets, input.appUrl))}
+    ${renderSection(`Reclamos sin resolver hace más de ${TICKET_OVERDUE_THRESHOLD_DAYS} días`, input.overdueTickets.length, renderTicketList(input.overdueTickets, input.appUrl))}
     ${renderSection("Recordatorios que necesitan atención", input.remindersNeedingAttention.length, renderReminderList(input.remindersNeedingAttention))}
     ${renderButton("Abrir el panel", `${input.appUrl}/panel`)}
   `);

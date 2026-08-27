@@ -1,0 +1,37 @@
+name: Cron diario
+
+# Paso 9.6 -- dispara /api/cron/daily una vez al día. GitHub Actions
+# interpreta `cron:` SIEMPRE en UTC, sin importar qué zona horaria tenga
+# configurada el repositorio (no existe tal configuración) ni quien lo
+# edite -- ver CLAUDE.md > Cron diario para el razonamiento completo de
+# por qué se eligió este horario y la limitación real de tener un único
+# horario global (no uno por organización, aunque `organizations.timezone`
+# es un campo por fila).
+#
+# 07:00 en America/Argentina/Cordoba (UTC-3 FIJO, sin horario de verano
+# desde 2009 -- no hay que ajustar esto dos veces al año) = 10:00 UTC.
+on:
+  schedule:
+    - cron: "0 10 * * *"
+  # Disparo manual desde la pestaña Actions de GitHub -- útil para probar
+  # el endpoint de punta a punta, y es la forma real de ejercitar el
+  # escenario de idempotencia del punto 6 (correr el cron dos veces el
+  # mismo día a propósito).
+  workflow_dispatch: {}
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Llamar a /api/cron/daily
+        run: |
+          http_status=$(curl -sS -o /tmp/cron-response.json -w "%{http_code}" \
+            -X POST "${{ vars.APP_URL }}/api/cron/daily" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            -H "Content-Type: application/json")
+          echo "HTTP $http_status"
+          cat /tmp/cron-response.json
+          if [ "$http_status" -ge 400 ]; then
+            echo "::error::El endpoint del cron diario devolvió $http_status"
+            exit 1
+          fi

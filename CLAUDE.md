@@ -5990,16 +5990,28 @@ ticketPublicCode, ticketUrl })` -- mismo evento que ya dispara la
   notificación `urgent_ticket` del centro de notificaciones (paso 9.4),
   canal distinto, mismo hecho de negocio.
 - `buildDailySummaryEmail({ organizationName, dateLabel, appUrl,
-newTickets, urgentUnresolvedTickets, remindersNeedingAttention })` --
-  **qué incluye es criterio propio, señalado, no una decisión de negocio
-  ya tomada** (el enunciado pidió explícitamente usar criterio y señalar
-  en el reporte):
+newTickets, urgentUnresolvedTickets, overdueTickets,
+remindersNeedingAttention })` -- **qué incluye es criterio propio,
+  señalado, no una decisión de negocio ya tomada** (el enunciado pidió
+  explícitamente usar criterio y señalar en el reporte), salvo el tercer
+  punto, agregado después como decisión tomada CON LA PERSONA:
   - Reclamos nuevos del día (`reportedAt` dentro de "hoy" en la zona de
     la organización).
   - Reclamos urgentes sin resolver -- **no acotado a los de HOY**: un
     urgente de ayer sin atender sigue siendo lo más importante que el
     resumen puede decir; limitarlo a "hoy" hubiera escondido justo el
     caso más grave.
+  - **Reclamos vencidos NO urgentes** (`overdueTickets`, agregado en una
+    corrección posterior al paso 9.6 -- ver CLAUDE.md > Cron diario,
+    "La asimetría... se resolvió con la persona"): mismo criterio "todos
+    los días hasta que se resuelva" que ya regía para los urgentes, no
+    inventado ahora -- pedido explícito de la persona para cerrar la
+    asimetría que el reporte original del 9.6 había señalado sin
+    resolver. Reusa `ticketQualifiesAsOverdue()` (notification-content.ts,
+    paso 9.4) sobre el mismo conjunto de reclamos abiertos que ya usa
+    `sweepOverdueTickets` (`getOpenTickets`, paso 9.6) -- un reclamo
+    urgente Y vencido a la vez cae SOLO en "urgentes" (`priority !==
+"urgent"` en el filtro), nunca en las dos listas a la vez.
   - Recordatorios que necesitan atención -- overdue Y upcoming (semáforo
     del paso 9.2), **no solo "upcoming" literal** pese a que el enunciado
     decía "próximos a vencer": un recordatorio ya vencido es información
@@ -6012,10 +6024,11 @@ newTickets, urgentUnresolvedTickets, remindersNeedingAttention })` --
   `--border`/`--canvas`) y pila tipográfica segura (Arial/Helvetica) con
   Archivo/Inter como preferencia -- la mayoría de los clientes de email no
   carga fuentes de Google. "Sin novedades para hoy." sin admiración
-  (CLAUDE.md > Voz y escritura) cuando las tres listas vienen vacías.
-- 7 tests (`email-content.test.ts`): subject exacto de los dos emails,
-  contenido de cada lista, el caso "sin novedades", y que vencidos/
-  próximos se distingan en el resumen.
+  (CLAUDE.md > Voz y escritura) cuando las cuatro listas vienen vacías.
+- 8 tests (`email-content.test.ts`): subject exacto de los dos emails,
+  contenido de cada lista (incluida la nueva de vencidos no urgentes,
+  verificada por separado de la de urgentes), el caso "sin novedades", y
+  que vencidos/próximos se distingan en el resumen.
 
 ### Dónde se llama cada una
 
@@ -6091,6 +6104,264 @@ sus 3 personas, y las 3 notificaciones `urgent_ticket` correspondientes,
 dados de baja lógica (`deleted_at`). Confirmado por SQL al final: `0`
 reclamos de prueba activos para "9.5", y el email del admin real de vuelta
 en su valor correcto.
+
+## Cron diario (paso 9.6)
+
+Conecta, con un disparador real (GitHub Actions), las tres piezas que
+9.4/9.5 dejaron construidas pero sin conectar a propósito: el barrido de
+recordatorios (`getReminderUrgency` + `buildReminderDueNotification`), el
+de reclamos vencidos (`ticketQualifiesAsOverdue` +
+`buildTicketOverdueNotification`) y el resumen diario
+(`sendDailySummaryEmail`). Ver CLAUDE.md > Generación automática de
+notificaciones, "Qué falta para que se disparen solos" -- este paso es
+exactamente esa pieza faltante, no una reconstrucción desde cero.
+
+### Los dos barridos nuevos -- dónde viven y por qué ahí
+
+- **`sweepDueReminders(organizationId, timezone, now)`**
+  (`src/features/reminders/sweep-due-reminders.ts`). **Idempotencia --
+  reusa un mecanismo que YA estaba pensado para esto, no uno inventado
+  ahora:** `reminders.status` tiene un valor `"notified"` cuyo propio
+  comentario del índice en `src/db/schema/reminders.ts` (paso 9.1) dice
+  _"Recordatorios que vencen en los próximos N días... WHERE status =
+  'pending' AND due_date <= (hoy + N) -- un barrido periódico"_ --
+  literalmente este barrido, señalado en el esquema tres pasos antes de
+  que existiera. El barrido hace un compare-and-swap
+  (`UPDATE reminders SET status = 'notified' WHERE id = ? AND status =
+'pending' RETURNING id`), MISMO criterio que `resolveIncidentAction`
+  (paso 7.5) contra `incidents.status = 'open'` -- si el UPDATE no toca
+  ninguna fila, no se inserta una segunda notificación, sin ventana de
+  carrera entre un SELECT y un INSERT separados.
+- **`sweepOverdueTickets(organizationId, now)`**
+  (`src/features/tickets/sweep-overdue-tickets.ts`). Sin un campo de
+  estado análogo a `reminders.status` para esto (`tickets.status` es
+  sobre la resolución real del reclamo, no sobre si ya se avisó) --
+  reusa en cambio el mecanismo YA aceptado en la corrección del 9.4 para
+  `incident_multi_unit`: chequear si YA existe una notificación
+  `type: "ticket_overdue"` para ese `related_ticket_id` antes de
+  insertar. Resuelto en una consulta BATCHED para toda la organización
+  (`relatedTicketId IN (...)`), no una consulta por reclamo -- ver el
+  comentario del archivo.
+
+**Criterio propio, señalado, no una decisión de negocio ya tomada: un
+reclamo vencido o un recordatorio próximo a vencer reciben la
+notificación PUNTUAL (campana/email de alerta) UNA sola vez en toda su
+vida, no una vez por día mientras sigan sin resolverse.** El enunciado no
+lo especificaba. Un aviso puntual repetido todos los días sobre el MISMO
+reclamo/recordatorio sin resolver sería ruido, no señal -- y el resumen
+diario (`sendDailySummaryEmail`, ver 9.5) ya mantiene visible día a día
+cualquier recordatorio `"notified"` que siga sin marcarse
+`"done"`/`"dismissed"` (`REMINDER_ACTIVE_STATUSES` incluye los dos
+estados). Esto sigue así -- `sweepOverdueTickets`/`sweepDueReminders` no
+se tocaron.
+
+**La asimetría que este reporte señalaba acá (el resumen diario repetía
+los urgentes sin resolver día a día, pero NO los `ticket_overdue` no
+urgentes) se resolvió en una corrección posterior -- DECISIÓN TOMADA CON
+LA PERSONA, no propia.** Se pidió explícitamente: los reclamos vencidos
+no urgentes tienen que aparecer en el resumen diario todos los días hasta
+que se resuelvan, mismo criterio "todos los días hasta que se resuelva"
+que ya regía para los urgentes -- sin sacar el aviso puntual de
+`sweepOverdueTickets` (que sigue sirviendo como alerta en el momento
+exacto en que el reclamo cruza el umbral; lo que cambió es que ADEMÁS
+sigue apareciendo en el resumen mientras siga sin resolver). Ver
+`buildDailySummaryEmail`/`sendDailySummaryEmail` más abajo (paso 9.5, la
+sección "Reclamos sin resolver hace más de N días") para el detalle de
+cómo quedó implementado.
+
+### Idempotencia del resumen diario -- mecanismo NUEVO, minimal, sin
+
+### equivalente previo para reusar
+
+`organizations.last_daily_summary_sent_on` (columna nueva, `date` civil
+como `reminders.due_date`, no `timestamptz`). `sendDailySummaryEmail()`
+(paso 9.5, modificada en este paso) la chequea antes de mandar nada: si
+ya es "hoy" en la zona horaria de la organización, no manda un segundo
+resumen y devuelve `skipped_already_sent_today`. La marca se escribe
+**solo después de un envío confirmado** (`result.ok === true`) -- si
+Resend falla, la marca NO se toca, así que un reintento (manual, o la
+corrida del cron del día siguiente si ese día el envío falló) todavía
+puede completar el envío pendiente. Ningún mecanismo previo del proyecto
+aplicaba acá (a diferencia de los dos barridos de arriba) -- es la única
+pieza de este paso que necesitó una columna nueva.
+
+`sendDailySummaryEmail()` cambió de firma en este paso:
+`Promise<void>` -> `Promise<DailySummaryResult>`
+(`{status: "sent" | "skipped_already_sent_today" | "skipped_no_admins" |
+"error", error?}`) -- mismo archivo que 9.5 ya construyó, extendido para
+que el orquestador de este paso pueda contar/loguear sin adivinar qué
+pasó a partir de un `void`. No es un cambio de contrato aparte: agregar
+la idempotencia ya requería tocar esta función, devolver algo más
+informativo fue barato hacerlo en la misma pasada.
+
+### Orquestador y endpoint
+
+`runDailyCron()` (`src/features/cron/run-daily-cron.ts`) itera TODAS las
+organizaciones no dadas de baja (`organizations.deleted_at IS NULL` --
+no hay un booleano `active` propio en esa tabla) y llama a las tres
+funciones por cada una.
+
+**Aislamiento de errores (punto 7: "si una de las tres tareas falla, las
+otras dos igual se tienen que ejecutar"), en DOS niveles:**
+
+1. Las tres funciones YA tienen su propia REGLA DURA de "nunca propaga
+   una excepción" (mismo patrón que `detectAndFlagSimilarTickets`, paso
+   7.2) -- de por sí, que una falle no impide que la siguiente corra.
+2. El orquestador ADEMÁS envuelve cada llamada en su propio try/catch --
+   defensa en profundidad, no confianza ciega en que esa garantía se
+   mantenga para siempre: ni una organización puede tumbar el barrido de
+   las demás, ni una tarea puede impedir que las otras dos de la MISMA
+   organización corran.
+
+**"Qué falló, de forma revisable después" (punto 7) -- ningún sistema de
+logging nuevo, el criterio YA establecido en el proyecto:**
+`console.error` con el nombre de la función entre corchetes (cada una de
+las tres funciones ya lo hace por su cuenta). El orquestador además junta
+un resumen (`errors`, `perOrganization`) en el JSON de respuesta del
+endpoint, para que el log de la corrida de GitHub Actions (que solo
+captura la salida del `curl`, no los logs del servidor) tenga algo
+revisable sin cruzarlo con Vercel.
+
+`POST /api/cron/daily` (`src/app/api/cron/daily/route.ts`) -- Route
+Handler, no Server Action (lo llama un `curl` externo, no un `<form>` de
+React). Devuelve el JSON de `runDailyCron()` con 200, o 401 si la
+autorización falla, o 500 si algo revienta ANTES de que
+`runDailyCron()` llegue a aislar cada tarea (ej. la base no responde ni
+para listar organizaciones).
+
+### Autorización -- secreto compartido nuevo, verificado que nada existente aplicaba
+
+Revisado antes de inventar nada (pedido explícito del enunciado):
+`requireUser()`/`authorizedAction()` (`src/lib/auth.ts`) dependen de una
+sesión de Supabase, que GitHub Actions no tiene (ni correspondería que
+tuviera -- esto no es "un administrador operando el panel"). La
+service-role key de Supabase es una credencial de Postgres/Auth, no un
+mecanismo de autenticación HTTP para un endpoint propio de esta app --
+forzarla acá sería usar una credencial ajena a un propósito para el que
+no es. Ningún mecanismo existente encajaba.
+
+`CRON_SECRET` (nuevo, `src/lib/env.ts`, sin `.default(...)`, mismo
+criterio que `RESEND_API_KEY`): el endpoint exige
+`Authorization: Bearer <secreto>`, comparado con `crypto.timingSafeEqual`
+(no `===`) -- un endpoint de autorización por secreto compartido es
+exactamente el caso donde un ataque de timing es una amenaza real, y la
+defensa es una línea de código.
+
+**A diferencia de `RESEND_API_KEY`, este valor NO corresponde a ninguna
+cuenta externa -- se generó acá mismo** (32 bytes al azar, hex) y ya está
+en `.env.local` para desarrollo. **Lo que SÍ queda pendiente de un paso
+manual, fuera del repo -- mismo criterio que Resend, señalado, no
+resuelto:** cargar el MISMO valor como secret del repositorio en GitHub
+(`Settings > Secrets and variables > Actions`, nombre `CRON_SECRET`) y
+como variable de entorno en Vercel (para que la app en producción lo
+conozca). También falta `vars.APP_URL` (variable, no secreto -- la URL
+del deploy real) en la misma pantalla de GitHub. Sin estos tres pasos
+manuales, el workflow no puede llamar al endpoint real -- el endpoint en
+sí y el workflow están completos y probados contra dev, pero la
+conexión de punta a punta con producción depende de esta configuración
+externa.
+
+### El workflow -- horario, y por qué es una decisión de producto, no solo técnica
+
+`.github/workflows/daily-cron.yml` -- `cron: "0 10 * * *"` +
+`workflow_dispatch` (disparo manual desde la pestaña Actions, útil para
+probar y para ejercitar a propósito el escenario de doble disparo del
+punto 6).
+
+**GitHub Actions interpreta `cron:` SIEMPRE en UTC** -- no hay forma de
+decirle "en la zona horaria de tal organización". `0 10 * * *` = 10:00
+UTC = 07:00 en `America/Argentina/Cordoba` (UTC-3 FIJO, sin horario de
+verano desde 2009 -- no hay que ajustar el cron dos veces al año, a
+diferencia de un país que sí lo tenga).
+
+**Decisión de producto señalada, no resuelta acá: un ÚNICO horario
+global, no uno por organización.** `organizations.timezone` es un campo
+POR FILA (una organización podría, en teoría, estar en otro huso) --
+pero el cron de GitHub Actions dispara UNA vez, a una hora fija en UTC,
+para TODAS las organizaciones a la vez. Con la única organización real
+de hoy (Argentina), 07:00 local es razonable. Si el día de mañana existe
+una organización en otro huso horario, 07:00 Argentina podría ser
+medianoche o mediodía ahí -- este paso no resuelve eso (rediseñar para
+"un horario por organización" sería un cron por organización, o un cron
+más frecuente que chequee "¿ya es una hora razonable ahí?", ninguno de
+los dos construido acá).
+
+**Segunda decisión señalada, explícitamente pedida en el enunciado: qué
+pasa si el cron no corrió un día (falla de GitHub Actions, el endpoint
+caído, etc.) -- HOY, nada especial.** No hay backfill ni "resumen del día
+que faltó" -- `sendDailySummaryEmail()` siempre calcula "hoy" contra el
+instante real en que corre, nunca contra "el último día sin mandar". Si
+el cron no corre un día:
+
+- Reclamos vencidos y recordatorios: sin pérdida real -- simplemente se
+  notifican en la PRÓXIMA corrida que los encuentre, sin importar cuántos
+  días pasaron (no hay una ventana que se cierre).
+- Resumen diario: ese día específico simplemente NO tiene resumen -- no
+  se manda tarde, no se combina con el del día siguiente. Es el default
+  razonable (nadie quiere un "resumen de hace 3 días" fuera de contexto
+  mezclado con el de hoy), pero es una elección, no algo que se
+  desprenda solo del diseño -- señalada para que quede a la vista.
+
+### Cómo se probó -- contra el endpoint real, con datos reales de dev, sin mocks
+
+Levantado el dev server, con datos de prueba con prefijo identificable
+("Prueba 9.6 - ...": un reclamo insertado con `reported_at` 5 días atrás
+-- backdatear `reported_at` no es posible desde ninguna pantalla real,
+así que esto SÍ se insertó directo por SQL, a diferencia del resto de la
+verificación de este proyecto que evita eso -- y un recordatorio con
+`due_date` dentro de su ventana de aviso) sobre Torre Central:
+
+1. `POST /api/cron/daily` sin header `Authorization` -> **401**.
+2. `POST /api/cron/daily` con un Bearer incorrecto -> **401**.
+3. `POST /api/cron/daily` con el `CRON_SECRET` real -> **200**, contra
+   TODA la base de dev real (no solo los datos de prueba):
+   `{"organizationsProcessed":1,"ticketsNotifiedTotal":17,"remindersNotifiedTotal":2,"dailySummariesSent":1,"errors":[],...}`
+   -- el barrido encontró y notificó 17 reclamos reales del seed
+   (abiertos hace meses) más el de prueba, y 2 recordatorios (uno real
+   del seed más el de prueba). Confirmado por SQL: la notificación
+   `ticket_overdue`/`reminder_due` del reclamo/recordatorio de prueba con
+   el contenido exacto esperado, el recordatorio de prueba pasó a
+   `status: "notified"`, y `organizations.last_daily_summary_sent_on`
+   quedó en la fecha de hoy. El email del admin se apuntó TEMPORALMENTE a
+   `delivered@resend.dev` (mismo criterio que la verificación del 9.5)
+   para poder confirmar un envío exitoso real -- `resend.emails.list()`
+   mostró el resumen diario con `last_event: "delivered"`.
+4. **Segunda corrida, mismo secreto, mismo día** -- exactamente el
+   escenario del punto 6: `{"ticketsNotifiedTotal":0,
+"remindersNotifiedTotal":0,"dailySummariesSent":0,
+"perOrganization":[{"dailySummaryStatus":"skipped_already_sent_today",
+...}]}`. Confirmado por SQL: sigue habiendo **una sola** notificación
+   `ticket_overdue` y **una sola** `reminder_due` para las entidades de
+   prueba pese a las dos corridas completas -- la idempotencia de los
+   tres mecanismos funcionó de punta a punta, no solo en la teoría del
+   código.
+
+**Limpieza:** el reclamo y el recordatorio de prueba, y sus dos
+notificaciones, dados de baja lógica. Email del admin revertido a su
+valor real. `organizations.last_daily_summary_sent_on` reseteado a
+`null` (era un efecto secundario de esta verificación, no un dato real).
+Las ~17 notificaciones `ticket_overdue` y la notificación `reminder_due`
+generadas para reclamos/recordatorios REALES del seed (no de prueba) se
+dejaron tal cual -- son el resultado correcto de conectar el barrido, no
+un artefacto de la verificación; si se quisiera un estado de seed
+"limpio" de nuevo, correr `db:seed` desde cero lo resuelve.
+
+**Verificación aparte, corrección posterior (vencidos no urgentes en el
+resumen diario):** con el email del admin apuntado de nuevo,
+TEMPORALMENTE, a `delivered@resend.dev`, se disparó `POST
+/api/cron/daily` una vez más contra la base real de dev (con los ~17
+`ticket_overdue` ya generados en la verificación anterior, sin volver a
+insertarlos -- la idempotencia ya probada los dejó intactos). El resumen
+llegó con `last_event: "delivered"` (`resend.emails.get()`, no solo
+`emails.list()`, para leer el HTML real enviado) y, adentro, la sección
+nueva: `"Reclamos sin resolver hace más de 3 días (14)"`, con 14 reclamos
+reales del seed listados (código, título, edificio, link), y
+`"Reclamos urgentes sin resolver (2)"` sin superposición -- los 2 urgentes
+no aparecen duplicados en la lista de vencidos, confirmando en la
+práctica (no solo por lectura del código) que el filtro
+`priority !== "urgent"` separa las dos listas como se documentó. Email
+del admin revertido de nuevo, `last_daily_summary_sent_on` reseteado a
+`null` otra vez.
 
 ## Reglas de seguridad (no negociables)
 

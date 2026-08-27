@@ -1,0 +1,1 @@
+ALTER TABLE "organizations" ADD COLUMN "last_daily_summary_sent_on" date;

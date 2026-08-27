@@ -284,6 +284,64 @@ export async function getTicketsReportedInRange(
     .orderBy(asc(tickets.reportedAt));
 }
 
+export type OpenTicketRow = {
+  id: string;
+  publicCode: string;
+  title: string;
+  buildingName: string;
+  status: Status;
+  priority: Priority;
+  reportedAt: Date;
+};
+
+// TODOS los reclamos abiertos (PENDING_STATUSES) de la organización, sin
+// LIMIT -- para el barrido diario de vencidos (paso 9.6) y para la
+// sección de vencidos no urgentes del resumen diario (paso 9.5,
+// extendido en una corrección posterior -- ver
+// notifications/email/send-daily-summary-email.ts). A diferencia de
+// `getAttentionTickets` (que ya trae "urgente O estancado hace
+// STALE_TICKET_DAYS", dos señales cruzadas con el propio umbral de ESA
+// pantalla), acá hace falta el conjunto COMPLETO de reclamos abiertos: el
+// barrido llama a `ticketQualifiesAsOverdue()` (notification-content.ts,
+// paso 9.4, umbral `TICKET_OVERDUE_THRESHOLD_DAYS` propio) sobre cada uno,
+// y filtrar de antemano con la lógica de otra pantalla podría dejar afuera
+// un reclamo que SÍ califica para "vencido" pero no para "atención
+// inmediata" (ni urgente ni con `STALE_TICKET_DAYS` de estancamiento,
+// pero igual reportado hace más de `TICKET_OVERDUE_THRESHOLD_DAYS`).
+// `priority` viene incluida (no estaba en la versión original del 9.6)
+// para que el resumen diario pueda separar "vencidos" de "urgentes" sin
+// una segunda consulta.
+export async function getOpenTickets(
+  organizationId: string,
+): Promise<OpenTicketRow[]> {
+  return db
+    .select({
+      id: tickets.id,
+      publicCode: tickets.publicCode,
+      title: tickets.title,
+      buildingName: buildings.name,
+      status: tickets.status,
+      priority: tickets.priority,
+      reportedAt: tickets.reportedAt,
+    })
+    .from(tickets)
+    .innerJoin(
+      buildings,
+      and(
+        eq(buildings.id, tickets.buildingId),
+        eq(buildings.organizationId, tickets.organizationId),
+      ),
+    )
+    .where(
+      and(
+        eq(tickets.organizationId, organizationId),
+        isNull(tickets.deletedAt),
+        inArray(tickets.status, PENDING_STATUSES),
+      ),
+    )
+    .orderBy(asc(tickets.reportedAt));
+}
+
 export type BuildingTicketRow = {
   id: string;
   publicCode: string;

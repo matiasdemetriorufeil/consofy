@@ -14,8 +14,9 @@ import { publicEnv } from "./env.public";
 // src/features/announcements/messaging/get-messaging-provider.ts
 // (MESSAGING_PROVIDER, paso 8.1 -- el momento en que por fin algo la
 // importa de verdad, después de que esta misma regla bloqueó agregarla
-// antes de tiempo) y src/features/notifications/email/resend-provider.ts
-// (RESEND_API_KEY, paso 9.5). Validar variables que nada consume obliga a
+// antes de tiempo), src/features/notifications/email/resend-provider.ts
+// (RESEND_API_KEY, paso 9.5) y src/app/api/cron/daily/route.ts
+// (CRON_SECRET, paso 9.6). Validar variables que nada consume obliga a
 // rellenarlas con dummies para poder probar cualquier otra cosa, y eso
 // invalida la validación -- no repitas ese error con la próxima variable
 // nueva.
@@ -27,6 +28,21 @@ import { publicEnv } from "./env.public";
 // primer envío real, en vez de avisar al arrancar. El paso 9.5 la agrega
 // solo cuando ya está confirmada en `.env.local` -- ver CLAUDE.md >
 // Envío de emails, "cuenta creada a mano, como las de la etapa 0".
+//
+// CRON_SECRET: mismo criterio que RESEND_API_KEY -- sin default, la
+// única función de esta variable es autorizar el endpoint del cron
+// (paso 9.6), un valor vacío o ausente no tiene un "modo seguro"
+// razonable (dejaría el endpoint sin protección real). A diferencia de
+// RESEND_API_KEY (una cuenta externa que hay que crear a mano), este
+// valor no corresponde a ningún servicio de terceros -- es un secreto
+// compartido arbitrario entre esta app y el workflow de GitHub Actions
+// que la llama, así que se generó acá mismo (no hace falta "crear una
+// cuenta" para esto). Lo que SÍ queda pendiente de un paso manual, fuera
+// del repo -- ver CLAUDE.md > Cron diario: cargar el MISMO valor como
+// secret del repositorio en GitHub (Settings → Secrets and variables →
+// Actions) y como variable de entorno en Vercel -- eso no lo puede hacer
+// Claude Code solo, señalado en el reporte del paso, mismo criterio que
+// Resend.
 //
 // MESSAGING_PROVIDER: "console" | "manual_link" -- NO incluye "cloud_api"
 // todavía. CloudApiProvider es etapa 13, ni siquiera existe un stub (pedido
@@ -63,6 +79,7 @@ const schema = z.object({
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
   MESSAGING_PROVIDER: z.enum(["console", "manual_link"]).default("console"),
   RESEND_API_KEY: z.string().min(1),
+  CRON_SECRET: z.string().min(1),
 });
 
 // -----------------------------------------------------------------------
@@ -145,6 +162,7 @@ function parseEnv() {
     // ausencia real, para que sí dispare el default.
     MESSAGING_PROVIDER: process.env.MESSAGING_PROVIDER || undefined,
     RESEND_API_KEY: process.env.RESEND_API_KEY,
+    CRON_SECRET: process.env.CRON_SECRET,
   });
 
   if (!parsed.success) {
