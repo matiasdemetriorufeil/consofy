@@ -438,6 +438,39 @@ Excepciones documentadas (y por qué):
   de ninguna organización); forzar `requireUser()` ahí solo agregaría una
   consulta a la base sin beneficio real.
 
+**Un `app_user` dado de baja lógica (`deleted_at` seteado) podía seguir
+logueado y operando con normalidad -- hueco de seguridad real, encontrado en
+la práctica, corregido. Decisión tomada CON LA PERSONA.** Descubierto al dar
+de baja una cuenta de prueba de QA en producción: `resolveAuthorizedUser()`
+(`src/lib/auth.ts`) resolvía la sesión buscando `app_users` solo por `id`,
+sin filtrar `deletedAt` -- si la sesión de Supabase seguía siendo válida (el
+usuario de `auth.users` no se toca al dar de baja `app_users`, son sistemas
+distintos, ver el comentario de `app-users.ts` sobre por qué no hay FK entre
+los dos), la persona entraba al panel exactamente igual que antes de la
+baja, sin ningún error ni comportamiento raro. El WHERE ahora es
+`and(eq(appUsers.id, session.user.id), isNull(appUsers.deletedAt))` -- un
+`app_user` dado de baja deja de resolver del todo, mismo tratamiento que
+"sesión sin fila en `app_users`" (el caso ya documentado arriba, mismo
+patrón de "no autorizado" -> redirect a `/login`, sin inventar un caso
+nuevo). Cubre TODO request protegido, no solo el login: `requireUser()` se
+llama fresco en cada uno (el layout de `/panel` es `force-dynamic`, y el
+`cache()` de React que envuelve `resolveAuthorizedUser()` memoiza por
+REQUEST, nunca entre requests -- ver el comentario del archivo), así que
+una baja a mitad de una sesión abierta la corta en el próximo request de esa
+misma sesión, sin esperar a un logout/login nuevo.
+
+**Verificado en vivo, no solo por lectura del código** (Playwright, `app_user`
+de prueba dedicado -- Auth + fila en `app_users`, creados y borrados
+físicamente al terminar, mismo criterio que cualquier cuenta de prueba de
+este proyecto): login real por `/login` -> `/panel` (acceso normal
+confirmado); con esa MISMA sesión de navegador todavía abierta, `deleted_at`
+seteado por SQL directo contra la fila; siguiente request de esa sesión
+(`/panel`, después `/panel/tickets`, sin volver a loguearse) -> los dos
+redirigen a `/login`. `npm run lint`/`format:check`/`test`/`build` corridos
+después del cambio, todos en verde (144/144 tests, build sin errores de
+TypeScript) -- ningún flujo de un usuario activo (`deleted_at IS NULL`) se
+vio afectado.
+
 ## Selector de edificio activo
 
 El panel entero (reclamos, comunicados, recordatorios, documentos) se

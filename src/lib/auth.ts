@@ -1,7 +1,7 @@
 import "server-only";
 
 import type { User } from "@supabase/supabase-js";
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { redirect } from "next/navigation";
 import { cache } from "react";
 
@@ -75,7 +75,7 @@ async function resolveAuthorizedUser(): Promise<AuthorizedUser | null> {
     })
     .from(appUsers)
     .innerJoin(organizations, eq(appUsers.organizationId, organizations.id))
-    .where(eq(appUsers.id, session.user.id));
+    .where(and(eq(appUsers.id, session.user.id), isNull(appUsers.deletedAt)));
 
   if (!row) {
     return null;
@@ -104,13 +104,21 @@ async function resolveAuthorizedUser(): Promise<AuthorizedUser | null> {
 // real: código que verifica "hay usuario" pero se olvida de filtrar por
 // organización antes de tocar datos.
 //
-// Redirige a /login en dos casos, no solo uno: sin sesión de Supabase
-// (nadie logueado), y CON sesión de Supabase pero sin fila en app_users
-// (un usuario de auth.users que existe pero nunca se vinculó a una
+// Redirige a /login en TRES casos, no solo uno: sin sesión de Supabase
+// (nadie logueado); CON sesión de Supabase pero sin fila en app_users (un
+// usuario de auth.users que existe pero nunca se vinculó a una
 // organización -- ver la nota sobre la falta de FK a auth.users en
-// app-users.ts). El segundo caso no debería pasar en el flujo normal, pero
-// tratarlo igual que "no hay sesión" es la opción segura: no hay
-// autorización posible sin organización.
+// app-users.ts); y CON sesión de Supabase y fila en app_users, pero con
+// `deleted_at` seteado (un app_user dado de baja lógica -- agregado al
+// encontrar en la práctica que, sin este filtro, dar de baja una cuenta no
+// le impedía seguir logueada y operando con normalidad: la sesión de
+// Supabase seguía siendo válida, y esta consulta encontraba la fila igual,
+// deleted_at o no). Los tres casos no deberían pasar en el flujo normal,
+// pero tratarlos igual que "no hay sesión" es la opción segura: no hay
+// autorización posible sin una organización, y no hay autorización posible
+// para un app_user que ya no debería tener acceso. `isNull(appUsers.deletedAt)`
+// en el WHERE hace que una fila dada de baja ni siquiera aparezca en el
+// resultado -- mismo mecanismo, sin una rama de código nueva.
 export const requireUser = cache(async (): Promise<AuthorizedUser> => {
   const authorized = await resolveAuthorizedUser();
   if (!authorized) {
