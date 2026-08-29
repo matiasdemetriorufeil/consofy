@@ -6396,6 +6396,169 @@ práctica (no solo por lectura del código) que el filtro
 del admin revertido de nuevo, `last_daily_summary_sent_on` reseteado a
 `null` otra vez.
 
+## Biblioteca de documentos: subida (paso 10.1)
+
+Primer paso de la etapa 10. `/panel/documents` deja de ser un `EmptyState`
+y pasa a tener un formulario que sube un archivo a Supabase Storage,
+organizado por edificio y categoría, con validación de tipo y tamaño --
+detrás de una Server Action envuelta en `authorizedAction()`. El
+explorador completo (filtros, descarga con URLs firmadas, versiones) es
+10.2 en adelante.
+
+**Diferencia de esquema encontrada -- `documents.category` es `text`, no un
+enum de Postgres.** El plan (etapa 2.5) hablaba de un modelo simplificado;
+la tabla real (`src/db/schema/documents.ts`, migrada en `0010`) ya tenía
+resuelto esto de otra forma, con su propio comentario: _"a diferencia de
+categories [...] acá category es solo una etiqueta para filtrar/agrupar la
+biblioteca. Si hace falta una lista fija se valida con Zod en la
+aplicación -- no se modela una tabla nueva para esto ahora"_. Este paso es
+ese momento: la lista fija de seis categorías se valida con `z.enum` en
+`src/features/documents/document-schema.ts` (`DOCUMENT_CATEGORIES`), sin
+migración ni cambio de tipo de columna. Sin CHECK a nivel base a
+propósito -- mismo criterio que el schema ya había fijado, y todas las
+escrituras pasan por el `z.enum` de la Server Action. Otras columnas que
+la tabla real ya trae y el plan no mencionaba (`visibility` enum
+`private`/`residents` con default `private`; `version` default 1;
+`supersedes_id` FK compuesta autorreferenciada, nullable) quedan en sus
+defaults en 10.1 -- son de pasos posteriores (visibilidad para vecinos,
+versionado), no se tocan acá.
+
+**Mapeo de categorías -- etiqueta en español (UI), valor en inglés (base y
+path).** Documentado en `document-schema.ts`:
+
+| UI (español) | Base (`documents.category`) |
+| ------------ | --------------------------- |
+| Reglamento   | `regulations`               |
+| Actas        | `minutes`                   |
+| Balances     | `balance_sheets`            |
+| Seguros      | `insurance`                 |
+| Avisos       | `notices`                   |
+| Otros        | `other`                     |
+
+`avisos` -> `notices`, NO `announcements`, a propósito: `announcement*` ya
+es el dominio de comunicados masivos (etapa 8) en el código; reusar esa
+palabra acá haría que un `grep` mezclara dos conceptos distintos. Los
+tres documentos del seed usan valores en español minúscula
+(`reglamento`/`actas`/`balances`) -- la lista del panel los muestra con el
+valor crudo vía el guard `isDocumentCategory` (fallback), no rompen; si se
+quiere consistencia total, alinear el seed en un paso posterior de la
+etapa 10.
+
+**Bucket `building-documents` (migración `0037`), privado, escritura solo
+por service-role desde el servidor -- mismo patrón que la Etapa 5, no uno
+nuevo.** Creado por migración (`INSERT INTO storage.buckets ...
+ON CONFLICT DO NOTHING`), igual que `ticket-attachments` en la `0019`, por
+la misma razón (un bucket hecho a mano no existe en los demás proyectos de
+Supabase). Privado, `file_size_limit` 10 MB, `allowed_mime_types` con los
+siete tipos canónicos (pdf, doc, docx, xls, xlsx, jpeg, png).
+
+Diferencia clave con `ticket-attachments`: ese bucket necesita policies de
+`anon` (INSERT/DELETE acotadas a `pending/%`) porque el formulario público
+sube DIRECTO del navegador SIN sesión. Acá la subida corre en el SERVIDOR,
+detrás de `authorizedAction()`, así que **`building-documents` no tiene
+NINGUNA policy sobre `storage.objects`** -- `anon`/`authenticated` no
+tienen ningún acceso. La escritura (y las futuras URLs firmadas del paso
+10.4) pasan por `createAdminClient()` (service-role key), que evade la
+ausencia de policy igual que el rol `postgres` evade RLS en las tablas --
+mismo criterio que CLAUDE.md > Políticas RLS ("el rol de la app evade RLS,
+la defensa real es la aplicación") y que la `0019` ya dejó documentado
+para las LECTURAS de `ticket-attachments`. La autorización real la hace
+`uploadDocumentAction` (`src/features/documents/actions.ts`): sesión
+válida vía `authorizedAction()`, y el `buildingId` se valida contra
+`getActiveBuildings()` de la organización de quien llama ANTES de tocar
+Storage (la FK compuesta `(building_id, organization_id) -> buildings` es
+la defensa de base; el chequeo previo es para no subir un objeto que
+después no va a poder tener fila). `createAdminClient()` gana un segundo
+consumidor real -- su comentario (`src/lib/supabase/admin.ts`) lista los
+dos ahora, como pide CLAUDE.md > Reglas de entorno sobre la visibilidad
+de cada uso de la service-role key.
+
+**Estructura del path en Storage:
+`{building_id}/{category}/{uuid}-{nombre-sanitizado}.{ext}`**
+(`buildDocumentStoragePath`, `document-schema.ts`). El `uuid` al frente
+evita choques entre dos archivos con el mismo nombre; el nombre
+sanitizado es NFKD sin tildes, minúsculas, `[^a-z0-9]+ -> "-"`, sin
+guiones en los extremos, recortado a 80 caracteres, con fallback
+`documento`. El nombre original completo (sin sanitizar) se guarda aparte
+en `documents.original_filename`. `uuid` es un parámetro con default
+(`crypto.randomUUID()`) para poder testear el armado del path contra un
+valor fijo -- mismo criterio que `today`/`now` en `reminder-urgency.ts` /
+`find-similar-tickets.ts`.
+
+**Validación de tipo por EXTENSIÓN, no por `File.type` del navegador.** El
+MIME que reporta el navegador para `.doc`/`.xls` es poco confiable (llega
+vacío o `application/octet-stream`). `validateDocumentFilename` decide por
+la extensión; el Content-Type que se le pasa a Storage es CANÓNICO
+derivado de la extensión (`canonicalMimeForFilename`), para que el chequeo
+`allowed_mime_types` del bucket pase de forma determinística, y ese mismo
+valor canónico es el que queda en `documents.mime_type`. Tamaño: 10 MB
+(`MAX_DOCUMENT_SIZE_BYTES`), validado en el cliente (feedback inmediato) y
+de nuevo en el servidor con la MISMA función (CLAUDE.md > Reglas de
+seguridad). `title` es opcional en el formulario -- si se deja vacío, la
+Server Action usa el nombre del archivo sin extensión (`documents.title`
+es NOT NULL). `uploaded_by` = `display_name` del admin (texto libre, mismo
+criterio que `tickets.assignee`). Si el `INSERT` en `documents` falla
+después de una subida exitosa, la acción borra el objeto de Storage para
+no dejar un huérfano.
+
+**Punto de entrada -- `/panel/documents`, con el selector de edificio del
+header** (patrón de Recordatorios, `getSelectedBuilding()`): con un
+edificio elegido, el formulario lo fija; con "todos los edificios", lo
+pide con un `<select>`. Un documento siempre pertenece a UN edificio
+(`documents.building_id` NOT NULL, no hay "toda la organización" como en
+`announcements`). La página muestra además una lista mínima de solo
+lectura ("Documentos cargados": título, archivo, tamaño, categoría,
+fecha) como confirmación visual de la subida -- sin descarga, sin
+filtros, sin paginación (eso es 10.2+).
+
+**Verificado de punta a punta, navegador real (Playwright, admin de
+prueba dedicado creado y borrado -- Auth + `app_users`), sin mocks:**
+
+- **Rechazo (dirección negativa):** con un `.txt`, el campo Archivo
+  muestra `[data-slot="field-error"]` con el texto exacto
+  _"Ese tipo de archivo no está permitido. Subí un PDF, Word (.doc/.docx),
+  Excel (.xls/.xlsx) o imagen (.jpg/.jpeg/.png)."_ y el botón "Subir
+  documento" queda deshabilitado. Con un PDF de 11.534.336 bytes
+  (> 10 MB), el mismo `[data-slot="field-error"]` muestra exactamente
+  _"El archivo supera el límite de 10 MB."_ (distinto del texto de ayuda
+  estático "... Hasta 10 MB." que vive en `[data-slot="field-description"]`
+  del mismo campo) y el botón queda deshabilitado. En ninguno de los dos
+  casos se emite request ni queda objeto en Storage ni fila. Un archivo
+  válido después limpia el error y rehabilita el botón.
+- **Aceptación (dirección positiva):** se subió un archivo por cada tipo
+  permitido (`.pdf`, `.docx`, `.xlsx`, `.jpg`, `.png`, más un segundo
+  `.pdf` para la categoría Avisos) -- `.doc`/`.xls` legacy no con archivo
+  real, comparten camino de código con `.docx`/`.xlsx` y están en los
+  unit tests. Cada subida devolvió el toast "Documento subido." y apareció
+  en la lista. Confirmado por SQL: seis filas en `documents` con
+  `category` en inglés (`minutes`/`regulations`/`balance_sheets`/
+  `insurance`/`other`/`notices`), `storage_path` con la forma
+  `{building_id}/{category}/{uuid}-{nombre}.{ext}`, `mime_type` canónico
+  (las formas largas de docx/xlsx, no lo que reportó el navegador),
+  `visibility='private'`, `version=1`, `supersedes_id=null`,
+  `uploaded_by='Prueba 10.1'`. Confirmado contra Storage (service-role):
+  los seis objetos presentes en esos paths, en el bucket con
+  `public=false`, `file_size_limit=10485760`.
+- **Limpieza:** las seis filas de `documents` -> baja lógica
+  (`deleted_at`), nunca `DELETE` físico (CLAUDE.md > Reglas de entorno);
+  los seis objetos de Storage -> borrado real (Storage no tiene baja
+  lógica); la cuenta de prueba -> borrada por completo (Auth Admin API +
+  `DELETE` en `app_users`). `documents` activos de vuelta en 3 (los del
+  seed).
+
+**Unit tests -- `document-schema.test.ts`, 18 tests (144 -> 162 en el
+total del proyecto).** Cubren las dos direcciones de la validación pura
+(la que corre en el servidor): rechazo de extensiones no permitidas y sin
+extensión, rechazo de tamaño 0 / negativo / por encima del límite exacto;
+aceptación de cada extensión permitida (minúscula y mayúscula) y del
+límite exacto; el mapeo extensión -> MIME canónico; `sanitizeFilenameStem`
+(tildes, separadores, recorte a 80, fallback); `buildDocumentStoragePath`
+(forma completa, extensión en minúscula); que `DOCUMENT_CATEGORY_LABEL`
+cubre las seis categorías.
+
+**Sin dependencias nuevas** -- `package.json`/`package-lock.json` sin
+tocar.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
