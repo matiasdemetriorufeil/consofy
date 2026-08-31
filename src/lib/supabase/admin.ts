@@ -15,13 +15,23 @@ import { publicEnv } from "@/lib/env.public";
 //
 // USO ACOTADO A PROPÓSITO: solo Storage. Consumidores reales:
 //  - `createSignedAttachmentUrls` (src/features/tickets/storage-objects.ts
-//    -- paso 5.10, movido a tickets/ en el 6.3): firma URLs para leer el
-//    bucket privado `ticket-attachments`.
+//    -- paso 5.10, movido a tickets/ en el 6.3): firma URLs de corta
+//    duración para LEER los adjuntos de un reclamo del bucket privado
+//    `ticket-attachments` (la galería `/s/[token]` y la vista de detalle
+//    del panel).
 //  - `uploadDocumentAction` (src/features/documents/actions.ts, paso 10.1):
-//    escribe en el bucket privado `building-documents`, que no tiene ninguna
+//    ESCRIBE en el bucket privado `building-documents`, que no tiene ninguna
 //    policy para `anon`/`authenticated` -- la subida corre en el servidor
-//    detrás de `authorizedAction()`, así que esta es la única vía. Las
-//    lecturas firmadas de ese bucket (paso 10.4) van a pasar por acá también.
+//    detrás de `authorizedAction()`, así que esta es la única vía. También
+//    BORRA el objeto si el INSERT de la fila falla.
+//  - `createDocumentDownloadUrl` (src/features/documents/storage-objects.ts,
+//    paso 10.4), llamada solo desde `getDocumentDownloadUrlAction`
+//    (`authorizedAction()` + chequeo de que el documento es de la
+//    organización): firma la URL de descarga de UN documento, bajo demanda,
+//    de `building-documents`. Igual que en el bucket de adjuntos, sus
+//    policies no dan lectura a nadie, así que la URL firmada es la única
+//    forma de servir el archivo -- eso es lo que cierra el criterio de
+//    aceptación de la Etapa 10 (la ruta cruda de Storage no sirve nada).
 // Nunca para leer ni escribir tablas de negocio -- esas siguen pasando
 // SIEMPRE por Drizzle (`src/db/index.ts`, que ya evade RLS con el rol
 // `postgres`, sin necesitar esta clave -- ver CLAUDE.md > Acceso a datos).

@@ -1,5 +1,4 @@
 import {
-  Download,
   File as FileIcon,
   FileImage,
   FileSpreadsheet,
@@ -8,7 +7,6 @@ import {
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import {
   Table,
   TableBody,
@@ -28,6 +26,7 @@ import {
   type FileKind,
 } from "../document-schema";
 import type { DocumentListRow } from "../queries";
+import { DocumentDownloadButton } from "./document-download-button";
 import { DocumentVisibilityControl } from "./document-visibility-control";
 
 const FILE_KIND_ICON: Record<FileKind, LucideIcon> = {
@@ -44,25 +43,6 @@ function categoryLabel(category: string): string {
     : category;
 }
 
-// Descargar/ver es el paso 10.4 (URLs firmadas) -- acá solo la afordancia,
-// deshabilitada. El `<span title>` que la envuelve es lo que hace que el
-// tooltip aparezca al pasar el mouse aunque el botón esté disabled (varios
-// navegadores no disparan hover sobre un control deshabilitado).
-function DownloadAffordance() {
-  return (
-    <span title="Disponible en el próximo paso (descarga con enlace seguro)">
-      <Button
-        variant="ghost"
-        size="icon-sm"
-        disabled
-        aria-label="Descargar (disponible próximamente)"
-      >
-        <Download aria-hidden="true" />
-      </Button>
-    </span>
-  );
-}
-
 function FileTypeCell({ mimeType }: { mimeType: string }) {
   const kind = getFileKind(mimeType);
   const Icon = FILE_KIND_ICON[kind];
@@ -74,12 +54,12 @@ function FileTypeCell({ mimeType }: { mimeType: string }) {
   );
 }
 
-// Server Component -- las filas casi no tienen interacción de cliente: solo
-// el control de visibilidad de cada fila (paso 10.3, `<DocumentVisibilityControl>`,
-// que es Client) y la descarga (paso 10.4, todavía deshabilitada). Desktop:
-// tabla. Mobile: tarjetas apiladas -- mismo criterio responsive que la
-// bandeja de reclamos (una tabla de 7-8 columnas no entra en un celular sin
-// cortar contenido).
+// Server Component -- las filas tienen dos controles de cliente chicos: el
+// de visibilidad (paso 10.3, `<DocumentVisibilityControl>`) y el de
+// descarga (paso 10.4, `<DocumentDownloadButton>`, que pide la URL firmada
+// bajo demanda). Desktop: tabla. Mobile: tarjetas apiladas -- mismo
+// criterio responsive que la bandeja de reclamos (una tabla de 7-8
+// columnas no entra en un celular sin cortar contenido).
 export function DocumentList({
   rows,
   showBuildingColumn,
@@ -153,7 +133,10 @@ export function DocumentList({
                   </time>
                 </TableCell>
                 <TableCell>
-                  <DownloadAffordance />
+                  <DocumentDownloadButton
+                    documentId={row.id}
+                    title={row.title}
+                  />
                 </TableCell>
               </TableRow>
             ))}
@@ -176,7 +159,7 @@ export function DocumentList({
                   {row.originalFilename}
                 </p>
               </div>
-              <DownloadAffordance />
+              <DocumentDownloadButton documentId={row.id} title={row.title} />
             </div>
 
             <div className="flex flex-wrap items-center gap-2">

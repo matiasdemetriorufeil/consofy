@@ -14,6 +14,7 @@ import {
   buildDocumentStoragePath,
   canonicalMimeForFilename,
   documentUploadFieldsSchema,
+  getDocumentDownloadInputSchema,
   getFileExtension,
   initialDocumentUploadState,
   setDocumentVisibilityInputSchema,
@@ -23,6 +24,7 @@ import {
   type DocumentUploadState,
   type DocumentVisibility,
 } from "./document-schema";
+import { createDocumentDownloadUrl } from "./storage-objects";
 
 function fieldError(
   field: keyof DocumentUploadFieldErrors,
@@ -218,5 +220,65 @@ export const setDocumentVisibilityAction = authorizedAction(
 
     revalidatePath("/panel/documents");
     return { ok: true, visibility: updated.visibility };
+  },
+);
+
+export type GetDocumentDownloadUrlResult =
+  { ok: true; url: string } | { ok: false; error: string };
+
+// Genera, BAJO DEMANDA, una URL firmada de corta duración para descargar
+// UN documento (paso 10.4). Cierra el criterio de aceptación de la Etapa
+// 10: el bucket `building-documents` no tiene ninguna policy de lectura
+// (migración 0037), así que la ruta cruda de Storage no sirve el archivo a
+// nadie -- la ÚNICA vía es esta URL firmada, y esta acción solo la emite
+// después de:
+//
+//  1. `authorizedAction()` -- sesión válida.
+//  2. El `SELECT ... WHERE id AND organization_id AND deleted_at IS NULL`
+//     -- el documento pertenece a la organización de quien pide. Un id de
+//     otra organización (o borrado, o inventado) no matchea y devuelve el
+//     mismo mensaje ambiguo que el resto del proyecto.
+//
+// Recién ahí `createDocumentDownloadUrl()` (storage-objects.ts) usa
+// `createAdminClient()` para firmar. Nunca se precalcula ni se guarda en
+// una prop: la URL solo existe mientras alguien la está descargando, y
+// vive 5 minutos (ver el comentario de DOCUMENT_DOWNLOAD_URL_EXPIRES_IN_SECONDS).
+export const getDocumentDownloadUrlAction = authorizedAction(
+  async (context, input: unknown): Promise<GetDocumentDownloadUrlResult> => {
+    const parsed = getDocumentDownloadInputSchema.safeParse(input);
+    if (!parsed.success) {
+      return { ok: false, error: "Datos inválidos." };
+    }
+
+    const [doc] = await db
+      .select({
+        storagePath: documents.storagePath,
+        originalFilename: documents.originalFilename,
+      })
+      .from(documents)
+      .where(
+        and(
+          eq(documents.id, parsed.data.documentId),
+          eq(documents.organizationId, context.organization.id),
+          isNull(documents.deletedAt),
+        ),
+      );
+
+    if (!doc) {
+      return { ok: false, error: "No encontramos ese documento." };
+    }
+
+    try {
+      const url = await createDocumentDownloadUrl(
+        doc.storagePath,
+        doc.originalFilename,
+      );
+      return { ok: true, url };
+    } catch {
+      return {
+        ok: false,
+        error: "No pudimos preparar la descarga. Probá de nuevo en un momento.",
+      };
+    }
   },
 );

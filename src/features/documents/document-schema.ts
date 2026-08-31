@@ -246,6 +246,12 @@ export const setDocumentVisibilityInputSchema = z.object({
   visibility: z.enum(DOCUMENT_VISIBILITY_VALUES),
 });
 
+// Entrada de `getDocumentDownloadUrlAction` (paso 10.4) -- solo el id; la
+// pertenencia a la organización la verifica la acción antes de firmar nada.
+export const getDocumentDownloadInputSchema = z.object({
+  documentId: z.uuid(),
+});
+
 // -----------------------------------------------------------------------
 // Tipo de archivo para la UI -- derivado del mime_type ya guardado
 // -----------------------------------------------------------------------

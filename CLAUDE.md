@@ -6805,6 +6805,113 @@ uuid o un valor de enum inválidos.
 **Sin dependencias nuevas ni migraciones** -- `documents.visibility` ya
 existía; este paso solo lo hace editable.
 
+## Descarga de documentos con URL firmada (paso 10.4)
+
+El botón de descarga del explorador (deshabilitado desde el 10.2) se
+habilita. Cierra el criterio de aceptación de TODA la Etapa 10: **un
+documento privado no es accesible con la URL directa aunque se conozca la
+ruta.** Esto es descarga desde el PANEL únicamente (sesión de
+administrador); el acceso del vecino a documentos visibles es el 11.3,
+que no existe todavía y no se anticipó nada acá.
+
+**Paralelo a `createSignedAttachmentUrls` (tickets, pasos 5.10/6.3), con
+tres diferencias deliberadas:**
+
+1. **Se pide BAJO DEMANDA, al click, nunca precalculada.** Tickets firma
+   la galería entera de un reclamo en el render del Server Component (una
+   pantalla = pocas fotos). El explorador de documentos es una lista
+   paginada de hasta 25 filas; firmar 25 URLs por carga y dejarlas en
+   props que pueden vivir más que la firma sería justo lo que el
+   enunciado prohíbe. `DocumentDownloadButton` (Client Component chico,
+   mismo criterio que `DocumentVisibilityControl` del 10.3) llama a
+   `getDocumentDownloadUrlAction(documentId)` en un `useTransition` recién
+   al hacer click; `DocumentList` sigue siendo Server Component.
+
+2. **`createSignedUrl` SINGULAR** (un documento) en vez de
+   `createSignedUrls` plural (una galería). `src/features/documents/
+storage-objects.ts` -> `createDocumentDownloadUrl(storagePath,
+downloadFilename)`.
+
+3. **`{ download: originalFilename }` al firmar** -- Supabase agrega
+   `Content-Disposition: attachment; filename="..."`, así el navegador
+   GUARDA el archivo con su nombre real (`documents.original_filename`),
+   no lo abre inline ni usa el basename sanitizado del `storage_path`.
+   Los adjuntos de reclamos se ABREN inline (son fotos que se miran); un
+   documento administrativo se BAJA. El cliente dispara la descarga con un
+   `<a>` temporal (mismo patrón que `downloadTemplate` en
+   `import-dialog.tsx`).
+
+**Duración: 5 minutos (`DOCUMENT_DOWNLOAD_URL_EXPIRES_IN_SECONDS = 60 *
+5`), MÁS CORTA que la hora de `createSignedAttachmentUrls` -- desviación
+con motivo concreto (el enunciado pide reusar el criterio salvo razón
+concreta).** La hora de tickets está justificada en CLAUDE.md > Galería
+pública de adjuntos como "una sesión de lectura real: el administrador
+puede distraerse, volver, mirar varias fotos". Acá no hay sesión de
+lectura: la URL se genera en el momento del click y el navegador la
+consume en segundos. 5 minutos cubre con margen un "Guardar como" lento o
+un reintento, sin dejar viva una hora entera una URL que sirve bytes sin
+volver a chequear la sesión. Sigue siendo "corta duración" (CLAUDE.md >
+Reglas de seguridad).
+
+**Server Action -- `getDocumentDownloadUrlAction(input)`**
+(`documents/actions.ts`), envuelta en `authorizedAction()`. Antes de
+firmar nada: (1) sesión válida; (2) `SELECT storage_path,
+original_filename FROM documents WHERE id = ? AND organization_id = ? AND
+deleted_at IS NULL` -- el documento pertenece a la organización de quien
+pide; un id de otra organización (o borrado, o inventado) no matchea y
+devuelve el mismo `"No encontramos ese documento."` ambiguo del resto del
+proyecto. Recién ahí `createDocumentDownloadUrl()` usa `createAdminClient()`
+(service-role) para firmar -- el bucket `building-documents` no tiene
+NINGUNA policy de lectura (migración `0037`), así que la URL firmada es la
+única forma de servir el archivo. `src/lib/supabase/admin.ts` suma este
+tercer consumidor a su lista, con el detalle habitual.
+
+**Fuera de alcance, a propósito:** portal del vecino / acceso público
+(11.3). Gestión de versiones (10.5) -- no se tocó nada de cómo se
+relacionan versión anterior/actual. Control de cuota (10.6).
+
+**Verificado de punta a punta contra la base y el Storage reales
+(Playwright, admin de prueba dedicado creado y borrado):**
+
+- **Descarga = archivo subido, byte a byte.** Un `.pdf` de 4146 bytes con
+  contenido conocido subido por el formulario real; descargado desde la
+  fila del explorador (evento `download` real de Chromium). La URL de la
+  descarga fue `.../storage/v1/object/sign/building-documents/<path>?token=
+<jwt>&download=upload.pdf` (firmada, con token); `suggestedFilename` =
+  `upload.pdf` (el `{ download }` funcionó). **sha256 del archivo
+  descargado == sha256 del subido** (`f9dcca09...`), no solo un 200.
+- **Criterio de aceptación de la Etapa 10 -- la ruta cruda NO sirve
+  nada.** Pedido el MISMO archivo por su `storage_path` conocido, sin el
+  token de firma, de cuatro formas: URL pública del bucket armada a mano
+  (`/object/public/...`), URL del objeto sin auth (`/object/...`), URL del
+  objeto con la anon key como Bearer, y la propia URL firmada sin el
+  `?token=`. **Los cuatro -> HTTP 400** con un cuerpo de error de ~90-120
+  bytes (JSON), nunca los 4146 bytes del archivo. Conocer la ruta no
+  alcanza; sin el token firmado no se sirve nada.
+- **La URL firmada expira.** Con un TTL deliberadamente corto de 2s solo
+  para la prueba: antes de vencer -> HTTP 200 con el contenido correcto
+  (sha256 coincide); 4s después (vencida) -> HTTP 400, rechazada. En
+  producción el TTL es 300s (5 min), la constante de arriba.
+- **Aislamiento por organización:** el `SELECT` de la acción filtra por
+  `organization_id` (+ `deleted_at IS NULL`) antes de firmar -- mismo
+  mecanismo ya verificado en el 10.3 con `setDocumentVisibilityAction`.
+- **Limpieza:** documento de prueba dado de baja lógica (`deleted_at`);
+  objeto de Storage borrado de verdad; cuenta de prueba borrada por
+  completo (Auth + `app_users`). `documents` activos de vuelta en 3
+  (seed), bucket sin objetos de prueba.
+
+**Diferencias respecto de lo esperado del patrón de tickets:** ninguna
+sorpresa -- `createSignedAttachmentUrls` era exactamente lo previsto
+(service-role, 1h, plural, `throw` en error). Los tres cambios de arriba
+(bajo demanda, singular, `{ download }`) son decisiones de este paso, no
+cosas que "no coincidieron".
+
+**Unit tests -- +2 (178 -> 180).** `document-schema.test.ts`:
+`getDocumentDownloadInputSchema` acepta un uuid válido y rechaza un id que
+no es uuid o que falta.
+
+**Sin dependencias nuevas ni migraciones.**
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.

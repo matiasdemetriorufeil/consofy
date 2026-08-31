@@ -10,6 +10,7 @@ import {
   DOCUMENT_VISIBILITY_VALUES,
   FILE_KIND_LABEL,
   formatFileSize,
+  getDocumentDownloadInputSchema,
   getFileExtension,
   getFileKind,
   isDocumentCategory,
@@ -226,5 +227,22 @@ describe("visibilidad", () => {
         visibility: "public",
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("descarga (paso 10.4)", () => {
+  it("getDocumentDownloadInputSchema acepta un uuid válido", () => {
+    expect(
+      getDocumentDownloadInputSchema.safeParse({
+        documentId: "3f1e8c2a-9b4d-4e6f-8a1b-2c3d4e5f6a7b",
+      }).success,
+    ).toBe(true);
+  });
+
+  it("getDocumentDownloadInputSchema rechaza un id que no es uuid o falta", () => {
+    expect(
+      getDocumentDownloadInputSchema.safeParse({ documentId: "abc" }).success,
+    ).toBe(false);
+    expect(getDocumentDownloadInputSchema.safeParse({}).success).toBe(false);
   });
 });
