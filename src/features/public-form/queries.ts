@@ -1,6 +1,6 @@
 import "server-only";
 
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull } from "drizzle-orm";
 import { cache } from "react";
 
 import { db } from "@/db";
@@ -10,10 +10,15 @@ import {
   organizations,
   people,
   ticketAttachments,
+  ticketEvents,
   tickets,
   units,
 } from "@/db/schema";
 
+import {
+  PUBLIC_TIMELINE_EVENT_TYPES,
+  type PublicTimelineEventRow,
+} from "./public-timeline";
 import type { PublicTicketStatus } from "./status-lookup-schema";
 
 export type PublicBuilding = {
@@ -164,6 +169,11 @@ export type TicketGallery = {
   categoryName: string;
   neighborName: string;
   attachments: TicketAttachmentFile[];
+  // Eventos de `ticket_events` YA filtrados a los tipos seguros para el
+  // vecino (paso 11.2, ver public-timeline.ts). Crudos: la página los pasa
+  // por buildPublicTimeline para armar el texto. Nunca incluye
+  // notas/asignación/prioridad ni nada que nombre a otro reclamo.
+  timelineEvents: PublicTimelineEventRow[];
 };
 
 // Resuelve el reclamo detrás de un token de adjuntos (paso 5.10,
@@ -209,6 +219,7 @@ export async function getTicketByAttachmentsToken(
   const [row] = await db
     .select({
       id: tickets.id,
+      organizationId: tickets.organizationId,
       publicCode: tickets.publicCode,
       title: tickets.title,
       status: tickets.status,
@@ -259,6 +270,27 @@ export async function getTicketByAttachmentsToken(
     .where(eq(ticketAttachments.ticketId, row.id))
     .orderBy(asc(ticketAttachments.createdAt));
 
+  // Línea de tiempo pública (paso 11.2) -- SOLO los tipos seguros para el
+  // vecino (ver public-timeline.ts). Se filtra en la query, no al
+  // renderizar: una nota interna ni siquiera sale de la base por esta vía.
+  // Filtra por organización además de por ticket, mismo criterio que
+  // getTicketTimeline (el interno del panel).
+  const timelineEvents = await db
+    .select({
+      type: ticketEvents.type,
+      payload: ticketEvents.payload,
+      createdAt: ticketEvents.createdAt,
+    })
+    .from(ticketEvents)
+    .where(
+      and(
+        eq(ticketEvents.ticketId, row.id),
+        eq(ticketEvents.organizationId, row.organizationId),
+        inArray(ticketEvents.type, [...PUBLIC_TIMELINE_EVENT_TYPES]),
+      ),
+    )
+    .orderBy(asc(ticketEvents.createdAt));
+
   return {
     publicCode: row.publicCode,
     title: row.title,
@@ -269,6 +301,7 @@ export async function getTicketByAttachmentsToken(
     organizationTimezone: row.organizationTimezone,
     unitLabel,
     categoryName: row.categoryName,
+    timelineEvents,
     neighborName,
     attachments,
   };

@@ -3,7 +3,9 @@ import { z } from "zod";
 
 import { RelativeDate } from "@/components/relative-date";
 import { Card, CardContent } from "@/components/ui/card";
+import { PublicTicketTimeline } from "@/features/public-form/components/ticket-public-timeline";
 import { PublicTicketStatusBadge } from "@/features/public-form/components/ticket-status-summary";
+import { buildPublicTimeline } from "@/features/public-form/public-timeline";
 import { getTicketByAttachmentsToken } from "@/features/public-form/queries";
 import { AttachmentGallery } from "@/features/tickets/components/attachment-gallery";
 import { createSignedAttachmentUrls } from "@/features/tickets/storage-objects";
@@ -63,12 +65,20 @@ export default async function TicketAttachmentsGalleryPage({
   // 6.4 sobre "avisarle algo al vecino": mejora de pull sobre esta misma
   // página, sin ningún canal de push nuevo).
   // Deliberadamente AFUERA todavía: el teléfono del vecino, quién tiene el
-  // reclamo asignado, las notas internas, la línea de tiempo completa (eso
-  // es 11.2) y cualquier acción de edición -- esto sigue siendo una vista
-  // pública de SOLO LECTURA, no una versión pública del detalle del panel.
+  // reclamo asignado, las notas internas y cualquier acción de edición --
+  // esto sigue siendo una vista pública de SOLO LECTURA. La línea de tiempo
+  // simplificada (paso 11.2) SÍ entra ahora, pero filtrada: solo cambios de
+  // estado del propio reclamo, nunca notas/asignación/prioridad ni el
+  // nombre de quien de la administración hizo cada cambio (ver
+  // public-timeline.ts).
   const unitAndBuilding = ticket.unitLabel
     ? `${ticket.buildingName} · ${ticket.unitLabel}`
     : ticket.buildingName;
+
+  const timeline = buildPublicTimeline(
+    ticket.reportedAt,
+    ticket.timelineEvents,
+  );
 
   return (
     <div className="flex w-full max-w-lg flex-col gap-4">
@@ -97,6 +107,11 @@ export default async function TicketAttachmentsGalleryPage({
           <p className="text-ink text-sm whitespace-pre-wrap">
             {ticket.description}
           </p>
+
+          <PublicTicketTimeline
+            entries={timeline}
+            timezone={ticket.organizationTimezone}
+          />
 
           <AttachmentGallery
             attachments={ticket.attachments}

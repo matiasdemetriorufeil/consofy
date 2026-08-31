@@ -7263,6 +7263,78 @@ texto libre.
 **Migración `0038`** -- `ALTER TYPE public_form_rate_limit_kind ADD VALUE
 'status_lookup'`. Sin dependencias nuevas.
 
+## Vista pública del estado -- línea de tiempo simplificada (paso 11.2)
+
+`/s/[token]` (la vía del LINK, `attachments_token`, no adivinable) suma una
+línea de tiempo del reclamo. La vía del código (`/r/[token]/estado`) **no
+cambia** en este paso -- sigue mostrando lo del 11.1.
+
+**Clasificación de los 13 tipos de `ticket_event_type`** (relevados con
+grep sobre los INSERT reales, no solo el enum). Regla propia: al vecino
+solo le van cambios de ESTADO de su propio reclamo. Detalle en
+`public-form/public-timeline.ts`.
+
+| tipo                                                                              | escritor real                                  | clasificación y motivo                                                                                                                                                                              |
+| --------------------------------------------------------------------------------- | ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status_changed`                                                                  | `changeTicketStatusAction` + acción masiva     | **PÚBLICO.** El corazón de "¿cómo viene?". Payload = solo valores del enum de estado, traducidos con `PUBLIC_TICKET_STATUS_LABEL` (11.1).                                                           |
+| `resolved_by_incident`                                                            | `resolveIncidentAction` (7.5)                  | **PÚBLICO, transformado.** Se muestra como un cambio a "Resuelto" común. Su payload trae `incidentId`/`incidentTitle` (nombra un problema que puede involucrar a otras unidades) -- NO se muestran. |
+| `created`                                                                         | `createTicketAction` (vecino)                  | **Seguro**, pero la creación se representa aparte desde `reported_at` (fecha de negocio, siempre presente) -- este tipo no entra en la query.                                                       |
+| `note_added`                                                                      | `addTicketNoteAction`                          | **INTERNO** -- texto libre de la administración (pedido explícito).                                                                                                                                 |
+| `assigned`                                                                        | `assignTicketAction` + masiva                  | **INTERNO** -- `assignee` es texto libre (nombre de un tercero/plomero).                                                                                                                            |
+| `priority_changed`                                                                | `changeTicketPriorityAction`                   | **INTERNO** -- triage; no hay vocabulario público de prioridad y "pasó a alta" alarma sin informar.                                                                                                 |
+| `whatsapp_handoff_opened`                                                         | `registerWhatsappHandoffOpenedAction` (vecino) | **INTERNO acá** -- no hay riesgo (payload vacío, acción del propio vecino), pero no es un paso del trámite y arrastra el descargo de R8; fuera de una vista "simplificada".                         |
+| `attachment_added`                                                                | _sin escritor real_                            | **INTERNO** -- no lo escribe nada hoy; además los adjuntos ya tienen su galería.                                                                                                                    |
+| `merged_into_incident` / `incident_merged`                                        | `groupTicketsIntoIncident` (7.4)               | **INTERNO** -- `incidentId`/`incidentTitle` nombran a un problema en común (otras unidades).                                                                                                        |
+| `similar_ticket_detected` / `similar_ticket_grouped` / `similar_ticket_discarded` | detección de duplicados (7.2/7.3)              | **INTERNO** -- todos nombran a OTRO reclamo por su `public_code` + id.                                                                                                                              |
+
+**-> Tipos que entran en la query: `status_changed`, `resolved_by_incident`.**
+
+**Lectura desde código, no desde el cliente anon.** `ticket_events` tiene
+`denyAnonAuthenticated()` + RLS deny-all -- el navegador no la toca nunca.
+`getTicketByAttachmentsToken` (`public-form/queries.ts`, `server-only`)
+suma un tercer SELECT (ya hacía uno para los adjuntos): filtra por
+`ticket_id` **Y** `organization_id` (mismo criterio que `getTicketTimeline`
+del panel) **Y** `type IN (tipos públicos)` -- una nota interna ni siquiera
+sale de la base por esta vía. Devuelve `timelineEvents` crudos; la página
+los pasa por `buildPublicTimeline`.
+
+**`buildPublicTimeline(reportedAt, events)`** (`public-timeline.ts`, puro,
+con tests): SIEMPRE arranca con `{ text: "Recibimos tu reclamo", at:
+reportedAt }` -- así la línea nunca queda vacía para un reclamo recién
+creado sin eventos. Después, los eventos seguros ordenados cronológico.
+Texto sin tecnicismos: `status_changed` -> `Tu reclamo pasó a «En curso»`
+(nunca `in_progress`); payload roto -> `El estado de tu reclamo cambió`
+(no rompe la lista). **Nunca** aparece quién de la administración hizo el
+cambio: `describeEvent` no usa `actorLabel` para nada.
+
+**Componente** `PublicTicketTimeline` (`public-form/components/`, Server
+Component puro) en `/s/[token]`, entre la descripción y la galería. Fechas
+con `<RelativeDate>` (hora de Córdoba en el `title`, mismo criterio que el
+resto de la página).
+
+**Verificado con un reclamo real** (`PRUEBA112`, base + navegador, datos de
+prueba borrados): 5 eventos -- `created`, `assigned` (asignado "PRUEBA112
+Plomero Tercerizado SRL"), `note_added` (nota interna), `priority_changed`,
+`status_changed` new->in_progress; `actorLabel` de todos los admin =
+"Zoraida Adminovna Interna". La línea de tiempo pública renderizada:
+
+> Seguimiento
+> **Recibimos tu reclamo** — hace 3 días
+> **Tu reclamo pasó a «En curso»** — hace 2 días
+
+El HTML COMPLETO de la página no contiene: el texto de la nota, el nombre
+del asignado, el `actorLabel` interno, ni las palabras "nota" / "prioridad"
+/ "asign". El `priority_changed` tampoco aparece.
+
+**Unit tests -- +7 (203 -> 210).** `public-timeline.test.ts`:
+`PUBLIC_TIMELINE_EVENT_TYPES` es exactamente esos dos; creación siempre
+presente aunque no haya eventos; `status_changed` traducido sin el valor
+crudo; `resolved_by_incident` -> "Resuelto" sin nombrar el incidente;
+ignora tipos internos que se cuelen; payload roto no rompe la lista;
+orden cronológico con la creación primero.
+
+**Sin dependencias nuevas ni migraciones.**
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
