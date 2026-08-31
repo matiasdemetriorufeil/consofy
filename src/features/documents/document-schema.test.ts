@@ -6,6 +6,7 @@ import {
   canonicalMimeForFilename,
   DOCUMENT_CATEGORIES,
   DOCUMENT_CATEGORY_LABEL,
+  documentCategoryLabel,
   DOCUMENT_VISIBILITY_LABEL,
   DOCUMENT_VISIBILITY_VALUES,
   FILE_KIND_LABEL,
@@ -149,6 +150,16 @@ describe("categorías", () => {
     expect(isDocumentCategory("regulations")).toBe(true);
     expect(isDocumentCategory("otros")).toBe(false);
     expect(isDocumentCategory("")).toBe(false);
+  });
+
+  it("documentCategoryLabel traduce las conocidas y deja crudo lo demás", () => {
+    expect(documentCategoryLabel("regulations")).toBe("Reglamento");
+    expect(documentCategoryLabel("minutes")).toBe("Actas");
+    // Un valor fuera de la lista (documents.category es `text`): cae al
+    // valor tal cual, sin romper.
+    expect(documentCategoryLabel("valor_raro_futuro")).toBe(
+      "valor_raro_futuro",
+    );
   });
 });
 

@@ -92,15 +92,25 @@ export default async function PublicBuildingPage({
         categories={categories}
         units={units}
       />
-      <p className="text-ink-muted text-center text-sm">
-        ¿Ya cargaste uno?{" "}
-        <Link
-          href={`/r/${parsedToken.data}/estado`}
-          className="text-primary underline underline-offset-4"
-        >
-          Consultá su estado
-        </Link>
-      </p>
+      <div className="text-ink-muted flex flex-col items-center gap-1 text-center text-sm">
+        <p>
+          ¿Ya cargaste uno?{" "}
+          <Link
+            href={`/r/${parsedToken.data}/estado`}
+            className="text-primary underline underline-offset-4"
+          >
+            Consultá su estado
+          </Link>
+        </p>
+        <p>
+          <Link
+            href={`/r/${parsedToken.data}/documentos`}
+            className="text-primary underline underline-offset-4"
+          >
+            Ver documentos del edificio
+          </Link>
+        </p>
+      </div>
     </div>
   );
 }

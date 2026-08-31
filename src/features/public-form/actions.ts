@@ -1,10 +1,17 @@
 "use server";
 
-import { and, eq, isNotNull } from "drizzle-orm";
+import { and, eq, isNotNull, isNull } from "drizzle-orm";
 import { z } from "zod";
 
 import { db } from "@/db";
-import { people, ticketAttachments, ticketEvents, tickets } from "@/db/schema";
+import {
+  documents,
+  people,
+  ticketAttachments,
+  ticketEvents,
+  tickets,
+} from "@/db/schema";
+import { createDocumentDownloadUrl } from "@/features/documents/storage-objects";
 import {
   findDeletedPersonByPhone,
   findPersonByPhone,
@@ -693,4 +700,88 @@ export async function lookupTicketStatusAction(
   }
 
   return { status: "found", ticket };
+}
+
+// -----------------------------------------------------------------------
+// Descarga pública de un documento visible del edificio (paso 11.3)
+// -----------------------------------------------------------------------
+
+const publicDocumentDownloadSchema = z.object({
+  token: z.uuid(),
+  documentId: z.uuid(),
+});
+
+export type PublicDocumentDownloadResult =
+  { ok: true; url: string } | { ok: false; error: string };
+
+// Genera, BAJO DEMANDA, una URL firmada de corta duración para descargar un
+// documento del edificio marcado `visibility = 'residents'`. Pública a
+// propósito -- NO usa authorizedAction() (eso es getDocumentDownloadUrlAction
+// del paso 10.4, para el panel). La "autorización" acá son TRES condiciones,
+// todas obligatorias, que reemplazan a la sesión:
+//
+//  1. `token` (`public_token`) resuelve un edificio real Y ACTIVO -- mismo
+//     mecanismo que el formulario y `/r/[token]/estado` (getBuildingByPublicToken).
+//  2. El documento pertenece a ESE edificio y a su organización.
+//  3. `visibility = 'residents'` (y `deleted_at IS NULL`).
+//
+// Cualquiera que falle -> el mismo "No encontramos ese documento." ambiguo
+// del resto de la superficie pública: un documento privado, uno de otro
+// edificio, o un id inventado son indistinguibles en la respuesta.
+//
+// Recién con las tres cumplidas, `createDocumentDownloadUrl` (documents/
+// storage-objects.ts, REUSADA tal cual del 10.4) firma con
+// `createAdminClient()`. Mismo TTL de 5 minutos que el 10.4: acá tampoco
+// hay "sesión de lectura", la URL se pide al click y el navegador la
+// consume en segundos (ver DOCUMENT_DOWNLOAD_URL_EXPIRES_IN_SECONDS).
+//
+// Sin rate limit: a diferencia de la consulta por `public_code` (11.1,
+// código corto y enumerable), acá el `documentId` es un uuid random no
+// adivinable y la acción hace un solo SELECT indexado antes de fallar --
+// no hay nada que enumerar con provecho.
+export async function getPublicDocumentDownloadUrlAction(
+  input: unknown,
+): Promise<PublicDocumentDownloadResult> {
+  const parsed = publicDocumentDownloadSchema.safeParse(input);
+  if (!parsed.success) {
+    return { ok: false, error: "No encontramos ese documento." };
+  }
+
+  const building = await getBuildingByPublicToken(parsed.data.token);
+  if (!building || !building.active) {
+    return { ok: false, error: "No encontramos ese documento." };
+  }
+
+  const [doc] = await db
+    .select({
+      storagePath: documents.storagePath,
+      originalFilename: documents.originalFilename,
+    })
+    .from(documents)
+    .where(
+      and(
+        eq(documents.id, parsed.data.documentId),
+        eq(documents.buildingId, building.id),
+        eq(documents.organizationId, building.organizationId),
+        eq(documents.visibility, "residents"),
+        isNull(documents.deletedAt),
+      ),
+    );
+
+  if (!doc) {
+    return { ok: false, error: "No encontramos ese documento." };
+  }
+
+  try {
+    const url = await createDocumentDownloadUrl(
+      doc.storagePath,
+      doc.originalFilename,
+    );
+    return { ok: true, url };
+  } catch {
+    return {
+      ok: false,
+      error: "No pudimos preparar la descarga. Probá de nuevo en un momento.",
+    };
+  }
 }

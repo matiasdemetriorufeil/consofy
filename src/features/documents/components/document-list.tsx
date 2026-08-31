@@ -18,11 +18,10 @@ import {
 import { formatExactDate } from "@/lib/format-date";
 
 import {
-  DOCUMENT_CATEGORY_LABEL,
+  documentCategoryLabel,
   FILE_KIND_LABEL,
   formatFileSize,
   getFileKind,
-  isDocumentCategory,
   type FileKind,
 } from "../document-schema";
 import type { DocumentListRow } from "../queries";
@@ -37,12 +36,6 @@ const FILE_KIND_ICON: Record<FileKind, LucideIcon> = {
   image: FileImage,
   other: FileIcon,
 };
-
-function categoryLabel(category: string): string {
-  return isDocumentCategory(category)
-    ? DOCUMENT_CATEGORY_LABEL[category]
-    : category;
-}
 
 function FileTypeCell({ mimeType }: { mimeType: string }) {
   const kind = getFileKind(mimeType);
@@ -128,7 +121,7 @@ export function DocumentList({
                 </TableCell>
                 <TableCell>
                   <Badge variant="secondary">
-                    {categoryLabel(row.category)}
+                    {documentCategoryLabel(row.category)}
                   </Badge>
                 </TableCell>
                 {showBuildingColumn && (
@@ -147,7 +140,7 @@ export function DocumentList({
                     documentId={row.id}
                     visibility={row.visibility}
                     title={row.title}
-                    categoryLabel={categoryLabel(row.category)}
+                    categoryLabel={documentCategoryLabel(row.category)}
                     buildingName={row.buildingName}
                   />
                 </TableCell>
@@ -207,12 +200,14 @@ export function DocumentList({
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
-              <Badge variant="secondary">{categoryLabel(row.category)}</Badge>
+              <Badge variant="secondary">
+                {documentCategoryLabel(row.category)}
+              </Badge>
               <DocumentVisibilityControl
                 documentId={row.id}
                 visibility={row.visibility}
                 title={row.title}
-                categoryLabel={categoryLabel(row.category)}
+                categoryLabel={documentCategoryLabel(row.category)}
                 buildingName={row.buildingName}
               />
             </div>

@@ -1,12 +1,13 @@
 import "server-only";
 
-import { and, asc, eq, inArray, isNull } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
 import { cache } from "react";
 
 import { db } from "@/db";
 import {
   buildings,
   categories,
+  documents,
   organizations,
   people,
   ticketAttachments,
@@ -369,4 +370,55 @@ export async function getTicketStatusByPublicCode(
     reportedAt: row.reportedAt,
     organizationTimezone: row.organizationTimezone,
   };
+}
+
+export type PublicBuildingDocument = {
+  id: string;
+  title: string;
+  // `documents.category` es `text` (ver el schema) -- se muestra con
+  // documentCategoryLabel (paso 10.2, reusado), que cae al valor crudo si
+  // algún día hay una categoría fuera de la lista.
+  category: string;
+};
+
+// Documentos del edificio VISIBLES para los vecinos (paso 11.3), accesibles
+// desde `/r/[token]/documentos`. El caller (la page) resuelve el edificio
+// con getBuildingByPublicToken -- MISMO mecanismo que el formulario y
+// `/r/[token]/estado` -- y pasa `buildingId` + `organizationId` de ese
+// edificio ya resuelto; nada de esto viene del cliente.
+//
+// Tres condiciones, todas obligatorias:
+//  - `building_id` = el edificio del token (no otro de la misma org).
+//  - `organization_id` = el de ese edificio (defensa cruzada, mismo
+//    criterio que el resto del proyecto -- ver CLAUDE.md > Integridad
+//    entre organizaciones).
+//  - `visibility = 'residents'` -- un documento `private` NO sale de la
+//    base por esta vía, ni se filtra al renderizar: no está en el
+//    resultado.
+// Más `deleted_at IS NULL`. Orden: más nuevo primero, igual que el
+// explorador del panel (getDocumentList).
+//
+// NO trae `storage_path` ni `original_filename`: la descarga pasa por
+// getPublicDocumentDownloadUrlAction, que re-resuelve el documento
+// server-side con las mismas tres condiciones antes de firmar nada.
+export async function getPublicBuildingDocuments(
+  buildingId: string,
+  organizationId: string,
+): Promise<PublicBuildingDocument[]> {
+  return db
+    .select({
+      id: documents.id,
+      title: documents.title,
+      category: documents.category,
+    })
+    .from(documents)
+    .where(
+      and(
+        eq(documents.buildingId, buildingId),
+        eq(documents.organizationId, organizationId),
+        eq(documents.visibility, "residents"),
+        isNull(documents.deletedAt),
+      ),
+    )
+    .orderBy(desc(documents.createdAt), desc(documents.id));
 }

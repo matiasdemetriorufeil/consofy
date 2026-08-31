@@ -57,6 +57,17 @@ export function isDocumentCategory(value: string): value is DocumentCategory {
   return (DOCUMENT_CATEGORIES as readonly string[]).includes(value);
 }
 
+// Etiqueta en español de una categoría que viene como `string` de la base
+// (`documents.category` es `text`, no un enum -- ver el schema). Si algún
+// día hay un valor fuera de la lista, cae al valor crudo en vez de romper.
+// Extraída de document-list.tsx (paso 10.2) al paso 11.3, que la necesita
+// también en la superficie pública -- una sola definición para las dos.
+export function documentCategoryLabel(category: string): string {
+  return isDocumentCategory(category)
+    ? DOCUMENT_CATEGORY_LABEL[category]
+    : category;
+}
+
 // -----------------------------------------------------------------------
 // Tipo y tamaño de archivo
 // -----------------------------------------------------------------------

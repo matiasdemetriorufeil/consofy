@@ -7335,6 +7335,90 @@ orden cronológico con la creación primero.
 
 **Sin dependencias nuevas ni migraciones.**
 
+## Documentos visibles del edificio, acceso público (paso 11.3)
+
+`/r/[token]/documentos` -- ruta hija de `/r/[token]`, mismo patrón que
+`/r/[token]/estado` (11.1): el `public_token` del edificio es la
+credencial, se resuelve con `getBuildingByPublicToken` -- **el mismo
+mecanismo** que el formulario y `/r/[token]/estado`, no uno nuevo. Link a
+esta ruta desde la página principal de `/r/[token]`.
+
+**Casos borde: idénticos a `/r/[token]`** (pedido explícito, "no inventes
+un comportamiento distinto"): token que no resuelve un edificio ->
+`notFound()` (cae en `r/[token]/not-found.tsx`); edificio inactivo -> la
+MISMA tarjeta que muestra `/r/[token]` (su texto habla de reclamos; se
+reusa tal cual para no divergir). Distinto de `/r/[token]/estado`, que
+NO bloquea por inactivo -- acá sí, porque `/r/[token]` lo hace.
+
+**Query -- `getPublicBuildingDocuments(buildingId, organizationId)`**
+(`public-form/queries.ts`). La page pasa `building.id` + `building.
+organizationId` del edificio YA resuelto por el token; nada viene del
+cliente. `WHERE building_id = ? AND organization_id = ? AND visibility =
+'residents' AND deleted_at IS NULL`, orden más nuevo primero (igual que
+`getDocumentList` del panel). **No trae `storage_path` ni
+`original_filename`** -- la descarga los re-resuelve server-side. Devuelve
+solo `{ id, title, category }`; la etiqueta de categoría sale de
+`documentCategoryLabel` (extraída de `document-list.tsx` al `document-schema.ts`
+en este paso, una sola definición para panel y superficie pública).
+
+**Descarga -- `getPublicDocumentDownloadUrlAction({ token, documentId })`**
+(`public-form/actions.ts`), pública, SIN `authorizedAction()` (eso es
+`getDocumentDownloadUrlAction` del 10.4, para el panel). Las TRES
+condiciones que reemplazan a la sesión, todas obligatorias:
+
+1. `token` (`public_token`) resuelve un edificio real **y activo**
+   (`getBuildingByPublicToken` + chequeo de `active`).
+2. El documento pertenece a ESE `building_id` y a su `organization_id`.
+3. `visibility = 'residents'` (y `deleted_at IS NULL`).
+
+Cualquiera que falle -> el mismo `"No encontramos ese documento."` ambiguo:
+un documento privado, uno de otro edificio, o un id inventado son
+indistinguibles en la respuesta. Recién con las tres, `createDocumentDownloadUrl`
+(`documents/storage-objects.ts`, **reusada tal cual del 10.4**) firma con
+`createAdminClient()`. **Mismo TTL de 5 min** que el 10.4 (misma constante
+`DOCUMENT_DOWNLOAD_URL_EXPIRES_IN_SECONDS`): acá tampoco hay "sesión de
+lectura", la URL se pide al click y se consume en segundos. **Sin rate
+limit**: a diferencia de la consulta por `public_code` (11.1, código
+enumerable), el `documentId` es un uuid random no adivinable y la acción
+hace un solo SELECT indexado antes de fallar -- no hay nada que enumerar.
+
+**UI:** `PublicDocumentList` (Server Component) + `PublicDocumentDownloadButton`
+(Client, paralelo al `DocumentDownloadButton` del 10.4: URL firmada bajo
+demanda al click, `<a>` temporal, nunca precalculada para el listado).
+Estado vacío claro cuando el edificio no tiene documentos visibles, nunca
+un error.
+
+**Verificado de punta a punta contra la base y el Storage reales**
+(Playwright + Server Action real + datos `PRUEBA113` borrados al terminar).
+Setup: edificio A (Cabildo) con A1 `residents` y A2 `private`; edificio B
+(Los Álamos, MISMA organización) con B1 `residents` -- archivos reales
+subidos a `building-documents`.
+
+- **Listado de A:** muestra A1; **no** muestra A2 (privado, mismo
+  edificio); **no** muestra B1 (visible, otro edificio). 1 fila.
+  Cross-check: el listado de B muestra B1 y no A1/A2.
+- **Descarga de A1** por el botón (Server Action pública real) -> URL
+  `/object/sign/...?token=<jwt>`, `suggestedFilename` = nombre real,
+  **sha256 del archivo bajado == sha256 del subido**.
+- **Fuga B -- documento privado por id, con token válido:** se reemitió la
+  Server Action REAL cambiando el `documentId` por el de A2 ->
+  `{"ok":false,"error":"No encontramos ese documento."}`.
+- **Fuga C -- documento de otro edificio por id, vía el token de A:** misma
+  Server Action con el `documentId` de B1 -> `{"ok":false,"error":"No
+encontramos ese documento."}`. (Control: con el id de A1 -> `{"ok":true,
+"url":"...object/sign..."}`.)
+- **Ruta cruda de Storage del privado:** `GET` a la URL pública del bucket
+  y a la del objeto sin auth para el `storage_path` de A2 -> **HTTP 400**
+  las dos, ~98 bytes de error, nunca el archivo. La URL firmada de A1 sí
+  sirve 200 con sha correcto.
+
+**Unit tests -- +1 (210 -> 211).** `document-schema.test.ts`:
+`documentCategoryLabel` traduce las categorías conocidas y deja crudo un
+valor fuera de la lista.
+
+**Sin dependencias nuevas ni migraciones** -- `documents.visibility` y el
+bucket ya existían (10.1/10.3).
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
