@@ -6,8 +6,11 @@ import {
   canonicalMimeForFilename,
   DOCUMENT_CATEGORIES,
   DOCUMENT_CATEGORY_LABEL,
+  DOCUMENT_VISIBILITY_LABEL,
+  FILE_KIND_LABEL,
   formatFileSize,
   getFileExtension,
+  getFileKind,
   isDocumentCategory,
   MAX_DOCUMENT_SIZE_BYTES,
   sanitizeFilenameStem,
@@ -150,5 +153,43 @@ describe("formatFileSize", () => {
     expect(formatFileSize(512)).toBe("512 B");
     expect(formatFileSize(2048)).toBe("2 KB");
     expect(formatFileSize(5 * 1024 * 1024)).toBe("5.0 MB");
+  });
+});
+
+describe("getFileKind", () => {
+  it("mapea cada mime_type canónico a su clase", () => {
+    expect(getFileKind("application/pdf")).toBe("pdf");
+    expect(getFileKind("application/msword")).toBe("word");
+    expect(
+      getFileKind(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      ),
+    ).toBe("word");
+    expect(getFileKind("application/vnd.ms-excel")).toBe("excel");
+    expect(
+      getFileKind(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      ),
+    ).toBe("excel");
+    expect(getFileKind("image/jpeg")).toBe("image");
+    expect(getFileKind("image/png")).toBe("image");
+  });
+
+  it("cae a `other` para un mime_type desconocido", () => {
+    expect(getFileKind("application/zip")).toBe("other");
+    expect(getFileKind("")).toBe("other");
+  });
+
+  it("FILE_KIND_LABEL tiene una etiqueta para cada clase", () => {
+    for (const kind of ["pdf", "word", "excel", "image", "other"] as const) {
+      expect(FILE_KIND_LABEL[kind]).toBeTruthy();
+    }
+  });
+});
+
+describe("DOCUMENT_VISIBILITY_LABEL", () => {
+  it("traduce los dos valores del enum", () => {
+    expect(DOCUMENT_VISIBILITY_LABEL.private).toBe("Privado");
+    expect(DOCUMENT_VISIBILITY_LABEL.residents).toBe("Visible para vecinos");
   });
 });

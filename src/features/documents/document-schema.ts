@@ -220,6 +220,63 @@ export const initialDocumentUploadState: DocumentUploadState = {
 
 export const BUILDING_DOCUMENTS_BUCKET = "building-documents";
 
+// -----------------------------------------------------------------------
+// Visibilidad -- solo lectura en el explorador (paso 10.2)
+// -----------------------------------------------------------------------
+// Espejo del enum `document_visibility` de src/db/schema/documents.ts
+// (`private` / `residents`). El explorador lo muestra como un badge y nada
+// más -- editarlo es el paso 10.3. Se define acá inline en vez de importar
+// el pgEnum, mismo criterio que `DOCUMENT_CATEGORIES` arriba (este archivo
+// es puro, sin dependencias del cliente de base).
+export const DOCUMENT_VISIBILITY_LABEL: Record<
+  "private" | "residents",
+  string
+> = {
+  private: "Privado",
+  residents: "Visible para vecinos",
+};
+
+// -----------------------------------------------------------------------
+// Tipo de archivo para la UI -- derivado del mime_type ya guardado
+// -----------------------------------------------------------------------
+// El explorador muestra una etiqueta corta + un ícono por fila (paso
+// 10.2). `mime_type` en la base es siempre uno de los siete canónicos que
+// escribe la subida (ver `EXTENSION_TO_CANONICAL_MIME`) -- `other` es solo
+// la red de seguridad para una fila vieja o cargada por fuera de ese flujo.
+export type FileKind = "pdf" | "word" | "excel" | "image" | "other";
+
+export function getFileKind(mimeType: string): FileKind {
+  if (mimeType === "application/pdf") {
+    return "pdf";
+  }
+  if (
+    mimeType === "application/msword" ||
+    mimeType ===
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  ) {
+    return "word";
+  }
+  if (
+    mimeType === "application/vnd.ms-excel" ||
+    mimeType ===
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+  ) {
+    return "excel";
+  }
+  if (mimeType === "image/jpeg" || mimeType === "image/png") {
+    return "image";
+  }
+  return "other";
+}
+
+export const FILE_KIND_LABEL: Record<FileKind, string> = {
+  pdf: "PDF",
+  word: "Word",
+  excel: "Excel",
+  image: "Imagen",
+  other: "Archivo",
+};
+
 // Tamaño legible para la UI -- misma forma que `formatBytes` en
 // public-form/upload-attachment.ts, reescrita acá para no importar ese
 // módulo (que arrastra el cliente de Supabase del navegador).

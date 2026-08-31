@@ -1422,7 +1422,12 @@ async function main() {
     {
       organizationId: organization.id,
       buildingId: torreCentral.id,
-      category: "reglamento",
+      // Valores en inglés del enum de aplicación (DOCUMENT_CATEGORIES,
+      // src/features/documents/document-schema.ts) -- alineado en el paso
+      // 10.2 (el explorador filtra por estos valores; los strings en
+      // español que había antes no matcheaban ningún filtro). Ver
+      // CLAUDE.md > Explorador de documentos.
+      category: "regulations",
       title: "Reglamento de copropiedad",
       description: "Reglamento interno del consorcio, versión vigente.",
       storagePath: "torre-central/documents/reglamento-copropiedad.pdf",
@@ -1435,7 +1440,7 @@ async function main() {
     {
       organizationId: organization.id,
       buildingId: losAlamos.id,
-      category: "balances",
+      category: "balance_sheets",
       title: "Balance mensual julio 2026",
       description:
         "Rendición de cuentas y balance de ingresos y egresos del mes.",
@@ -1449,7 +1454,7 @@ async function main() {
     {
       organizationId: organization.id,
       buildingId: torreCentral.id,
-      category: "actas",
+      category: "minutes",
       title: "Acta de asamblea ordinaria 2025",
       description: "Acta firmada de la última asamblea ordinaria realizada.",
       storagePath: "torre-central/documents/acta-asamblea-2025.pdf",

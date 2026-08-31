@@ -1,7 +1,6 @@
 "use client";
 
 import { useActionState, useEffect, useRef, useState } from "react";
-import { toast } from "sonner";
 
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -47,12 +46,19 @@ const ACCEPT_ATTR = ALLOWED_DOCUMENT_EXTENSIONS.join(",");
 // `lockedBuildingId`: el edificio elegido en el header. Cuando está, el
 // formulario no muestra el selector de edificio (el contexto ya lo fija);
 // cuando es `null` (vista "todos los edificios"), lo pide con un <Select>.
+//
+// `onSuccess`: lo llama el caller (UploadDocumentButton) al recibir
+// `state.ok` -- cierra el diálogo y muestra el toast. El formulario no
+// toastea por su cuenta para no duplicarlo. Mismo criterio que
+// ReminderForm/ReminderFormDialog (paso 9.1).
 export function DocumentUploadForm({
   buildingOptions,
   lockedBuildingId,
+  onSuccess,
 }: {
   buildingOptions: ActiveBuildingOption[];
   lockedBuildingId: string | null;
+  onSuccess?: () => void;
 }) {
   const [state, formAction, isPending] = useActionState(
     uploadDocumentAction,
@@ -67,18 +73,21 @@ export function DocumentUploadForm({
   const [clientFileError, setClientFileError] = useState<string | null>(null);
 
   // Tras una subida exitosa: se limpian los campos NATIVOS (archivo,
-  // título, descripción) con `form.reset()` y se avisa con un toast. El
-  // edificio y la categoría elegidos SE MANTIENEN a propósito -- subir
-  // varios documentos al mismo edificio/categoría seguidos es el caso
-  // normal, y volver a elegirlos cada vez sería fricción. Sin `setState`
-  // acá (regla `react-hooks/set-state-in-effect`, ver CLAUDE.md > paso
-  // 8.2): `form.reset()` no es estado de React, y `clientFileError` ya es
-  // `null` cuando se llega a enviar (el botón está deshabilitado si no).
+  // título, descripción) con `form.reset()` y se avisa al caller
+  // (`onSuccess` -- cierra el diálogo y toastea). Sin `setState` acá (regla
+  // `react-hooks/set-state-in-effect`, ver CLAUDE.md > paso 8.2):
+  // `form.reset()` no es estado de React, y `clientFileError` ya es `null`
+  // cuando se llega a enviar (el botón está deshabilitado si no).
   useEffect(() => {
     if (state.ok) {
       formRef.current?.reset();
-      toast.success("Documento subido.");
+      onSuccess?.();
     }
+    // Solo `state` en las deps -- `onSuccess` suele ser una arrow inline
+    // (identidad nueva por render), incluirla re-dispararía el efecto en
+    // cada render y volvería a llamar onSuccess()/toast. Mismo criterio
+    // (y misma excepción de lint) que el efecto de ReminderForm.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state]);
 
   function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {

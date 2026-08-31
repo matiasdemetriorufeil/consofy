@@ -6559,6 +6559,142 @@ cubre las seis categorías.
 **Sin dependencias nuevas** -- `package.json`/`package-lock.json` sin
 tocar.
 
+## Explorador de documentos (paso 10.2)
+
+`/panel/documents` deja de ser la lista mínima del 10.1 y pasa a ser el
+explorador de la biblioteca: filtro por edificio y categoría, búsqueda por
+título, tabla con metadatos y paginación numerada. Sigue siendo Server
+Component en su mayor parte -- los únicos Client Components nuevos son la
+barra de filtros (escribe a la URL) y el botón/diálogo de subida.
+
+**Cómo convive con la subida del 10.1 -- el alta pasa a un diálogo detrás
+de un botón "Subir documento" arriba de la lista.** Decisión propia entre
+las que el enunciado dejaba abiertas. Es el mismo patrón que
+`/panel/announcements` ("Crear aviso") y `/panel/reminders`
+(`ReminderFormDialog`): en una pantalla de listado, "crear" es una acción
+secundaria detrás de un botón, no un formulario que compite por el espacio
+con lo que se viene a mirar. `DocumentUploadForm` (paso 10.1) **no
+cambió** salvo un prop `onSuccess?` opcional (el diálogo lo usa para
+cerrarse y toastear; el form ya no toastea por su cuenta, para no
+duplicarlo -- mismo criterio que `ReminderForm`/`ReminderFormDialog`).
+
+**Filtro de EDIFICIO: el selector del header (cookie), no un control
+propio en la pantalla.** Igual que Recordatorios y Comunicados,
+`/panel/documents` lee `getSelectedBuilding()` -- ver CLAUDE.md > Selector
+de edificio activo. "Todos los edificios" (cookie ausente) es una vista
+agregada legítima, con una columna "Edificio" que aparece solo en ese
+caso (`showBuildingColumn`, mismo criterio que la bandeja de reclamos).
+Los filtros PROPIOS de esta pantalla (categoría, búsqueda, página) sí
+viven en la URL, mismo mecanismo que la bandeja: `document-list-schema.ts`
+(schema Zod + `normalizeSearchParams` + `buildDocumentListHref` +
+`getDocumentPageNumbers` + `hasExplicitDocumentFilters`), calcado de
+`ticket-inbox-schema.ts`.
+
+**Paginación numerada por URL (`?page=N`), no "cargar más".** Mismo patrón
+que la bandeja de reclamos (paso 6.2), el otro listado de página completa
+del panel: `DOCUMENT_LIST_PAGE_SIZE = 25`, `count(*) over()` para el total
+en la misma consulta (sin un `SELECT COUNT(*)` aparte), con el mismo
+límite conocido y su fix -- si el `OFFSET` salta más allá del total, la
+consulta devuelve cero filas y ningún total, así que `getDocumentListCount()`
+se dispara SOLO en esa rama (`page > 1` con cero filas) para corregir a la
+última página válida. Verificado: `?category=other&page=999` con 28 filas
+cae a "página 2 de 2". **Sin tope duro** -- la regla del enunciado, y la
+lección del paso 9.3 (un límite fijo sin forma de pedir más deja datos
+inaccesibles). `DocumentPagination` es Server Component puro (`<Link>` con
+el href ya resuelto), copia de `TicketPagination`. Las copias
+(`getDocumentPageNumbers`, `DocumentPagination`) son deliberadamente
+self-contained: extraer un módulo compartido tocaría el feature de
+reclamos, fuera del alcance de este paso (CLAUDE.md > Qué NO hacer) -- si
+un tercer listado lo necesita, ahí se justifica.
+
+**Búsqueda: `ILIKE '%término%'` sobre `documents.title`, case-insensitive,
+mínimo 2 caracteres, debounce de 400ms.** El título ya cae al nombre del
+archivo cuando no se cargó uno explícito (paso 10.1), así que buscar sobre
+`title` cubre los dos casos. Sin índice GIN trigram nuevo: el volumen de
+una biblioteca de edificio es un puñado de filas (a diferencia de los
+cientos de reclamos que motivaron la migración `0022`) -- si crece, un GIN
+sobre `documents.title` es el mismo movimiento que hizo la bandeja. `%${q}%`
+sin escapar `%`/`_`, igual que la búsqueda de reclamos.
+
+**Metadatos por fila:** título (+ nombre de archivo debajo), categoría
+(badge, etiqueta en español vía `DOCUMENT_CATEGORY_LABEL` con fallback al
+valor crudo por `isDocumentCategory`), edificio (condicional), tipo de
+archivo (ícono + etiqueta corta derivada de `mime_type` --
+`getFileKind()`/`FILE_KIND_LABEL`: PDF / Word / Excel / Imagen / Archivo),
+tamaño legible (`formatFileSize`), visibilidad (badge de SOLO LECTURA,
+"Privado" / "Visible para vecinos" -- `DOCUMENT_VISIBILITY_LABEL`;
+editarla es 10.3), quién subió (`uploaded_by`, o "—"), y fecha de subida
+**en la zona de la organización** (`formatExactDate(createdAt,
+organization.timezone)` -- fecha absoluta, no `<RelativeDate>`: para un
+archivo de biblioteca "18 de agosto de 2026" es más útil que "hace 13
+días"). Desktop: `<Table>`. Mobile: tarjetas apiladas (mismo criterio
+responsive que la bandeja).
+
+**Descargar/ver: afordancia deshabilitada, sin generar ninguna URL.** Un
+`<Button disabled>` con ícono de descarga, envuelto en un `<span title=…>`
+(el título del tooltip aparece al pasar el mouse aunque el botón esté
+deshabilitado -- varios navegadores no disparan hover sobre un control
+disabled). Texto: "Disponible en el próximo paso (descarga con enlace
+seguro)". Las URLs firmadas son el paso 10.4; este paso no toca Storage.
+
+**Dos estados vacíos distintos** (mismo criterio que la bandeja de
+reclamos): `hasExplicitDocumentFilters(filters)` decide. Con categoría o
+búsqueda puestas y cero resultados -> "No encontramos documentos con esos
+filtros" + "Limpiar filtros". Sin filtros y cero resultados en el alcance
+actual -> "Todavía no hay documentos[ en {edificio}]", sin link de limpiar
+(no hay nada que limpiar). No hace falta un `organizationHasAnyDocument`
+como en la bandeja: documentos no tiene filtro implícito por default (la
+bandeja arranca en "abiertos"), así que "sin filtros + cero filas"
+significa inequívocamente "no hay nada en este alcance".
+
+**Diferencia con lo construido en el 10.1, corregida en este paso: los 3
+documentos del seed usaban `category` en español (`reglamento`/`balances`/
+`actas`), fuera del enum en inglés.** El comentario del 10.1 ya lo había
+anticipado ("si se quiere consistencia total, alinear el seed en un paso
+posterior de la etapa 10"). El explorador es donde molesta -- filtrar por
+"Reglamento" (`regulations`) no traería el "Reglamento de copropiedad" del
+seed. Se alineó `src/db/seed.ts` a los valores en inglés
+(`regulations`/`balance_sheets`/`minutes`), y se corrieron los mismos 3
+`UPDATE` sobre la base de desarrollo para dejarla coherente sin re-seedear
+(3 filas, dato de dev, no de negocio real). El guard `isDocumentCategory`
+en la lista queda igual, como red de seguridad para cualquier valor
+suelto.
+
+**Verificado de punta a punta, navegador real (Playwright, admin de
+prueba dedicado creado y borrado), con las dos direcciones de cada
+filtro:**
+
+- **Edificio:** "todos" -> 35 documentos (3 seed + 4 subidos + 28 de
+  volumen), "página 1 de 2", columna Edificio visible. Fijado a "Los
+  Álamos" -> exactamente sus 3 documentos, columna Edificio oculta.
+- **Categoría:** `?category=minutes` -> exactamente los 2 de actas;
+  `?category=insurance` -> exactamente 1; sin `category` -> los 35. Combinado
+  "Los Álamos" + `?category=insurance` -> 1; "Los Álamos" + `?category=minutes`
+  -> empty state de filtros (Los Álamos no tiene actas).
+- **Búsqueda:** `?q=Aviso Torre` -> 1 match; `?q=BALANCE` (mayúsculas) -> 1
+  match ("Balance mensual julio 2026", case-insensitive confirmado);
+  `?q=zzz-no-existe-nada` -> "No encontramos documentos con esos filtros" +
+  link "Limpiar filtros".
+- **Empty states distintos:** edificio de prueba sin ningún documento y
+  sin filtros -> "Todavía no hay documentos en Prueba 10.2 Edificio
+  Vacio", SIN link de limpiar.
+- **Paginación:** 28 documentos en un alcance -> "página 1 de 2" (25
+  filas); "Página siguiente" -> `?page=2`, 3 filas, CERO solapamiento con
+  la página 1; `?page=999` -> cae a "página 2 de 2".
+- **Read-only:** badge "Visible para vecinos" en un documento `residents`
+  del seed; botón de descarga `disabled` con el `title` esperado.
+
+**Unit tests -- +13 (162 -> 175).** `document-schema.test.ts` gana
+`getFileKind` (cada mime canónico + fallback), `FILE_KIND_LABEL`,
+`DOCUMENT_VISIBILITY_LABEL`. Nuevo `document-list-schema.test.ts`:
+`documentListSearchParamsSchema` (defaults, categoría inválida, `q` de 1
+caracter, `page` no positiva), `hasExplicitDocumentFilters` (las dos
+direcciones), `buildDocumentListHref` (agregar/pisar/borrar), y
+`getDocumentPageNumbers` (pocas páginas / con elipsis).
+
+**Sin dependencias nuevas ni migraciones** -- este paso no toca el esquema
+ni Storage.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
