@@ -114,6 +114,31 @@ describe("describeTicketEvent", () => {
     expect(result.detail).toBe("El plomero pasó y detectó la cañería del 3B.");
   });
 
+  it("resident_update_added: se distingue de una nota interna (paso 11.4)", () => {
+    const conTexto = describeTicketEvent({
+      type: "resident_update_added",
+      actorType: "neighbor",
+      actorLabel: "Ana Vecina",
+      payload: { text: "Ahora también gotea en el pasillo.", photoCount: 2 },
+    });
+    // El headline dice "El vecino agregó...", NUNCA "agregó una nota".
+    expect(conTexto.headline).toBe(
+      "El vecino agregó información y 2 fotos al reclamo",
+    );
+    expect(conTexto.headline).not.toContain("nota");
+    // El texto verbatim va en detail (el admin lo lee entero).
+    expect(conTexto.detail).toBe("Ahora también gotea en el pasillo.");
+
+    const soloFotos = describeTicketEvent({
+      type: "resident_update_added",
+      actorType: "neighbor",
+      actorLabel: "Ana Vecina",
+      payload: { text: null, photoCount: 1 },
+    });
+    expect(soloFotos.headline).toBe("El vecino agregó 1 foto al reclamo");
+    expect(soloFotos.detail).toBeNull();
+  });
+
   it("whatsapp_handoff_opened: nunca da a entender que el mensaje se envió o llegó", () => {
     const result = describeTicketEvent({
       type: "whatsapp_handoff_opened",
@@ -340,6 +365,7 @@ describe("describeTicketEvent", () => {
       "similar_ticket_discarded",
       "incident_merged",
       "resolved_by_incident",
+      "resident_update_added",
     ] as const;
     for (const type of types) {
       expect(() =>

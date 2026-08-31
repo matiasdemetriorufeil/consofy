@@ -7286,8 +7286,9 @@ solo le van cambios de ESTADO de su propio reclamo. Detalle en
 | `attachment_added`                                                                | _sin escritor real_                            | **INTERNO** -- no lo escribe nada hoy; además los adjuntos ya tienen su galería.                                                                                                                    |
 | `merged_into_incident` / `incident_merged`                                        | `groupTicketsIntoIncident` (7.4)               | **INTERNO** -- `incidentId`/`incidentTitle` nombran a un problema en común (otras unidades).                                                                                                        |
 | `similar_ticket_detected` / `similar_ticket_grouped` / `similar_ticket_discarded` | detección de duplicados (7.2/7.3)              | **INTERNO** -- todos nombran a OTRO reclamo por su `public_code` + id.                                                                                                                              |
+| `resident_update_added`                                                           | `addResidentUpdateAction` (11.4, vecino)       | **PÚBLICO.** Lo agregó el PROPIO vecino a su reclamo -- corresponde que lo vea en su línea de tiempo. Se muestra el resumen ("Agregaste información / N fotos"), no el texto verbatim.              |
 
-**-> Tipos que entran en la query: `status_changed`, `resolved_by_incident`.**
+**-> Tipos que entran en la query: `status_changed`, `resolved_by_incident`, `resident_update_added`.**
 
 **Lectura desde código, no desde el cliente anon.** `ticket_events` tiene
 `denyAnonAuthenticated()` + RLS deny-all -- el navegador no la toca nunca.
@@ -7418,6 +7419,120 @@ valor fuera de la lista.
 
 **Sin dependencias nuevas ni migraciones** -- `documents.visibility` y el
 bucket ya existían (10.1/10.3).
+
+## El vecino agrega información/fotos a un reclamo abierto (paso 11.4)
+
+En `/s/[token]` (la vía del link, no adivinable), si el reclamo está
+**abierto**, un formulario para sumar texto libre y/o fotos. `/r/[token]/estado`
+no se toca.
+
+**"Abierto" = `new` + `in_progress`.** Verificado contra el enum real
+`ticket_status` (`src/db/schema/tickets.ts`: `[new, in_progress, resolved,
+closed, discarded]`). `resolved`/`closed`/`discarded` NO -> no se muestra
+el formulario, se muestra un texto ("Este reclamo está {estado}, así que ya
+no se le puede agregar información."). La Server Action re-chequea el estado
+igual (`OPEN_TICKET_STATUSES`).
+
+**DECISIÓN CONSCIENTE: agregar algo NO dispara ninguna notificación ni
+email al administrador.** Alcanza con que quede visible cuando abra el
+reclamo en el panel. Mismo estilo que la nota de "recordatorios recurrentes
+completados" -- se deja escrito para que no se asuma lo contrario más
+adelante. (Además, hoy no existe ningún canal de push hacia el
+administrador salvo el que el propio vecino inicia por WhatsApp -- ver la
+nota del paso 6.4 en Pendientes.)
+
+**Server Action pública `addResidentUpdateAction(prev, formData)`**
+(`public-form/actions.ts`), sin sesión, "autorización" = el
+`attachments_token` del reclamo. Recibe un `FormData` porque lleva los
+`File` de las fotos, ya **comprimidas en el navegador** (`compressImage`,
+reusada del 5.4 -- Canvas, solo cliente; `validateAttachmentType` también
+reusado). Flujo: valida token + texto (`residentUpdateTextSchema`, tope
+2000 como la descripción original) -> exige **al menos uno** de texto/foto
+-> rate limit -> resuelve el reclamo (`getResidentUpdateTicket`, filtra
+reclamo y edificio no borrados) -> exige estado abierto -> valida cada
+archivo (tipo + tamaño ya comprimido, `validateAttachmentSize`) -> **tope
+TOTAL de 5 adjuntos** (`MAX_TICKET_PHOTOS`, el MISMO del 5.4, no uno nuevo:
+cuenta `ticket_attachments` activos + los nuevos) -> sube a
+`ticket-attachments` bajo `pending/<uuid>/` con `createAdminClient` ->
+en una transacción: re-cuenta el tope (cierra la carrera) + `INSERT` de los
+adjuntos + **UN** evento `resident_update_added`. Si algo de la base falla,
+borra de Storage lo que subió.
+
+- **Subida server-side (no browser-direct como el 5.4):** el reclamo ya
+  existe, así que conviene chequear tope + estado abierto ANTES de tocar
+  Storage, atómicamente. `createAdminClient` suma este 5º consumidor (el
+  ÚNICO público) -- ver `src/lib/supabase/admin.ts`.
+- **Si el tope de fotos está lleno y hay texto:** se guarda el texto y el
+  mensaje avisa que las fotos se rechazaron. Si está lleno y NO hay texto:
+  error, nada que guardar.
+- **Tope parcial (ej. 3 existentes + 4 nuevas):** se rechaza el lote
+  entero de fotos con "solo podés agregar N más", el texto (si hay) pasa.
+
+**Evento nuevo `resident_update_added`** (migración `0039`, `ALTER TYPE ...
+ADD VALUE`). `actorType: "neighbor"`, `actorLabel` = nombre de quien
+reportó (snapshot). Payload `{ text: string | null, photoCount: number }` --
+UN evento por envío (texto y/o fotos juntos). **Distinto de `note_added`**
+(exclusivo de notas internas del administrador).
+
+- **Panel (`describeTicketEvent` + `TicketTimeline`):** headline "El vecino
+  agregó {información / N fotos / información y N fotos} al reclamo" (NUNCA
+  "agregó una nota"); el texto verbatim va en `detail` (el admin lo lee
+  entero). Visualmente diferenciado: acento `bg-media/5` + borde izquierdo,
+  punto `bg-media`, badge **"Agregado por el vecino"**, y el rótulo de
+  actor "Vecino" (no "Administración").
+- **Línea de tiempo pública (`buildPublicTimeline`):** entra -- es info que
+  aportó el propio vecino. Muestra el resumen ("Agregaste información y 2
+  fotos a tu reclamo"), NO el texto verbatim (mismo criterio "resumen, no
+  volcado" que el resto de esa línea).
+
+**Rate limit -- se reusa `public_form_rate_limit_attempts`** (mismo
+mecanismo que el 11.1 extendió con un `kind`). Nuevo `kind =
+'resident_update'` (misma migración `0039`), solo por IP (el vecino llega
+por el token del reclamo, no se identifica), **8 por IP cada 30 min**. Un
+bloqueo no se registra. Residual: alguien con el token puede seguir
+agregando hasta el tope cada 30 min.
+
+**`ResidentUpdateForm`** (`public-form/components/`, Client): `useActionState`
+
+- compresión antes de `dispatch` + `router.refresh()` al éxito (línea de
+  tiempo y galería frescas). Si el tope de fotos está lleno, el input de
+  archivos se deshabilita con una nota, el texto sigue.
+
+**Verificado de punta a punta** (reclamos `PRUEBA114` reales + navegador +
+Server Action real + admin de prueba, todo borrado al terminar):
+
+- **Reclamo abierto (`in_progress`):** texto solo -> OK (timeline pública
+  "Agregaste información a tu reclamo"); fotos solas -> OK ("Agregaste 1
+  foto..."); texto + foto -> OK ("Agregaste información y 1 foto..."); sin
+  ninguno de los dos -> rechazado ("Agregá un texto o al menos una foto"),
+  probado también contra la Server Action real (sin pasar por el chequeo
+  del cliente).
+- **Reclamo NO abierto:** `resolved` y `discarded` -> el formulario NO se
+  renderiza, se ve el texto explicativo; la Server Action real, invocada
+  con el token de esos reclamos, responde "Este reclamo ya no está
+  abierto...".
+- **Tope de 5:** reclamo que arranca con 4 adjuntos -> hint "hasta 1 foto
+  más" -> +1 llega a 5 -> reload: "ya tiene el máximo de 5 fotos, podés
+  agregar información igual" + input deshabilitado -> forzar una 6ta ->
+  rechazada ("ya tiene el máximo de 5 fotos, no se pueden agregar más") ->
+  texto solo con el tope lleno -> OK.
+- **Panel:** los `resident_update_added` se ven con el badge "Agregado por
+  el vecino", el acento `bg-media/5` y el rótulo "Vecino" -- claramente
+  distintos de una nota interna.
+- **Rate limit:** el 9º envío de la misma IP en la ventana -> bloqueado
+  ("Estás enviando información muy seguido").
+
+**Unit tests -- +11 (211 -> 222).** `resident-update-schema.test.ts` (+8):
+`residentUpdateTextSchema` (trim, vacío->null, tope), `summarizeResidentUpdate`
+(información / N fotos / los dos, plural), `residentUpdateAddedPayloadSchema`.
+`public-timeline.test.ts` (+2 aserciones nuevas): `resident_update_added`
+entra y se resume; `PUBLIC_TIMELINE_EVENT_TYPES` no tiene tipos internos.
+`ticket-event-description.test.ts` (+1 + exhaustividad): headline "El vecino
+agregó...", nunca "nota"; texto verbatim en `detail`.
+
+**Migración `0039`** -- dos `ALTER TYPE ADD VALUE`
+(`ticket_event_type += resident_update_added`, `public_form_rate_limit_kind
++= resident_update`). Sin dependencias nuevas.
 
 ## Reglas de seguridad (no negociables)
 
@@ -8125,6 +8240,26 @@ NOTHING`) queda disponible, no implementada, para archivos mucho más
   Hobby para jobs de una vez por día, que alcanza sobradamente para este
   barrido) -- no implementado todavía, decisión pendiente de un paso
   propio, no de este.
+
+  **Segundo origen de huérfanos, mucho más chico, agregado en el paso
+  11.4:** `addResidentUpdateAction` sube las fotos nuevas a
+  `pending/<uuid>/<n>-<uuid>.<ext>` (mismo prefijo y forma de path que el
+  5.4, `<uuid>` generado en el servidor, sin el token en el path) ANTES de
+  la transacción que inserta las filas de `ticket_attachments`. Si la
+  transacción falla, el `catch` borra de Storage lo que subió
+  (best-effort, `.catch(() => {})` -- no relanza); pero si el proceso se
+  cae en duro entre `upload()` y ese `catch`, o si el propio `remove()`
+  falla, el objeto queda huérfano. Es **indistinguible por path** de un
+  huérfano del 5.4 (los dos son `pending/<uuid>/...`, sin ninguna marca de
+  origen), y a propósito: el barrido de arriba es UNA sola regla ("bajo
+  `pending/`, sin fila de `ticket_attachments`, más viejo que N") que
+  cubre los dos casos sin necesitar diferenciarlos. El volumen esperado
+  del 11.4 es despreciable frente al 5.4 (un formulario abandonado es
+  comportamiento humano común; un huérfano del 11.4 necesita un fallo de
+  base + un fallo o corte del `catch` en una ventana de milisegundos). Si
+  alguna vez hace falta atribuir huérfanos por origen, un sub-prefijo
+  (`pending/resident-update/<uuid>/`, sigue bajo `pending/%`) es un cambio
+  de una línea -- no se hizo para mantener una sola convención.
 
 - **`Checkbox` (`src/components/ui/checkbox.tsx`, sobre Radix) tira un
   error de hidratación cuando forma parte del HTML servido en la carga

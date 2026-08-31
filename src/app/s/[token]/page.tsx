@@ -3,12 +3,20 @@ import { z } from "zod";
 
 import { RelativeDate } from "@/components/relative-date";
 import { Card, CardContent } from "@/components/ui/card";
+import { ResidentUpdateForm } from "@/features/public-form/components/resident-update-form";
 import { PublicTicketTimeline } from "@/features/public-form/components/ticket-public-timeline";
 import { PublicTicketStatusBadge } from "@/features/public-form/components/ticket-status-summary";
 import { buildPublicTimeline } from "@/features/public-form/public-timeline";
 import { getTicketByAttachmentsToken } from "@/features/public-form/queries";
+import { PUBLIC_TICKET_STATUS_LABEL } from "@/features/public-form/status-lookup-schema";
+import { MAX_TICKET_PHOTOS } from "@/features/public-form/ticket-schema";
 import { AttachmentGallery } from "@/features/tickets/components/attachment-gallery";
 import { createSignedAttachmentUrls } from "@/features/tickets/storage-objects";
+
+// Estados en los que el vecino todavía puede agregar información/fotos
+// (paso 11.4) -- los dos "abiertos" del enum `ticket_status`. Verificado
+// contra src/db/schema/tickets.ts.
+const OPEN_STATUSES = new Set(["new", "in_progress"]);
 
 // Ruta pública, sin sesión (paso 5.10) -- mismo criterio que /r/[token]
 // (ver CLAUDE.md > Qué es este proyecto): quien llega acá no tiene por qué
@@ -118,6 +126,25 @@ export default async function TicketAttachmentsGalleryPage({
             signedUrls={signedUrls}
             emptyMessage="Este reclamo no tiene fotos ni archivos adjuntos."
           />
+
+          {OPEN_STATUSES.has(ticket.status) ? (
+            <ResidentUpdateForm
+              token={parsedToken.data}
+              remainingSlots={Math.max(
+                0,
+                MAX_TICKET_PHOTOS - ticket.attachments.length,
+              )}
+            />
+          ) : (
+            <p className="text-ink-muted border-border rounded-lg border border-dashed p-3 text-sm">
+              Este reclamo está{" "}
+              <span className="font-medium">
+                {PUBLIC_TICKET_STATUS_LABEL[ticket.status].toLowerCase()}
+              </span>
+              , así que ya no se le puede agregar información. Si necesitás algo
+              más, comunicate directo con tu administración.
+            </p>
+          )}
         </CardContent>
       </Card>
     </div>

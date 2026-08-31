@@ -20,12 +20,22 @@ function ev(
   };
 }
 
-describe("PUBLIC_TIMELINE_EVENT_TYPES (paso 11.2)", () => {
-  it("es exactamente cambios de estado -- nada de notas/asignación/duplicados", () => {
+describe("PUBLIC_TIMELINE_EVENT_TYPES (pasos 11.2 / 11.4)", () => {
+  it("cambios de estado + lo que agregó el propio vecino -- nada interno", () => {
     expect([...PUBLIC_TIMELINE_EVENT_TYPES].sort()).toEqual([
+      "resident_update_added",
       "resolved_by_incident",
       "status_changed",
     ]);
+    // Sin notas internas / asignación / prioridad / duplicados.
+    for (const internal of [
+      "note_added",
+      "assigned",
+      "priority_changed",
+      "similar_ticket_detected",
+    ]) {
+      expect([...PUBLIC_TIMELINE_EVENT_TYPES]).not.toContain(internal);
+    }
   });
 });
 
@@ -85,6 +95,25 @@ describe("buildPublicTimeline", () => {
       ev("status_changed", { to: "no-es-un-estado" }, 15),
     ]);
     expect(t[1]!.text).toBe("El estado de tu reclamo cambió");
+  });
+
+  it("resident_update_added entra a la línea de tiempo pública (paso 11.4)", () => {
+    const conTexto = buildPublicTimeline(REPORTED_AT, [
+      ev("resident_update_added", { text: "gotea más", photoCount: 2 }, 20),
+    ]);
+    expect(conTexto[1]!.text).toBe(
+      "Agregaste información y 2 fotos a tu reclamo",
+    );
+
+    const soloFotos = buildPublicTimeline(REPORTED_AT, [
+      ev("resident_update_added", { text: null, photoCount: 1 }, 20),
+    ]);
+    expect(soloFotos[1]!.text).toBe("Agregaste 1 foto a tu reclamo");
+
+    const roto = buildPublicTimeline(REPORTED_AT, [
+      ev("resident_update_added", { photoCount: "no" }, 20),
+    ]);
+    expect(roto[1]!.text).toBe("Agregaste información a tu reclamo");
   });
 
   it("ordena los eventos cronológicamente y deja la creación primero", () => {

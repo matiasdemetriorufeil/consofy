@@ -1,4 +1,5 @@
 import { RelativeDate } from "@/components/relative-date";
+import { Badge } from "@/components/ui/badge";
 import type { TicketTimelineEventRow } from "@/features/tickets/queries";
 import { describeTicketEvent } from "@/features/tickets/ticket-event-description";
 
@@ -45,16 +46,32 @@ export function TicketTimeline({
           actorLabel: event.actorLabel,
           payload: event.payload,
         });
+        const isResidentUpdate = event.type === "resident_update_added";
         return (
           <li key={event.id} className="flex gap-3">
             <div className="flex flex-col items-center pt-1">
               <span
-                className="bg-ink-muted/40 size-2 shrink-0 rounded-full"
+                className={`size-2 shrink-0 rounded-full ${
+                  isResidentUpdate ? "bg-media" : "bg-ink-muted/40"
+                }`}
                 aria-hidden="true"
               />
             </div>
-            <div className="flex flex-1 flex-col gap-0.5 pb-1">
-              <p className="text-ink text-sm">{description.headline}</p>
+            <div
+              className={
+                isResidentUpdate
+                  ? "border-media/50 bg-media/5 flex flex-1 flex-col gap-0.5 rounded-md border-l-2 py-1 pr-1 pl-2"
+                  : "flex flex-1 flex-col gap-0.5 pb-1"
+              }
+            >
+              <p className="text-ink flex flex-wrap items-center gap-x-2 text-sm">
+                {description.headline}
+                {isResidentUpdate && (
+                  <Badge variant="secondary" className="bg-media/15 text-media">
+                    Agregado por el vecino
+                  </Badge>
+                )}
+              </p>
               {description.detail && (
                 <p className="text-ink-muted text-sm whitespace-pre-wrap">
                   {description.detail}

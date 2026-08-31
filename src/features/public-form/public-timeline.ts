@@ -2,6 +2,10 @@ import { z } from "zod";
 
 import type { ticketEvents } from "@/db/schema";
 
+import {
+  residentUpdateAddedPayloadSchema,
+  summarizeResidentUpdate,
+} from "./resident-update-schema";
 import { PUBLIC_TICKET_STATUS_LABEL } from "./status-lookup-schema";
 
 // Línea de tiempo PÚBLICA de un reclamo (paso 11.2) -- lo que ve el vecino
@@ -29,6 +33,12 @@ import { PUBLIC_TICKET_STATUS_LABEL } from "./status-lookup-schema";
 // - `created` -> es seguro, pero la creación se representa aparte, desde
 //   `reported_at` (fecha de negocio, siempre presente), así que este tipo
 //   NO entra en la query -- ver buildPublicTimeline.
+// - `resident_update_added` (paso 11.4) -> SÍ. Es información que aportó el
+//   PROPIO vecino, no algo interno -- corresponde que la vea en su línea de
+//   tiempo. Se muestra el resumen ("Agregaste información / N fotos"), no
+//   el texto verbatim (mismo criterio de "resumen, no volcado" que el
+//   resto de esta línea de tiempo; el texto completo lo lee el
+//   administrador en el panel).
 //
 // Todo el resto es INTERNO y queda afuera:
 // - `note_added`, `assigned` -> texto libre interno (pedido explícito).
@@ -43,6 +53,7 @@ import { PUBLIC_TICKET_STATUS_LABEL } from "./status-lookup-schema";
 export const PUBLIC_TIMELINE_EVENT_TYPES = [
   "status_changed",
   "resolved_by_incident",
+  "resident_update_added",
 ] as const satisfies readonly (typeof ticketEvents.$inferSelect)["type"][];
 
 export type PublicTimelineEventRow = {
@@ -75,6 +86,16 @@ function describeEvent(row: PublicTimelineEventRow): string | null {
   if (row.type === "resolved_by_incident") {
     // NO se nombra el incidente ni su id -- solo el hecho.
     return `Tu reclamo pasó a «${PUBLIC_TICKET_STATUS_LABEL.resolved}»`;
+  }
+  if (row.type === "resident_update_added") {
+    const parsed = residentUpdateAddedPayloadSchema.safeParse(row.payload);
+    if (!parsed.success) {
+      return "Agregaste información a tu reclamo";
+    }
+    return `Agregaste ${summarizeResidentUpdate(
+      parsed.data.text,
+      parsed.data.photoCount ?? 0,
+    )} a tu reclamo`;
   }
   // Cualquier otro tipo que se haya colado: se ignora (defensa en
   // profundidad -- la query ya filtra a PUBLIC_TIMELINE_EVENT_TYPES).

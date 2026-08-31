@@ -1,6 +1,10 @@
 import { z } from "zod";
 
 import type { ticketEventActorType, ticketEventType } from "@/db/schema";
+import {
+  residentUpdateAddedPayloadSchema,
+  summarizeResidentUpdate,
+} from "@/features/public-form/resident-update-schema";
 
 import { PRIORITY_LABEL } from "./components/priority-badge";
 import { STATUS_LABEL } from "./components/status-badge";
@@ -230,6 +234,31 @@ function describeAttachmentAdded(
   };
 }
 
+// Paso 11.4 -- el VECINO agregó información/fotos a su reclamo abierto desde
+// `/s/[token]`. DISTINTO de `note_added` a propósito: el headline dice "El
+// vecino agregó..." (no `{actorLabel} agregó una nota`), y el
+// `actorType: "neighbor"` hace que la línea de tiempo del panel lo rotule
+// "Vecino" -- para que el administrador NO lo confunda con una nota que
+// escribió su propio equipo. El `detail` es el texto verbatim que el vecino
+// escribió (el administrador SÍ lo lee entero acá, a diferencia de la línea
+// de tiempo pública, que muestra solo el resumen).
+function describeResidentUpdateAdded(
+  event: TicketTimelineEventInput,
+): TicketEventDescription {
+  const parsed = residentUpdateAddedPayloadSchema.safeParse(event.payload);
+  if (!parsed.success) {
+    return {
+      headline: "El vecino agregó información al reclamo",
+      detail: null,
+    };
+  }
+  const { text, photoCount } = parsed.data;
+  return {
+    headline: `El vecino agregó ${summarizeResidentUpdate(text, photoCount ?? 0)} al reclamo`,
+    detail: text && text.trim().length > 0 ? text : null,
+  };
+}
+
 function describeMergedIntoIncident(
   event: TicketTimelineEventInput,
 ): TicketEventDescription {
@@ -377,5 +406,7 @@ export function describeTicketEvent(
       return describeIncidentMerged(event);
     case "resolved_by_incident":
       return describeResolvedByIncident(event);
+    case "resident_update_added":
+      return describeResidentUpdateAdded(event);
   }
 }

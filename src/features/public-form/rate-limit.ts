@@ -77,8 +77,23 @@ const ATTACHMENT_UPLOAD_IP_MAX = 30;
 const STATUS_LOOKUP_WINDOW_MINUTES = 15;
 const STATUS_LOOKUP_IP_MAX = 10;
 
+// El vecino agrega información/fotos a un reclamo abierto (paso 11.4). Solo
+// por IP: llega por el `attachments_token` del reclamo, no se identifica.
+// Ventana de 30 min (como el resto del formulario) y 8 envíos: un vecino
+// real agrega un par de cosas en una sesión (una foto, después se acuerda
+// de un dato y agrega texto) -- 8 en media hora ya es spam sobre la línea
+// de tiempo del reclamo. Nota: el tope de 5 adjuntos ya acota las fotos;
+// esto acota además el texto suelto. Residual conocido: alguien con el
+// token puede seguir agregando hasta el tope repetidamente cada 30 min.
+const RESIDENT_UPDATE_WINDOW_MINUTES = 30;
+const RESIDENT_UPDATE_IP_MAX = 8;
+
 async function countAttempts(
-  kind: "ticket_submission" | "attachment_upload" | "status_lookup",
+  kind:
+    | "ticket_submission"
+    | "attachment_upload"
+    | "status_lookup"
+    | "resident_update",
   column: "ip" | "phone",
   value: string,
   windowMinutes: number,
@@ -171,4 +186,24 @@ export async function recordStatusLookupAttempt(ip: string): Promise<void> {
   await db
     .insert(publicFormRateLimitAttempts)
     .values({ kind: "status_lookup", ip, phone: null });
+}
+
+// El vecino agrega info/fotos a un reclamo abierto (paso 11.4) -- solo por
+// IP, se cuenta CADA envío. Ver el comentario de los umbrales arriba.
+export async function isResidentUpdateRateLimited(
+  ip: string,
+): Promise<boolean> {
+  const ipCount = await countAttempts(
+    "resident_update",
+    "ip",
+    ip,
+    RESIDENT_UPDATE_WINDOW_MINUTES,
+  );
+  return ipCount >= RESIDENT_UPDATE_IP_MAX;
+}
+
+export async function recordResidentUpdateAttempt(ip: string): Promise<void> {
+  await db
+    .insert(publicFormRateLimitAttempts)
+    .values({ kind: "resident_update", ip, phone: null });
 }

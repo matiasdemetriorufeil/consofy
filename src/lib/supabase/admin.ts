@@ -32,6 +32,17 @@ import { publicEnv } from "@/lib/env.public";
 //    policies no dan lectura a nadie, así que la URL firmada es la única
 //    forma de servir el archivo -- eso es lo que cierra el criterio de
 //    aceptación de la Etapa 10 (la ruta cruda de Storage no sirve nada).
+//  - `addResidentUpdateAction` (src/features/public-form/actions.ts, paso
+//    11.4): ESCRIBE en el bucket privado `ticket-attachments` (bajo
+//    `pending/`) las fotos que el vecino agrega a un reclamo abierto desde
+//    `/s/[token]`. ÚNICO consumidor PÚBLICO (sin sesión): la "autorización"
+//    es el `attachments_token` del reclamo + que esté abierto + rate limit,
+//    todo chequeado ANTES de subir. La subida podría hacerse también con la
+//    anon key (la policy de la migración 0019 le permite INSERT en
+//    `pending/%`), pero se usa esta vía para no introducir un cuarto patrón
+//    de construcción de cliente Supabase -- la validación de la acción es
+//    la compuerta real en cualquiera de las dos. Solo sube; si el INSERT de
+//    las filas falla, BORRA lo que subió.
 //  - `getStorageUsage` (src/features/documents/storage-usage.ts, paso 10.6),
 //    llamada desde la page `/panel/documents` (sesión de administrador ya
 //    exigida por el layout de `/panel`): ENUMERA (list recursivo) los dos

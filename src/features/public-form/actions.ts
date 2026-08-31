@@ -1,6 +1,6 @@
 "use server";
 
-import { and, eq, isNotNull, isNull } from "drizzle-orm";
+import { and, count, eq, isNotNull, isNull } from "drizzle-orm";
 import { z } from "zod";
 
 import { db } from "@/db";
@@ -12,6 +12,7 @@ import {
   tickets,
 } from "@/db/schema";
 import { createDocumentDownloadUrl } from "@/features/documents/storage-objects";
+import { createAdminClient } from "@/lib/supabase/admin";
 import {
   findDeletedPersonByPhone,
   findPersonByPhone,
@@ -32,23 +33,35 @@ import type { PublicBuilding, TicketCategory } from "./queries";
 import {
   getBuildingByPublicToken,
   getCategoryForTicket,
+  getResidentUpdateTicket,
   getTicketStatusByPublicCode,
 } from "./queries";
 import {
   isAttachmentUploadRateLimited,
+  isResidentUpdateRateLimited,
   isStatusLookupRateLimited,
   isTicketSubmissionRateLimited,
   recordAttachmentUploadAttempt,
+  recordResidentUpdateAttempt,
   recordStatusLookupAttempt,
   recordTicketSubmissionAttempt,
 } from "./rate-limit";
+import {
+  MAX_RESIDENT_UPDATE_TEXT,
+  residentUpdateTextSchema,
+  type ResidentUpdateState,
+} from "./resident-update-schema";
 import {
   ticketStatusLookupSchema,
   type TicketStatusLookupState,
 } from "./status-lookup-schema";
 import { getExistingAttachmentPaths } from "./storage-objects";
 import {
+  ACCEPTED_ATTACHMENT_MIME_TYPES,
   createTicketInputSchema,
+  MAX_TICKET_PHOTOS,
+  TICKET_ATTACHMENTS_BUCKET,
+  validateAttachmentSize,
   type CreateTicketOutput,
   type CreateTicketState,
 } from "./ticket-schema";
@@ -784,4 +797,237 @@ export async function getPublicDocumentDownloadUrlAction(
       error: "No pudimos preparar la descarga. Probá de nuevo en un momento.",
     };
   }
+}
+
+// -----------------------------------------------------------------------
+// El vecino agrega información o fotos a un reclamo abierto (paso 11.4)
+// -----------------------------------------------------------------------
+
+// "Abierto" para este paso -- verificado contra el enum real de
+// `tickets.status` (src/db/schema/tickets.ts): [new, in_progress, resolved,
+// closed, discarded]. Solo los dos primeros admiten que el vecino agregue
+// algo; resuelto/cerrado/descartado NO (ver el reporte).
+const OPEN_TICKET_STATUSES: ReadonlySet<
+  (typeof tickets.$inferSelect)["status"]
+> = new Set(["new", "in_progress"]);
+
+// Pública a propósito -- mismo criterio que createTicketAction: sin sesión,
+// la "autorización" es el `attachments_token` del reclamo (no adivinable).
+// Decisión de producto: NO dispara ninguna notificación ni email al
+// administrador -- alcanza con que quede visible al abrir el reclamo en el
+// panel (ver CLAUDE.md).
+//
+// Recibe un `FormData` porque lleva los `File` de las fotos ya comprimidas
+// en el navegador (compressImage, compress-image.ts -- Canvas, solo
+// cliente). La subida a Storage la hace ESTA acción con `createAdminClient`
+// (a diferencia del alta del 5.4, donde el navegador sube directo): acá el
+// reclamo ya existe, así que conviene chequear el tope de 5 adjuntos y el
+// estado abierto ANTES de tocar Storage, de forma atómica.
+export async function addResidentUpdateAction(
+  _prevState: ResidentUpdateState,
+  formData: FormData,
+): Promise<ResidentUpdateState> {
+  const tokenParsed = z.uuid().safeParse(formData.get("token"));
+  const textParsed = residentUpdateTextSchema.safeParse(
+    formData.get("text") ?? undefined,
+  );
+  if (!tokenParsed.success || !textParsed.success) {
+    return {
+      status: "error",
+      message: `Revisá los datos e intentá de nuevo (el texto va hasta ${MAX_RESIDENT_UPDATE_TEXT} caracteres).`,
+    };
+  }
+  const token = tokenParsed.data;
+  const text = textParsed.data;
+
+  const files = formData
+    .getAll("photo")
+    .filter((f): f is File => f instanceof File && f.size > 0);
+
+  if (!text && files.length === 0) {
+    return { status: "error", message: "Agregá un texto o al menos una foto." };
+  }
+
+  // Rate limit ANTES de tocar la base -- solo por IP (ver rate-limit.ts).
+  // Un bloqueo NO se registra.
+  const ip = await getClientIp();
+  if (await isResidentUpdateRateLimited(ip)) {
+    return {
+      status: "error",
+      message:
+        "Estás enviando información muy seguido. Esperá unos minutos e intentá de nuevo.",
+    };
+  }
+
+  const ticket = await getResidentUpdateTicket(token);
+  if (!ticket) {
+    return { status: "error", message: "No encontramos ese reclamo." };
+  }
+  if (!OPEN_TICKET_STATUSES.has(ticket.status)) {
+    return {
+      status: "error",
+      message:
+        "Este reclamo ya no está abierto, así que no se le puede agregar información.",
+    };
+  }
+
+  await recordResidentUpdateAttempt(ip);
+
+  // Validación de cada archivo (tipo + tamaño ya comprimido) -- reusa los
+  // validadores del 5.4, no reimplementa.
+  for (const file of files) {
+    if (
+      !(ACCEPTED_ATTACHMENT_MIME_TYPES as readonly string[]).includes(file.type)
+    ) {
+      return {
+        status: "error",
+        message: "Alguno de los archivos no es una foto ni un PDF.",
+      };
+    }
+    const sizeError = validateAttachmentSize(file.size);
+    if (sizeError) {
+      return { status: "error", message: sizeError };
+    }
+  }
+
+  // Tope TOTAL de 5 adjuntos (MAX_TICKET_PHOTOS, riesgo R4) -- el mismo que
+  // el alta del 5.4, no uno nuevo. Cuenta los adjuntos activos actuales.
+  let photoRejection: string | null = null;
+  let filesToUpload: File[] = [];
+  if (files.length > 0) {
+    const [existingRow] = await db
+      .select({ value: count() })
+      .from(ticketAttachments)
+      .where(
+        and(
+          eq(ticketAttachments.ticketId, ticket.id),
+          isNull(ticketAttachments.deletedAt),
+        ),
+      );
+    const existing = existingRow?.value ?? 0;
+    const remaining = MAX_TICKET_PHOTOS - existing;
+    if (remaining <= 0) {
+      photoRejection = `Este reclamo ya tiene el máximo de ${MAX_TICKET_PHOTOS} fotos, no se pueden agregar más.`;
+    } else if (files.length > remaining) {
+      photoRejection = `Solo podés agregar ${remaining} foto${
+        remaining === 1 ? "" : "s"
+      } más (el máximo es ${MAX_TICKET_PHOTOS}).`;
+    } else {
+      filesToUpload = files;
+    }
+  }
+
+  // Fotos rechazadas y sin texto -> no hay nada que guardar.
+  if (photoRejection && !text && filesToUpload.length === 0) {
+    return { status: "error", message: photoRejection };
+  }
+
+  // Subida a Storage (mismo bucket/patrón `pending/` que el 5.4). Carpeta
+  // al azar por envío -- no lleva el token en el path.
+  const uploaded: {
+    path: string;
+    mimeType: string;
+    sizeBytes: number;
+    originalFilename: string;
+  }[] = [];
+  if (filesToUpload.length > 0) {
+    const supabase = createAdminClient();
+    const folder = `pending/${crypto.randomUUID()}`;
+    for (let i = 0; i < filesToUpload.length; i++) {
+      const file = filesToUpload[i]!;
+      const ext = file.type === "application/pdf" ? "pdf" : "jpg";
+      const path = `${folder}/${i}-${crypto.randomUUID()}.${ext}`;
+      const { error } = await supabase.storage
+        .from(TICKET_ATTACHMENTS_BUCKET)
+        .upload(path, file, { contentType: file.type, upsert: false });
+      if (error) {
+        if (uploaded.length > 0) {
+          // Best-effort, no relanza -- ver el comentario del catch de la
+          // transacción más abajo.
+          await supabase.storage
+            .from(TICKET_ATTACHMENTS_BUCKET)
+            .remove(uploaded.map((u) => u.path))
+            .catch(() => {});
+        }
+        return {
+          status: "error",
+          message: "No pudimos subir las fotos. Probá de nuevo en un momento.",
+        };
+      }
+      uploaded.push({
+        path,
+        mimeType: file.type,
+        sizeBytes: file.size,
+        originalFilename: file.name,
+      });
+    }
+  }
+
+  // Base: insert de adjuntos + UN evento `resident_update_added`, en una
+  // transacción. Re-cuenta el tope DENTRO de la transacción para cerrar la
+  // carrera de dos envíos simultáneos.
+  try {
+    await db.transaction(async (tx) => {
+      if (uploaded.length > 0) {
+        const [nowRow] = await tx
+          .select({ value: count() })
+          .from(ticketAttachments)
+          .where(
+            and(
+              eq(ticketAttachments.ticketId, ticket.id),
+              isNull(ticketAttachments.deletedAt),
+            ),
+          );
+        if ((nowRow?.value ?? 0) + uploaded.length > MAX_TICKET_PHOTOS) {
+          throw new Error("TOTE_EXCEEDED");
+        }
+        await tx.insert(ticketAttachments).values(
+          uploaded.map((u) => ({
+            organizationId: ticket.organizationId,
+            ticketId: ticket.id,
+            storagePath: u.path,
+            mimeType: u.mimeType,
+            sizeBytes: u.sizeBytes,
+            originalFilename: u.originalFilename,
+          })),
+        );
+      }
+
+      await tx.insert(ticketEvents).values({
+        organizationId: ticket.organizationId,
+        ticketId: ticket.id,
+        type: "resident_update_added",
+        actorType: "neighbor",
+        actorLabel: ticket.neighborName,
+        payload: { text: text ?? null, photoCount: uploaded.length },
+      });
+    });
+  } catch (error) {
+    if (uploaded.length > 0) {
+      // Limpieza best-effort: si ESTO falla (red, Storage caído), el objeto
+      // queda huérfano bajo `pending/` -- el mismo destino, y la misma
+      // limpieza periódica futura, que un formulario abandonado del 5.4
+      // (ver CLAUDE.md > Pendientes). No se relanza: la limpieza nunca debe
+      // volverse un error nuevo para el vecino (mismo criterio que
+      // deleteFormAttachment del 5.4).
+      await createAdminClient()
+        .storage.from(TICKET_ATTACHMENTS_BUCKET)
+        .remove(uploaded.map((u) => u.path))
+        .catch(() => {});
+    }
+    const raced = error instanceof Error && error.message === "TOTE_EXCEEDED";
+    return {
+      status: "error",
+      message: raced
+        ? `Este reclamo llegó al máximo de ${MAX_TICKET_PHOTOS} fotos mientras enviabas. Recargá la página.`
+        : "No pudimos guardar la información. Probá de nuevo en un momento.",
+    };
+  }
+
+  return {
+    status: "success",
+    message: photoRejection
+      ? `Guardamos tu información. ${photoRejection}`
+      : "Listo. Tu administración va a ver esto cuando abra el reclamo.",
+  };
 }

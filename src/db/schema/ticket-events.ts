@@ -74,6 +74,17 @@ export const ticketEventType = pgEnum("ticket_event_type", [
   // terminal (resolved/closed/discarded) no recibe este evento, porque no
   // se le tocó nada.
   "resolved_by_incident",
+  // Paso 11.4 -- el VECINO agrega información o fotos a un reclamo abierto
+  // desde `/s/[token]` (addResidentUpdateAction, public-form/actions.ts).
+  // `actorType` siempre "neighbor". DISTINTO de `note_added`, que es
+  // exclusivo de las notas internas del administrador -- que el
+  // administrador no confunda "esto lo escribió el vecino" con "esto lo
+  // escribió mi equipo" es un requisito del paso. Payload:
+  // `{ text: string | null, photoCount: number }` -- uno por cada envío
+  // del vecino (texto y/o fotos juntos cuentan como un evento). Clasificado
+  // como PÚBLICO en `public-form/public-timeline.ts` (es info que aportó el
+  // propio vecino, no algo interno).
+  "resident_update_added",
 ]);
 
 export const ticketEventActorType = pgEnum("ticket_event_actor_type", [

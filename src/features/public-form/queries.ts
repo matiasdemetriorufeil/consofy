@@ -422,3 +422,56 @@ export async function getPublicBuildingDocuments(
     )
     .orderBy(desc(documents.createdAt), desc(documents.id));
 }
+
+export type ResidentUpdateTicket = {
+  id: string;
+  organizationId: string;
+  status: (typeof tickets.$inferSelect)["status"];
+  // Nombre de quien reportó, para el `actor_label` del evento
+  // `resident_update_added` -- snapshot, mismo criterio que el resto de
+  // ticket_events. "Vecino" si el reclamo no tiene persona vinculada.
+  neighborName: string;
+};
+
+// Resuelve el reclamo detrás de un `attachments_token` para que el vecino
+// le agregue información/fotos (paso 11.4). MISMO patrón que
+// getTicketByAttachmentsToken: el token es la única credencial, y se
+// filtra reclamo Y edificio no dados de baja. NO filtra por estado acá --
+// devuelve el `status` y la Server Action decide si está "abierto"
+// (new/in_progress), para poder dar el mensaje específico de "ya no está
+// abierto". `null` si el token no resuelve nada.
+export async function getResidentUpdateTicket(
+  token: string,
+): Promise<ResidentUpdateTicket | null> {
+  const [row] = await db
+    .select({
+      id: tickets.id,
+      organizationId: tickets.organizationId,
+      status: tickets.status,
+      neighborFirstName: people.firstName,
+      neighborLastName: people.lastName,
+    })
+    .from(tickets)
+    .innerJoin(buildings, eq(tickets.buildingId, buildings.id))
+    .leftJoin(people, eq(tickets.personId, people.id))
+    .where(
+      and(
+        eq(tickets.attachmentsToken, token),
+        isNull(tickets.deletedAt),
+        isNull(buildings.deletedAt),
+      ),
+    );
+
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    organizationId: row.organizationId,
+    status: row.status,
+    neighborName:
+      [row.neighborFirstName, row.neighborLastName].filter(Boolean).join(" ") ||
+      "Vecino",
+  };
+}
