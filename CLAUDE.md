@@ -6695,6 +6695,116 @@ direcciones), `buildDocumentListHref` (agregar/pisar/borrar), y
 **Sin dependencias nuevas ni migraciones** -- este paso no toca el esquema
 ni Storage.
 
+## Control de visibilidad de documentos (paso 10.3)
+
+El badge de visibilidad del explorador (paso 10.2) deja de ser de solo
+lectura: cada fila puede pasar un documento de **privado** (solo el
+administrador) a **visible para vecinos** y viceversa, desde el panel.
+Este paso **solo guarda el flag** -- el consumo real desde el portal del
+vecino es el paso 11.3, y las URLs firmadas son el 10.4; acá no se toca
+nada de cómo se sirve el archivo.
+
+**`documents.visibility` ES un pgEnum real** (`document_visibility`,
+valores `private` / `residents`, NOT NULL, default `private`), a
+diferencia de `category` que es `text` validado con Zod. Verificado en
+`src/db/schema/documents.ts`: enum de Postgres migrado en la `0010`, con
+un índice `documents_building_id_category_visibility_idx` que ya lo
+incluía como columna trailing. `DOCUMENT_VISIBILITY_VALUES` en
+`document-schema.ts` lo espeja inline (mismo criterio que
+`DOCUMENT_CATEGORIES`: el archivo es puro, lo importan Client Components).
+
+**El control: el badge se vuelve un `<button>`, NO un ítem de menú `⋮`.**
+Decisión propia (el enunciado dejaba abierto toggle inline / ítem de menú).
+`BuildingsList`/`PeopleList`/`RemindersList`/`UnitsList` usan un `⋮`
+porque tienen 2+ acciones por fila (Editar, Dar de baja...); acá hay UNA
+sola acción (alternar la visibilidad), y un menú desplegable de un solo
+ítem es un anti-patrón. El badge ya vive en su celda mostrando el estado
+-- hacerlo clickeable (con un ícono de lápiz al lado que señala que es
+editable, y un `aria-label` que describe la acción) es el cambio mínimo.
+`DocumentList` **sigue siendo Server Component**; solo
+`DocumentVisibilityControl` y su diálogo son cliente, mismo criterio que
+`SimilarTicketBanner` en la vista de detalle de un reclamo (paso 7.3): un
+control autocontenido por fila, con su propio `useTransition`.
+
+**Direcciones asimétricas -- mitigación del riesgo R7 del plan (datos
+personales, Ley 25.326):**
+
+- **privado -> visible para vecinos: confirmación obligatoria.**
+  `MakeDocumentVisibleDialog` dice QUÉ documento y QUÉ va a poder ver un
+  vecino ("Los vecinos del edificio {edificio} van a poder ver y
+  descargar este documento ({categoría}). Antes de hacerlo visible,
+  revisá que no incluya datos personales de terceros ni información
+  interna de la administración."). Exponer un documento hacia afuera es
+  una decisión explícita -- un click accidental, o una pantalla obsoleta
+  en otra pestaña, no pueden hacerlo solos.
+- **visible -> privado: cambio inmediato, sin confirmación.** Restringir
+  el acceso no tiene el mismo riesgo que abrirlo.
+
+**Server Action -- `setDocumentVisibilityAction(input)`**
+(`documents/actions.ts`), envuelta en `authorizedAction()`, parametrizada
+por el destino (`visibility: "private" | "residents"`), una sola acción
+para las dos direcciones (mismo criterio que
+`resolveSimilarityCandidateAction` del 7.3). Sin máquina de transiciones
+ni compare-and-swap: no hay "transición inválida" entre dos
+visibilidades (mismo criterio que `changeTicketPriorityAction`), y la
+dirección peligrosa ya está gateada por el diálogo del cliente. El
+`UPDATE documents SET visibility = ? WHERE id = ? AND organization_id = ?
+AND deleted_at IS NULL RETURNING visibility` es el único chequeo de
+pertenencia que hace falta: un documento de otra organización (o borrado,
+o inexistente) no matchea ninguna fila y devuelve el mismo
+`"No encontramos ese documento."` ambiguo del resto del proyecto, sin
+revelar si el id existe en otra organización. `updated_at` lo pone el
+trigger `set_updated_at`, no se setea a mano. `revalidatePath("/panel/
+documents")` para otras pestañas / la próxima navegación.
+
+**Feedback inmediato:** el control mantiene un `visibility` optimista que
+refleja el cambio apenas el servidor responde `ok`, sin esperar a
+`router.refresh()` (mismo criterio que `SimilarTicketBanner`). El
+`router.refresh()` reconcilia con los Server Components frescos sin
+recargar la página entera (ver CLAUDE.md > Acciones sobre un reclamo,
+paso 6.4, sobre por qué `revalidatePath` solo no alcanza para una
+pantalla ya montada). El estado optimista se resincroniza si el prop del
+servidor cambia -- ajuste de estado DURANTE el render, no en un efecto
+(patrón ya usado en `TicketFiltersBar`). Toast en las dos direcciones
+(`"«{título}» ahora es visible para los vecinos."` /
+`"«{título}» ahora es privado."`).
+
+**Fuera de alcance, a propósito:** el acceso real de un vecino a los
+documentos `residents` (portal del vecino, paso 11.3) -- nadie fuera del
+panel consume este flag todavía. Las URLs firmadas / la descarga (paso
+10.4). El criterio de aceptación de la Etapa 10 ("un documento privado no
+es accesible con la URL directa") se termina de cumplir con el 10.4 --
+este paso deja el flag correcto y gateable.
+
+**Verificado de punta a punta, navegador real (Playwright, admin de
+prueba dedicado creado y borrado), un documento de prueba en `private`:**
+
+- **Estado inicial:** badge "Privado", DB `private`.
+- **privado -> visible, CANCELAR:** click en el badge -> aparece el
+  diálogo con título `Hacer visible "Prueba 10.3 Acta interna"` y el
+  cuerpo que nombra edificio + categoría + la advertencia de R7. "Cancelar"
+  -> diálogo cerrado, badge sigue "Privado", DB **sin cambios** (`private`).
+- **privado -> visible, CONFIRMAR:** click -> diálogo -> "Sí, hacer
+  visible" -> toast "...ahora es visible para los vecinos", badge ->
+  "Visible para vecinos" (optimista), DB `residents`. **Tras recargar la
+  página:** badge sigue "Visible para vecinos", DB `residents` -- persiste,
+  no era solo estado del cliente.
+- **visible -> privado, SIN diálogo:** click -> **cero diálogos**, cambio
+  inmediato, toast "...ahora es privado", badge -> "Privado", DB `private`.
+  **Tras recargar:** badge "Privado", DB `private` -- persiste.
+- **Limpieza:** documento de prueba dado de baja lógica (`deleted_at`);
+  cuenta de prueba borrada por completo (Auth + `app_users`). `documents`
+  activos de vuelta en 3 (seed).
+
+**Unit tests -- +3 (175 -> 178).** `document-schema.test.ts`:
+`DOCUMENT_VISIBILITY_VALUES` espeja el pgEnum;
+`DOCUMENT_VISIBILITY_LABEL` cubre los dos valores;
+`setDocumentVisibilityInputSchema` acepta un id/valor válidos y rechaza un
+uuid o un valor de enum inválidos.
+
+**Sin dependencias nuevas ni migraciones** -- `documents.visibility` ya
+existía; este paso solo lo hace editable.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.

@@ -7,6 +7,7 @@ import {
   DOCUMENT_CATEGORIES,
   DOCUMENT_CATEGORY_LABEL,
   DOCUMENT_VISIBILITY_LABEL,
+  DOCUMENT_VISIBILITY_VALUES,
   FILE_KIND_LABEL,
   formatFileSize,
   getFileExtension,
@@ -14,6 +15,7 @@ import {
   isDocumentCategory,
   MAX_DOCUMENT_SIZE_BYTES,
   sanitizeFilenameStem,
+  setDocumentVisibilityInputSchema,
   validateDocumentFilename,
   validateDocumentSize,
 } from "./document-schema";
@@ -187,9 +189,42 @@ describe("getFileKind", () => {
   });
 });
 
-describe("DOCUMENT_VISIBILITY_LABEL", () => {
-  it("traduce los dos valores del enum", () => {
+describe("visibilidad", () => {
+  it("DOCUMENT_VISIBILITY_VALUES espeja el pgEnum (private, residents)", () => {
+    expect([...DOCUMENT_VISIBILITY_VALUES].sort()).toEqual([
+      "private",
+      "residents",
+    ]);
+  });
+
+  it("DOCUMENT_VISIBILITY_LABEL tiene una etiqueta para cada valor", () => {
+    for (const value of DOCUMENT_VISIBILITY_VALUES) {
+      expect(DOCUMENT_VISIBILITY_LABEL[value]).toBeTruthy();
+    }
     expect(DOCUMENT_VISIBILITY_LABEL.private).toBe("Privado");
     expect(DOCUMENT_VISIBILITY_LABEL.residents).toBe("Visible para vecinos");
+  });
+
+  it("setDocumentVisibilityInputSchema acepta un id/valor válidos", () => {
+    const parsed = setDocumentVisibilityInputSchema.safeParse({
+      documentId: "3f1e8c2a-9b4d-4e6f-8a1b-2c3d4e5f6a7b",
+      visibility: "residents",
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it("setDocumentVisibilityInputSchema rechaza uuid o valor inválidos", () => {
+    expect(
+      setDocumentVisibilityInputSchema.safeParse({
+        documentId: "no-es-uuid",
+        visibility: "residents",
+      }).success,
+    ).toBe(false);
+    expect(
+      setDocumentVisibilityInputSchema.safeParse({
+        documentId: "3f1e8c2a-9b4d-4e6f-8a1b-2c3d4e5f6a7b",
+        visibility: "public",
+      }).success,
+    ).toBe(false);
   });
 });

@@ -1,5 +1,6 @@
 "use server";
 
+import { and, eq, isNull } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 
 import { db } from "@/db";
@@ -15,10 +16,12 @@ import {
   documentUploadFieldsSchema,
   getFileExtension,
   initialDocumentUploadState,
+  setDocumentVisibilityInputSchema,
   validateDocumentFilename,
   validateDocumentSize,
   type DocumentUploadFieldErrors,
   type DocumentUploadState,
+  type DocumentVisibility,
 } from "./document-schema";
 
 function fieldError(
@@ -166,5 +169,54 @@ export const uploadDocumentAction = authorizedAction(
 
     revalidatePath("/panel/documents");
     return { ...initialDocumentUploadState, ok: true };
+  },
+);
+
+export type SetDocumentVisibilityResult =
+  { ok: true; visibility: DocumentVisibility } | { ok: false; error: string };
+
+// Cambia la visibilidad de UN documento (paso 10.3). Sin máquina de
+// transiciones ni compare-and-swap: no hay "transición inválida" entre dos
+// visibilidades (mismo criterio que `changeTicketPriorityAction`), y la
+// dirección peligrosa -- pasar a "visible para vecinos" -- ya está
+// protegida por un diálogo de confirmación en el cliente (ver
+// DocumentVisibilityControl / MakeDocumentVisibleDialog), así que un click
+// accidental o una pantalla obsoleta no pueden exponer un documento hacia
+// afuera sin que alguien lo confirme explícitamente. Volver a "privado"
+// (restringir) no necesita esa fricción -- riesgo R7 del plan
+// (Ley 25.326), ver CLAUDE.md > Control de visibilidad de documentos.
+//
+// El `UPDATE ... WHERE id AND organization_id AND deleted_at IS NULL
+// RETURNING` es el único chequeo que hace falta: un documento de otra
+// organización (o borrado, o inexistente) no matchea ninguna fila y la
+// acción devuelve el mismo mensaje ambiguo que el resto del proyecto,
+// nunca revela si el id existe en otra organización. `updated_at` lo pone
+// el trigger `set_updated_at`, no se setea a mano.
+export const setDocumentVisibilityAction = authorizedAction(
+  async (context, input: unknown): Promise<SetDocumentVisibilityResult> => {
+    const parsed = setDocumentVisibilityInputSchema.safeParse(input);
+    if (!parsed.success) {
+      return { ok: false, error: "Datos inválidos." };
+    }
+    const { documentId, visibility } = parsed.data;
+
+    const [updated] = await db
+      .update(documents)
+      .set({ visibility })
+      .where(
+        and(
+          eq(documents.id, documentId),
+          eq(documents.organizationId, context.organization.id),
+          isNull(documents.deletedAt),
+        ),
+      )
+      .returning({ visibility: documents.visibility });
+
+    if (!updated) {
+      return { ok: false, error: "No encontramos ese documento." };
+    }
+
+    revalidatePath("/panel/documents");
+    return { ok: true, visibility: updated.visibility };
   },
 );

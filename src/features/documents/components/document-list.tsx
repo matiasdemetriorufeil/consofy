@@ -21,7 +21,6 @@ import { formatExactDate } from "@/lib/format-date";
 
 import {
   DOCUMENT_CATEGORY_LABEL,
-  DOCUMENT_VISIBILITY_LABEL,
   FILE_KIND_LABEL,
   formatFileSize,
   getFileKind,
@@ -29,6 +28,7 @@ import {
   type FileKind,
 } from "../document-schema";
 import type { DocumentListRow } from "../queries";
+import { DocumentVisibilityControl } from "./document-visibility-control";
 
 const FILE_KIND_ICON: Record<FileKind, LucideIcon> = {
   pdf: FileText,
@@ -74,23 +74,12 @@ function FileTypeCell({ mimeType }: { mimeType: string }) {
   );
 }
 
-function VisibilityBadge({
-  visibility,
-}: {
-  visibility: DocumentListRow["visibility"];
-}) {
-  return (
-    <Badge variant={visibility === "residents" ? "outline" : "secondary"}>
-      {DOCUMENT_VISIBILITY_LABEL[visibility]}
-    </Badge>
-  );
-}
-
-// Server Component puro -- una fila de documento no tiene ninguna
-// interacción de cliente en este paso (la descarga es 10.4, la edición de
-// visibilidad es 10.3). Desktop: tabla. Mobile: tarjetas apiladas -- mismo
-// criterio responsive que la bandeja de reclamos (una tabla de 7-8
-// columnas no entra en un celular sin cortar contenido).
+// Server Component -- las filas casi no tienen interacción de cliente: solo
+// el control de visibilidad de cada fila (paso 10.3, `<DocumentVisibilityControl>`,
+// que es Client) y la descarga (paso 10.4, todavía deshabilitada). Desktop:
+// tabla. Mobile: tarjetas apiladas -- mismo criterio responsive que la
+// bandeja de reclamos (una tabla de 7-8 columnas no entra en un celular sin
+// cortar contenido).
 export function DocumentList({
   rows,
   showBuildingColumn,
@@ -147,7 +136,13 @@ export function DocumentList({
                   {formatFileSize(row.sizeBytes)}
                 </TableCell>
                 <TableCell>
-                  <VisibilityBadge visibility={row.visibility} />
+                  <DocumentVisibilityControl
+                    documentId={row.id}
+                    visibility={row.visibility}
+                    title={row.title}
+                    categoryLabel={categoryLabel(row.category)}
+                    buildingName={row.buildingName}
+                  />
                 </TableCell>
                 <TableCell className="text-ink-muted max-w-32 truncate">
                   {row.uploadedBy ?? "—"}
@@ -186,7 +181,13 @@ export function DocumentList({
 
             <div className="flex flex-wrap items-center gap-2">
               <Badge variant="secondary">{categoryLabel(row.category)}</Badge>
-              <VisibilityBadge visibility={row.visibility} />
+              <DocumentVisibilityControl
+                documentId={row.id}
+                visibility={row.visibility}
+                title={row.title}
+                categoryLabel={categoryLabel(row.category)}
+                buildingName={row.buildingName}
+              />
             </div>
 
             <p className="text-ink-muted flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">

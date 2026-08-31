@@ -221,20 +221,30 @@ export const initialDocumentUploadState: DocumentUploadState = {
 export const BUILDING_DOCUMENTS_BUCKET = "building-documents";
 
 // -----------------------------------------------------------------------
-// Visibilidad -- solo lectura en el explorador (paso 10.2)
+// Visibilidad
 // -----------------------------------------------------------------------
-// Espejo del enum `document_visibility` de src/db/schema/documents.ts
-// (`private` / `residents`). El explorador lo muestra como un badge y nada
-// más -- editarlo es el paso 10.3. Se define acá inline en vez de importar
-// el pgEnum, mismo criterio que `DOCUMENT_CATEGORIES` arriba (este archivo
-// es puro, sin dependencias del cliente de base).
-export const DOCUMENT_VISIBILITY_LABEL: Record<
-  "private" | "residents",
-  string
-> = {
+// Espejo del enum `document_visibility` de src/db/schema/documents.ts --
+// que SÍ es un pgEnum real (a diferencia de `category`, que es `text`).
+// `private`: solo el administrador; `residents`: los vecinos del edificio
+// (el consumo real desde el portal del vecino es el paso 11.3 -- este paso
+// solo guarda el flag). Se define acá inline en vez de importar el pgEnum,
+// mismo criterio que `DOCUMENT_CATEGORIES` arriba (este archivo es puro,
+// sin dependencias del cliente de base -- lo importan Client Components).
+export const DOCUMENT_VISIBILITY_VALUES = ["private", "residents"] as const;
+export type DocumentVisibility = (typeof DOCUMENT_VISIBILITY_VALUES)[number];
+
+export const DOCUMENT_VISIBILITY_LABEL: Record<DocumentVisibility, string> = {
   private: "Privado",
   residents: "Visible para vecinos",
 };
+
+// Entrada de `setDocumentVisibilityAction` (paso 10.3) -- validada con Zod
+// en el servidor, aunque el control del panel solo mande valores válidos
+// (CLAUDE.md > Reglas de seguridad).
+export const setDocumentVisibilityInputSchema = z.object({
+  documentId: z.uuid(),
+  visibility: z.enum(DOCUMENT_VISIBILITY_VALUES),
+});
 
 // -----------------------------------------------------------------------
 // Tipo de archivo para la UI -- derivado del mime_type ya guardado
