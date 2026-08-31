@@ -17,6 +17,7 @@ import {
   getDocumentDownloadInputSchema,
   getFileExtension,
   initialDocumentUploadState,
+  replaceDocumentFieldsSchema,
   setDocumentVisibilityInputSchema,
   validateDocumentFilename,
   validateDocumentSize,
@@ -280,5 +281,159 @@ export const getDocumentDownloadUrlAction = authorizedAction(
         error: "No pudimos preparar la descarga. Probá de nuevo en un momento.",
       };
     }
+  },
+);
+
+export type ReplaceDocumentResult = { ok: true } | { ok: false; error: string };
+
+// Reemplaza un documento conservando el anterior como versión previa (paso
+// 10.5) -- gestión de versiones DELIBERADAMENTE simple:
+//
+//  - Crea una FILA NUEVA en `documents`: mismo `building_id`, `category`,
+//    `visibility` y `description` que la anterior (se heredan, no se
+//    editan acá); `version` = anterior + 1; `supersedes_id` = id de la
+//    anterior. El único dato obligatorio que cambia es el archivo; el
+//    título es editable (si viene vacío, cae al nombre del archivo nuevo,
+//    mismo criterio que el alta del 10.1).
+//  - La fila ANTERIOR se marca con `deleted_at` (borrado LÓGICO, nunca
+//    `DELETE` físico) -- así desaparece sola del explorador (10.2), que ya
+//    filtra `deleted_at IS NULL`, sin tocar esa query.
+//  - El OBJETO en Storage de la versión anterior NUNCA se borra. Es la
+//    versión previa que este paso pide conservar -- distinto de la
+//    limpieza de huérfanos del 10.1, que sí borra objetos de verdad. Acá
+//    solo se borra el objeto NUEVO si la transacción de base falla (ese sí
+//    quedaría huérfano).
+//  - El soft-delete + el insert corren en una `db.transaction()` con
+//    compare-and-swap sobre `deleted_at IS NULL`: si otra pestaña ya
+//    reemplazó este documento, aborta sin crear una segunda versión.
+export const replaceDocumentAction = authorizedAction(
+  async (context, formData: FormData): Promise<ReplaceDocumentResult> => {
+    const parsed = replaceDocumentFieldsSchema.safeParse({
+      documentId: formData.get("documentId"),
+      title: formData.get("title") ?? undefined,
+    });
+    if (!parsed.success) {
+      return { ok: false, error: "Datos inválidos." };
+    }
+    const { documentId, title } = parsed.data;
+
+    const file = formData.get("file");
+    if (!(file instanceof File) || file.size === 0) {
+      return { ok: false, error: "Elegí el archivo nuevo." };
+    }
+
+    const typeError = validateDocumentFilename(file.name);
+    if (typeError) {
+      return { ok: false, error: typeError };
+    }
+    const sizeError = validateDocumentSize(file.size);
+    if (sizeError) {
+      return { ok: false, error: sizeError };
+    }
+    const contentType = canonicalMimeForFilename(file.name);
+    if (!contentType) {
+      return {
+        ok: false,
+        error: "No pudimos reconocer el tipo de ese archivo.",
+      };
+    }
+
+    const [previous] = await db
+      .select({
+        id: documents.id,
+        buildingId: documents.buildingId,
+        category: documents.category,
+        description: documents.description,
+        visibility: documents.visibility,
+        version: documents.version,
+      })
+      .from(documents)
+      .where(
+        and(
+          eq(documents.id, documentId),
+          eq(documents.organizationId, context.organization.id),
+          isNull(documents.deletedAt),
+        ),
+      );
+    if (!previous) {
+      return { ok: false, error: "No encontramos ese documento." };
+    }
+
+    const newStoragePath = buildDocumentStoragePath(
+      previous.buildingId,
+      previous.category,
+      file.name,
+    );
+    const filenameStem = file.name
+      .slice(0, file.name.length - getFileExtension(file.name).length)
+      .trim();
+    const resolvedTitle = title ?? (filenameStem || file.name);
+
+    // El archivo NUEVO se sube antes de tocar la base. El archivo VIEJO
+    // NUNCA se borra de Storage (ver el comentario de arriba).
+    const supabase = createAdminClient();
+    const { error: uploadError } = await supabase.storage
+      .from(BUILDING_DOCUMENTS_BUCKET)
+      .upload(newStoragePath, file, { contentType, upsert: false });
+    if (uploadError) {
+      return {
+        ok: false,
+        error:
+          "No pudimos subir el archivo nuevo. Probá de nuevo en un momento.",
+      };
+    }
+
+    let staleConflict = false;
+    try {
+      await db.transaction(async (tx) => {
+        const [softDeleted] = await tx
+          .update(documents)
+          .set({ deletedAt: new Date() })
+          .where(
+            and(
+              eq(documents.id, previous.id),
+              eq(documents.organizationId, context.organization.id),
+              isNull(documents.deletedAt),
+            ),
+          )
+          .returning({ id: documents.id });
+        if (!softDeleted) {
+          staleConflict = true;
+          throw new Error("stale replace conflict");
+        }
+
+        await tx.insert(documents).values({
+          organizationId: context.organization.id,
+          buildingId: previous.buildingId,
+          category: previous.category,
+          title: resolvedTitle,
+          description: previous.description,
+          storagePath: newStoragePath,
+          mimeType: contentType,
+          sizeBytes: file.size,
+          originalFilename: file.name,
+          visibility: previous.visibility,
+          uploadedBy: context.appUser.displayName,
+          version: previous.version + 1,
+          supersedesId: previous.id,
+        });
+      });
+    } catch {
+      // La transacción hizo rollback -> el objeto NUEVO quedó huérfano
+      // (ninguna fila lo referencia). Se borra. El objeto VIEJO sigue
+      // intacto en el bucket.
+      await supabase.storage
+        .from(BUILDING_DOCUMENTS_BUCKET)
+        .remove([newStoragePath]);
+      return {
+        ok: false,
+        error: staleConflict
+          ? "Ese documento ya fue reemplazado. Recargá la página."
+          : "No pudimos guardar la nueva versión. Probá de nuevo en un momento.",
+      };
+    }
+
+    revalidatePath("/panel/documents");
+    return { ok: true };
   },
 );

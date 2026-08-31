@@ -28,6 +28,7 @@ import {
 import type { DocumentListRow } from "../queries";
 import { DocumentDownloadButton } from "./document-download-button";
 import { DocumentVisibilityControl } from "./document-visibility-control";
+import { ReplaceDocumentButton } from "./replace-document-button";
 
 const FILE_KIND_ICON: Record<FileKind, LucideIcon> = {
   pdf: FileText,
@@ -54,12 +55,35 @@ function FileTypeCell({ mimeType }: { mimeType: string }) {
   );
 }
 
-// Server Component -- las filas tienen dos controles de cliente chicos: el
-// de visibilidad (paso 10.3, `<DocumentVisibilityControl>`) y el de
-// descarga (paso 10.4, `<DocumentDownloadButton>`, que pide la URL firmada
-// bajo demanda). Desktop: tabla. Mobile: tarjetas apiladas -- mismo
-// criterio responsive que la bandeja de reclamos (una tabla de 7-8
-// columnas no entra en un celular sin cortar contenido).
+// Indicador simple de que el documento tiene historial (paso 10.5) -- se
+// muestra cuando `version > 1`. No hay pantalla de historial de versiones
+// (ver el reporte del paso): la versión anterior se conserva en la base
+// (fila soft-borrada, cadena `supersedes_id`) y en Storage, lista para un
+// paso futuro, pero no se expone en el panel todavía.
+function VersionBadge({ version }: { version: number }) {
+  if (version <= 1) {
+    return null;
+  }
+  return (
+    <Badge
+      variant="outline"
+      className="shrink-0"
+      title={`Versión ${version} -- reemplazado ${version - 1} ${
+        version - 1 === 1 ? "vez" : "veces"
+      }`}
+    >
+      v{version}
+    </Badge>
+  );
+}
+
+// Server Component -- las filas tienen controles de cliente chicos y
+// autocontenidos: visibilidad (paso 10.3, `<DocumentVisibilityControl>`),
+// descarga (paso 10.4, `<DocumentDownloadButton>`, URL firmada bajo
+// demanda) y reemplazo (paso 10.5, `<ReplaceDocumentButton>`). Desktop:
+// tabla. Mobile: tarjetas apiladas -- mismo criterio responsive que la
+// bandeja de reclamos (una tabla de 7-8 columnas no entra en un celular
+// sin cortar contenido).
 export function DocumentList({
   rows,
   showBuildingColumn,
@@ -92,8 +116,11 @@ export function DocumentList({
             {rows.map((row) => (
               <TableRow key={row.id}>
                 <TableCell className="max-w-64">
-                  <span className="text-ink block truncate font-medium">
-                    {row.title}
+                  <span className="flex items-center gap-1.5">
+                    <span className="text-ink truncate font-medium">
+                      {row.title}
+                    </span>
+                    <VersionBadge version={row.version} />
                   </span>
                   <span className="text-ink-muted block truncate text-xs">
                     {row.originalFilename}
@@ -133,10 +160,17 @@ export function DocumentList({
                   </time>
                 </TableCell>
                 <TableCell>
-                  <DocumentDownloadButton
-                    documentId={row.id}
-                    title={row.title}
-                  />
+                  <div className="flex items-center justify-end">
+                    <DocumentDownloadButton
+                      documentId={row.id}
+                      title={row.title}
+                    />
+                    <ReplaceDocumentButton
+                      documentId={row.id}
+                      currentTitle={row.title}
+                      currentFilename={row.originalFilename}
+                    />
+                  </div>
                 </TableCell>
               </TableRow>
             ))}
@@ -152,14 +186,24 @@ export function DocumentList({
           >
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
-                <p className="text-ink truncate text-sm font-medium">
-                  {row.title}
+                <p className="flex items-center gap-1.5">
+                  <span className="text-ink truncate text-sm font-medium">
+                    {row.title}
+                  </span>
+                  <VersionBadge version={row.version} />
                 </p>
                 <p className="text-ink-muted truncate text-xs">
                   {row.originalFilename}
                 </p>
               </div>
-              <DocumentDownloadButton documentId={row.id} title={row.title} />
+              <div className="flex shrink-0 items-center">
+                <DocumentDownloadButton documentId={row.id} title={row.title} />
+                <ReplaceDocumentButton
+                  documentId={row.id}
+                  currentTitle={row.title}
+                  currentFilename={row.originalFilename}
+                />
+              </div>
             </div>
 
             <div className="flex flex-wrap items-center gap-2">

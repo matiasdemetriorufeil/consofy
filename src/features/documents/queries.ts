@@ -24,6 +24,10 @@ export type DocumentListRow = {
   sizeBytes: number;
   visibility: "private" | "residents";
   uploadedBy: string | null;
+  // `> 1` cuando el documento fue reemplazado alguna vez (paso 10.5) -- la
+  // fila muestra un badge "v{n}". El explorador solo lista la versión
+  // vigente (`deleted_at IS NULL`); las anteriores quedan soft-borradas.
+  version: number;
   createdAt: Date;
 };
 
@@ -98,6 +102,7 @@ export async function getDocumentList(
       sizeBytes: documents.sizeBytes,
       visibility: documents.visibility,
       uploadedBy: documents.uploadedBy,
+      version: documents.version,
       createdAt: documents.createdAt,
       totalCount: sql<number>`count(*) over ()`.mapWith(Number),
     })
@@ -134,6 +139,7 @@ export async function getDocumentList(
       sizeBytes: row.sizeBytes,
       visibility: row.visibility,
       uploadedBy: row.uploadedBy,
+      version: row.version,
       createdAt: row.createdAt,
     })),
   };

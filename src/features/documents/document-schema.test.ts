@@ -15,6 +15,7 @@ import {
   getFileKind,
   isDocumentCategory,
   MAX_DOCUMENT_SIZE_BYTES,
+  replaceDocumentFieldsSchema,
   sanitizeFilenameStem,
   setDocumentVisibilityInputSchema,
   validateDocumentFilename,
@@ -244,5 +245,49 @@ describe("descarga (paso 10.4)", () => {
       getDocumentDownloadInputSchema.safeParse({ documentId: "abc" }).success,
     ).toBe(false);
     expect(getDocumentDownloadInputSchema.safeParse({}).success).toBe(false);
+  });
+});
+
+describe("reemplazo (paso 10.5)", () => {
+  const validId = "3f1e8c2a-9b4d-4e6f-8a1b-2c3d4e5f6a7b";
+
+  it("acepta un documentId válido sin título (title -> null)", () => {
+    const parsed = replaceDocumentFieldsSchema.safeParse({
+      documentId: validId,
+    });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) {
+      expect(parsed.data.title).toBeNull();
+    }
+  });
+
+  it("un título en blanco o solo espacios cae a null (fallback al nombre del archivo)", () => {
+    for (const title of ["", "   "]) {
+      const parsed = replaceDocumentFieldsSchema.safeParse({
+        documentId: validId,
+        title,
+      });
+      expect(parsed.success && parsed.data.title).toBeNull();
+    }
+  });
+
+  it("recorta el título y lo conserva cuando tiene contenido", () => {
+    const parsed = replaceDocumentFieldsSchema.safeParse({
+      documentId: validId,
+      title: "  Reglamento 2026  ",
+    });
+    expect(parsed.success && parsed.data.title).toBe("Reglamento 2026");
+  });
+
+  it("rechaza un documentId que no es uuid y un título de más de 200", () => {
+    expect(
+      replaceDocumentFieldsSchema.safeParse({ documentId: "abc" }).success,
+    ).toBe(false);
+    expect(
+      replaceDocumentFieldsSchema.safeParse({
+        documentId: validId,
+        title: "x".repeat(201),
+      }).success,
+    ).toBe(false);
   });
 });

@@ -162,9 +162,15 @@ export function sanitizeFilenameStem(filename: string): string {
 // `uuid` es un parámetro (con default) para poder testear el armado del
 // path contra un valor fijo -- mismo criterio que `today`/`now` en
 // reminder-urgency.ts / find-similar-tickets.ts.
+//
+// `category` es `string`, no `DocumentCategory`: acá solo es un segmento
+// del path. El reemplazo del paso 10.5 lo llama con `documents.category`
+// crudo de la base (columna `text`), que para cualquier fila real ya es
+// uno de los valores del enum -- pero tiparlo como `string` evita un cast
+// en ese call site.
 export function buildDocumentStoragePath(
   buildingId: string,
-  category: DocumentCategory,
+  category: string,
   originalFilename: string,
   uuid: string = crypto.randomUUID(),
 ): string {
@@ -178,24 +184,39 @@ export function buildDocumentStoragePath(
 // El archivo viaja como `File` dentro del `FormData` de la Server Action y
 // se valida aparte (tipo/tamaño arriba) -- no encaja en un schema de
 // campos de texto, mismo criterio que los adjuntos en ticket-schema.ts.
+
+// Título: opcional en todos los flujos (alta 10.1, reemplazo 10.5). Si se
+// deja vacío, la Server Action cae al nombre del archivo. `documents.title`
+// es NOT NULL, así que del schema sale `string | null` y la acción resuelve
+// el fallback.
+const optionalDocumentTitleSchema = z
+  .string()
+  .trim()
+  .max(200, "Como máximo 200 caracteres.")
+  .optional()
+  .transform((value) => (value ? value : null));
+
 export const documentUploadFieldsSchema = z.object({
   buildingId: z.uuid("Elegí un edificio."),
   category: z.enum(DOCUMENT_CATEGORIES, { message: "Elegí una categoría." }),
-  // Opcional: si no se completa, la Server Action usa el nombre del archivo
-  // (sin extensión). `documents.title` es NOT NULL, así que siempre queda
-  // algo real guardado.
-  title: z
-    .string()
-    .trim()
-    .max(200, "Como máximo 200 caracteres.")
-    .optional()
-    .transform((value) => (value ? value : null)),
+  title: optionalDocumentTitleSchema,
   description: z
     .string()
     .trim()
     .max(2000, "Como máximo 2000 caracteres.")
     .optional()
     .transform((value) => (value ? value : null)),
+});
+
+// Reemplazo de un documento (paso 10.5) -- el `documentId` de la fila a
+// reemplazar + el título editable (opcional). El archivo nuevo viaja
+// aparte en el `FormData` y se valida con
+// `validateDocumentFilename`/`validateDocumentSize`. `building_id`,
+// `category`, `visibility` y `description` se HEREDAN de la fila anterior,
+// no se editan en este flujo.
+export const replaceDocumentFieldsSchema = z.object({
+  documentId: z.uuid(),
+  title: optionalDocumentTitleSchema,
 });
 
 export type DocumentUploadFieldsInput = z.input<

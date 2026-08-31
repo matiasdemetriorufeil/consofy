@@ -6912,6 +6912,132 @@ no es uuid o que falta.
 
 **Sin dependencias nuevas ni migraciones.**
 
+## Reemplazo de documentos con versión previa (paso 10.5)
+
+Gestión de versiones DELIBERADAMENTE simple: "Reemplazar" un documento
+sube un archivo nuevo y **conserva el anterior como versión previa**. Sin
+sistema de versionado completo.
+
+**Estado de las columnas antes de este paso, verificado:** `documents.version`
+(`integer NOT NULL DEFAULT 1`) y `documents.supersedes_id` (`uuid` nullable,
+FK compuesta autorreferenciada `(supersedes_id, organization_id) ->
+documents(id, organization_id)` MATCH SIMPLE, `ON DELETE restrict`) existen
+desde la migración `0010` y **ningún código las leía ni las escribía** --
+`grep` en `src/` solo las encontraba en `schema/documents.ts` y
+`schema/relations.ts` (la relación `supersedes`/`supersededBy`). Este es el
+primer flujo que las pone en juego. No hizo falta migración.
+
+**Qué hace `replaceDocumentAction`** (`documents/actions.ts`,
+`authorizedAction()`, recibe un `FormData` porque lleva el `File` nuevo):
+
+1. Valida `documentId` + `title` (Zod, `replaceDocumentFieldsSchema`) y el
+   archivo nuevo (`validateDocumentFilename`/`validateDocumentSize`
+   reusados del 10.1 -- mismos 10 MB, mismos tipos).
+2. `SELECT` la fila a reemplazar `WHERE id AND organization_id AND
+deleted_at IS NULL` -- un id de otra organización (o ya reemplazado, o
+   inventado) no matchea y devuelve el `"No encontramos ese documento."`
+   ambiguo de siempre.
+3. Sube el archivo NUEVO a Storage (`createAdminClient()`, path nuevo por
+   `buildDocumentStoragePath`).
+4. En una `db.transaction()`:
+   - `UPDATE documents SET deleted_at = now() WHERE id = <anterior> AND
+organization_id AND deleted_at IS NULL RETURNING id` -- **borrado
+     LÓGICO** de la fila anterior, nunca `DELETE` físico. Compare-and-swap
+     sobre `deleted_at IS NULL`: si otra pestaña ya la reemplazó, el UPDATE
+     no toca ninguna fila y la transacción aborta ("Ese documento ya fue
+     reemplazado. Recargá la página."). Nunca se crean dos versiones
+     nuevas del mismo documento.
+   - `INSERT` la fila NUEVA: `building_id`, `category`, `visibility` y
+     `description` se **heredan** de la anterior (no se editan en este
+     flujo -- si el administrador quiere cambiar la visibilidad de la
+     nueva versión lo hace después con el control del 10.3);
+     `version` = anterior + 1; `supersedes_id` = id de la anterior;
+     `title` = lo tipeado, o el nombre del archivo nuevo si se dejó vacío
+     (mismo fallback que el alta del 10.1).
+
+**El OBJETO en Storage de la versión anterior NUNCA se borra** -- es la
+versión previa que este paso pide conservar. Esto es DISTINTO del criterio
+de limpieza de huérfanos del 10.1 (que sí borra objetos de verdad) y de la
+limpieza de datos de prueba de pasos anteriores. Comentado explícito en
+`replaceDocumentAction` para que no se confunda. Lo único que se borra de
+Storage es el objeto NUEVO, y solo si la transacción de base falla (ahí sí
+quedaría huérfano).
+
+**El explorador (10.2) no cambió su query.** `getDocumentList` ya filtra
+`deleted_at IS NULL`, así que la versión anterior desaparece sola del
+listado principal. Se agregó `documents.version` al `SELECT` y al
+`DocumentListRow` para el badge.
+
+**UI -- un botón de ícono `Replace` en la celda "Acciones", al lado de
+Descargar (10.4).** Decisión propia: dos acciones inline, no un menú `⋮`
+-- mismo criterio que `DocumentVisibilityControl`/`DocumentDownloadButton`
+(controles chicos y autocontenidos por fila; `DocumentList` sigue siendo
+Server Component). Un menú `⋮` se justifica cuando aparezca una tercera
+acción de fila. **Reemplazar pide confirmación** (`ReplaceDocumentButton`
+abre un `Dialog`): mismo criterio que `MakeDocumentVisibleDialog` del 10.3
+-- tiene efecto real sobre lo que el administrador ve (la versión actual
+sale del listado), no debería pasar por un click accidental. El diálogo
+dice qué documento se reemplaza y qué le pasa a la versión actual.
+
+**Decisiones propias, documentadas:**
+
+- **El campo Título arranca PRECARGADO con el título actual**, a diferencia
+  del alta del 10.1 (que arranca vacío). En un reemplazo el documento ya
+  tiene un título con sentido; empezar en blanco invita a perderlo sin
+  querer. Si el administrador lo borra, se aplica el mismo fallback del
+  10.1 (cae al nombre del archivo nuevo, lo resuelve la Server Action).
+- **`description` también se hereda.** El enunciado lista `building_id`/
+  `category`/`visibility` como lo que se hereda; no menciona `description`.
+  Este flujo no la expone para editar, así que heredarla es lo único
+  sensato -- no heredarla perdería en silencio las notas del
+  administrador.
+- **NO se construyó una pantalla de historial de versiones ni una forma de
+  descargar la versión anterior desde el panel.** El enunciado lo dejó
+  opcional y avisó de no forzarlo: una vista de historial es una
+  superficie nueva entera (query sobre la cadena `supersedes_id`, una
+  acción de descarga que tendría que firmar URLs para filas
+  soft-borradas, que `getDocumentDownloadUrlAction` hoy excluye con
+  `deleted_at IS NULL`) -- eso es más que "simple". La versión anterior
+  queda **conservada** (fila soft-borrada + cadena `supersedes_id` + objeto
+  en Storage), lista para un paso futuro sin pérdida de datos. El
+  indicador en la fila es un badge `v{n}` cuando `version > 1`.
+
+**Fuera de alcance, a propósito:** control de cuota / espacio usado (10.6);
+retención o purga automática de versiones viejas (no la pide el plan ni
+está en ningún riesgo).
+
+**Verificado de punta a punta (Playwright, admin de prueba dedicado, base
+y Storage reales):**
+
+- **Antes:** 1 fila, `version=1`, `supersedes_id=null`, `deleted_at=null`,
+  un `storage_path`; el objeto existe en Storage.
+- **Cancelar el diálogo** (incluso después de elegir un archivo): el
+  linaje sigue con 1 fila, la original intacta (`version=1`,
+  `deleted_at=null`). No se crea ninguna fila ni se toca la anterior.
+- **Reemplazar (confirmar):** 2 filas.
+  - Anterior: `version=1`, `deleted_at` **SETEADO**, `supersedes_id=null`,
+    mismo `storage_path`.
+  - Nueva: `version=2`, `deleted_at=null`, `supersedes_id` === id de la
+    anterior, hereda `visibility`/`category`/`description`, `storage_path`
+    distinto.
+- **El objeto de Storage de la versión anterior SIGUE existiendo**
+  (listado explícito del bucket, no asumido). El objeto nuevo también.
+- **El explorador** muestra solo la versión vigente (`version-2.pdf`), con
+  el badge `v2`; la anterior no aparece -- la query del 10.2 no se tocó.
+- **Limpieza:** las dos filas del linaje dadas de baja lógica; los dos
+  objetos de prueba borrados de Storage (limpieza de datos de prueba, no
+  la regla del feature); cuenta de prueba borrada por completo.
+  `documents` activos de vuelta en 3 (seed), bucket sin objetos de prueba.
+
+**Unit tests -- +4 (180 -> 184).** `document-schema.test.ts`:
+`replaceDocumentFieldsSchema` acepta un `documentId` válido sin título
+(-> `null`), un título en blanco/espacios cae a `null` (fallback al nombre
+del archivo), recorta y conserva un título con contenido, y rechaza un
+`documentId` que no es uuid o un título de más de 200.
+
+**Sin dependencias nuevas ni migraciones** -- `version`/`supersedes_id` ya
+existían; este paso es el primero que las usa.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
