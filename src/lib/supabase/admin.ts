@@ -32,6 +32,17 @@ import { publicEnv } from "@/lib/env.public";
 //    policies no dan lectura a nadie, así que la URL firmada es la única
 //    forma de servir el archivo -- eso es lo que cierra el criterio de
 //    aceptación de la Etapa 10 (la ruta cruda de Storage no sirve nada).
+//  - `getStorageUsage` (src/features/documents/storage-usage.ts, paso 10.6),
+//    llamada desde la page `/panel/documents` (sesión de administrador ya
+//    exigida por el layout de `/panel`): ENUMERA (list recursivo) los dos
+//    buckets privados `building-documents` y `ticket-attachments` y suma el
+//    tamaño de cada objeto, para el indicador de cuota (uso vs. el 1 GB del
+//    plan). Es un tipo de uso NUEVO: recorrer un bucket entero, no
+//    firmar/subir/borrar un objeto puntual. Solo lectura -- no toca ningún
+//    objeto. El `list` del bucket tampoco tiene policy para
+//    `anon`/`authenticated`, así que la service-role es la única vía; la
+//    alternativa (leer `storage.objects` con el rol `postgres`, sin esta
+//    clave) queda anotada en storage-usage.ts como camino de escala.
 // Nunca para leer ni escribir tablas de negocio -- esas siguen pasando
 // SIEMPRE por Drizzle (`src/db/index.ts`, que ya evade RLS con el rol
 // `postgres`, sin necesitar esta clave -- ver CLAUDE.md > Acceso a datos).

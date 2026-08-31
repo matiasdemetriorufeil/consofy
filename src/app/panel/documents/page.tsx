@@ -6,6 +6,7 @@ import { getSelectedBuilding } from "@/features/buildings/selected-building";
 import { DocumentFiltersBar } from "@/features/documents/components/document-filters-bar";
 import { DocumentList } from "@/features/documents/components/document-list";
 import { DocumentPagination } from "@/features/documents/components/document-pagination";
+import { StorageQuotaIndicator } from "@/features/documents/components/storage-quota-indicator";
 import { UploadDocumentButton } from "@/features/documents/components/upload-document-button";
 import {
   buildDocumentListHref,
@@ -18,6 +19,7 @@ import {
   getDocumentList,
   getDocumentListCount,
 } from "@/features/documents/queries";
+import { getStorageUsage } from "@/features/documents/storage-usage";
 import { requireUser } from "@/lib/auth";
 
 // Explorador de documentos (paso 10.2) -- la pantalla principal de la
@@ -70,11 +72,14 @@ export default async function DocumentsPage({
     q: filters.q || null,
   };
 
-  let { rows, totalCount } = await getDocumentList(
-    organization.id,
-    listFilters,
-    filters.page,
-  );
+  // El uso de Storage (paso 10.6) se calcula en vivo, en paralelo con la
+  // consulta principal del listado -- ver storage-usage.ts sobre por qué se
+  // lista Storage real y no se suma la base.
+  const [storageUsage, initialList] = await Promise.all([
+    getStorageUsage(),
+    getDocumentList(organization.id, listFilters, filters.page),
+  ]);
+  let { rows, totalCount } = initialList;
   let totalPages = Math.max(1, Math.ceil(totalCount / DOCUMENT_LIST_PAGE_SIZE));
   let effectivePage = filters.page;
 
@@ -119,6 +124,11 @@ export default async function DocumentsPage({
           lockedBuildingId={buildingId}
         />
       </div>
+
+      <StorageQuotaIndicator
+        quota={storageUsage}
+        perBucket={storageUsage.perBucket}
+      />
 
       <DocumentFiltersBar
         current={{ category: filters.category ?? null, q: filters.q || null }}

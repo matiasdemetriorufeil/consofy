@@ -7038,6 +7038,101 @@ del archivo), recorta y conserva un título con contenido, y rechaza un
 **Sin dependencias nuevas ni migraciones** -- `version`/`supersedes_id` ya
 existían; este paso es el primero que las usa.
 
+## Control de cuota de Storage (paso 10.6, cierra la Etapa 10)
+
+Un indicador en `/panel/documents` muestra el espacio usado sobre el
+límite del plan y cambia de estado al 80%. **Solo lectura** -- NO bloquea
+subidas al superar la cuota (no lo pide el plan; no se inventó).
+
+**El límite es de TODO el proyecto de Supabase, no del bucket de
+documentos** -- decisión de alcance del enunciado, anclada en el riesgo R4
+del plan: `building-documents` (paso 10.1) y `ticket-attachments` (paso
+5.4) compiten por el mismo 1 GB del free tier. El indicador **suma los dos
+buckets** contra ese único límite. `STORAGE_QUOTA_LIMIT_BYTES = 1024 ** 3`
+(1 GiB): la doc de Supabase dice "1 GB", se toma la lectura binaria a
+propósito (límite un pelín más chico -> el aviso salta un poco antes, del
+lado conservador). `src/features/documents/storage-quota.ts` -- archivo
+**puro** (sin `server-only`), testeable: `resolveStorageQuota(usedBytes)`
+-> `{ ratio, percent, isWarning }`, `formatStorageSize` (reusa
+`formatFileSize` del 10.2 para B/KB/MB y solo agrega el tramo GB).
+
+**`isWarning` sigue al `percent` que se muestra, NO al `ratio` crudo.**
+Encontrado en la verificación: con un conteo de bytes entero cerca del
+umbral, `ratio` da `0.79999...` (aviso apagado) mientras `Math.round(ratio
+
+- 100)`ya muestra`80%`-- el número en pantalla y el estado del aviso se
+contradecían.`isWarning = percent >= 80` los mantiene siempre de acuerdo.
+
+**El número real sale de LISTAR Storage, no de sumar la base.**
+`getStorageUsage()` (`src/features/documents/storage-usage.ts`,
+`server-only`) recorre los dos buckets con `createAdminClient()` (list
+recursivo, paginado de a 100, paralelo por carpeta) y suma `metadata.size`
+de cada objeto. NO se suma `documents.size_bytes` /
+`ticket_attachments.size_bytes`: hay adjuntos huérfanos documentados (un
+formulario público abandonado deja el archivo sin fila -- ver CLAUDE.md >
+Fotos y adjuntos del formulario público) que esa suma no contaría, y filas
+de seed que apuntan a objetos inexistentes, que contaría de más. Se
+verificó contra `SELECT sum((metadata->>'size')::bigint) FROM
+storage.objects` (rol `postgres`, sin service-role) -- coinciden al byte.
+
+**Nuevo consumidor de `createAdminClient()`** (4º): un tipo de uso
+distinto a los anteriores -- **enumerar un bucket entero**, no firmar /
+subir / borrar un objeto puntual. Solo lectura. `src/lib/supabase/admin.ts`
+lo suma a la lista con el detalle habitual.
+
+**Cálculo en vivo, sin cachear** -- el paso deja afuera a propósito
+cachear en tabla/cron. `cache()` de React solo dedupe dentro de un
+request. Corre en `Promise.all` con la consulta del listado en la page.
+Si el fan-out de `list()` llegara a pesar en el volumen real, la
+alternativa liviana anotada en `storage-usage.ts` es el `SUM` por SQL
+sobre `storage.objects` (mismo patrón que `getExistingAttachmentPaths` en
+`public-form/storage-objects.ts`); su costo es acoplar al shape interno de
+esa tabla de Supabase.
+
+**UI -- `StorageQuotaIndicator`** (`components/storage-quota-indicator.tsx`,
+Server Component puro): barra fina + texto "X de 1 GB (Y%)" arriba del
+explorador, no intrusivo. No reusa `<Progress>` (Client Component con
+color de relleno fijo); dos `<div>` con `width` en línea. `< 80%`:
+`bg-primary` + ícono `HardDrive`. `>= 80%`: `bg-alta` (el ámbar semántico
+del sistema) + `TriangleAlert` + una frase extra "Estás usando el Y% del
+espacio disponible". Siempre: una línea aclaratoria de que la cuota
+incluye documentos + fotos de reclamos y es de todo el proyecto. Tooltip
+(`title`) con el desglose por bucket.
+
+**Verificado de punta a punta contra la base y el Storage reales:**
+
+- **Antes de subir nada:** `getStorageUsage()` -> `0 B`, `0%`, sin aviso;
+  los dos buckets en 0 (list y SQL coinciden).
+- **Tras subir 5000 B a `building-documents` + 3000 B a
+  `ticket-attachments`:** `8000 B` = "8 KB", delta exacto `+8000`; el
+  desglose muestra `building-documents: 5000 B` y `ticket-attachments:
+3000 B` -- la suma cubre **los dos** buckets, no uno. `list` == `SUM`
+  sobre `storage.objects` al byte.
+- **Aviso al 80%, en la página real** (Playwright, admin de prueba
+  dedicado, dev server real): con el uso real de 8000 B y el límite bajado
+  temporalmente a 10000 B (revertido después) -> `/panel/documents`
+  renderiza barra `bg-alta`, ícono `lucide-triangle-alert text-alta`,
+  texto "(80%)" y la frase "Estás usando el 80% del espacio disponible".
+  Al revertir el límite a `1024 ** 3` y recargar -> vuelve a `bg-primary`
+  - `HardDrive`, sin la frase. Activación y desactivación confirmadas.
+- **Barrido de estados del componente real** (`renderToStaticMarkup`):
+  50% / 79% -> `bg-primary`, `HardDrive`, sin frase. 80% / 85% / 102% ->
+  `bg-alta`, `TriangleAlert`, con frase. La transición cae exactamente en
+  el 80% mostrado.
+- **Limpieza:** los dos objetos de prueba borrados de Storage; cuenta de
+  prueba borrada por completo (Auth + `app_users`); los dos buckets de
+  vuelta en 0; `storage-quota.ts` con el límite revertido a `1024 ** 3`.
+
+**Unit tests -- +9 (184 -> 193).** `storage-quota.test.ts`:
+`resolveStorageQuota` (proyecto vacío, negativo -> 0, 50%, umbral
+inclusivo al 80%, 70% sin aviso, `percent`/`isWarning` nunca se
+contradicen incl. barrido 0-130%, por encima del 100%); `formatStorageSize`
+(delega en `formatFileSize` por debajo de 1 GB; agrega el tramo GB con dos
+decimales).
+
+**Sin dependencias nuevas ni migraciones** -- no toca esquema. `radix-ui`
+ya estaba (no se usó `<Progress>` igual).
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
