@@ -10,11 +10,13 @@ import { denyAnonAuthenticated, idColumn } from "./_shared";
 // Postgres ya la paga el proyecto). Ver src/features/public-form/
 // rate-limit.ts para la lógica de conteo y los umbrales.
 //
-// Una sola tabla para DOS acciones distintas del mismo formulario (enviar el
-// reclamo, subir un adjunto), no dos tablas casi idénticas -- `kind` las
-// distingue. Los umbrales de cada una son independientes (ver rate-limit.ts):
-// contarlas juntas mezclaría "cuántos reclamos mandó este teléfono" con
-// "cuántas fotos subió esta IP", que no tienen por qué compartir presupuesto.
+// Una sola tabla para las acciones públicas del mismo formulario/edificio
+// (enviar el reclamo, subir un adjunto, y desde el paso 11.1 consultar el
+// estado por public_code tipeado a mano), no una tabla casi idéntica por
+// cada una -- `kind` las distingue. Los umbrales de cada una son
+// independientes (ver rate-limit.ts): contarlas juntas mezclaría "cuántos
+// reclamos mandó este teléfono" con "cuántas veces esta IP probó códigos",
+// que no tienen por qué compartir presupuesto.
 //
 // `phone` es NULLABLE: solo tiene sentido para kind = 'ticket_submission'
 // (identifica quién manda el reclamo). La subida de un adjunto (kind =
@@ -22,7 +24,9 @@ import { denyAnonAuthenticated, idColumn } from "./_shared";
 // teléfono en algunos casos (el paso 3 del formulario -- Fotos -- no
 // depende de haber llenado el paso 1 todavía si el vecino navega para
 // adelante y atrás), así que esa acción se limita solo por IP, nunca por
-// teléfono -- exactamente lo pedido para este paso.
+// teléfono -- exactamente lo pedido para ese paso. La consulta de estado
+// (kind = 'status_lookup', paso 11.1) tampoco tiene teléfono: el vecino
+// solo tipea el código, no se identifica -- se limita solo por IP.
 //
 // Sin `succeeded` (a diferencia de login_attempts): ahí el conteo filtra
 // SOLO intentos fallidos, porque un login exitoso no necesita frenarse. Acá
@@ -43,6 +47,7 @@ import { denyAnonAuthenticated, idColumn } from "./_shared";
 export const publicFormRateLimitKind = pgEnum("public_form_rate_limit_kind", [
   "ticket_submission",
   "attachment_upload",
+  "status_lookup",
 ]);
 
 export const publicFormRateLimitAttempts = pgTable(

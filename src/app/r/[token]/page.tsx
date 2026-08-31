@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { notFound } from "next/navigation";
 import { z } from "zod";
 
@@ -91,6 +92,15 @@ export default async function PublicBuildingPage({
         categories={categories}
         units={units}
       />
+      <p className="text-ink-muted text-center text-sm">
+        ¿Ya cargaste uno?{" "}
+        <Link
+          href={`/r/${parsedToken.data}/estado`}
+          className="text-primary underline underline-offset-4"
+        >
+          Consultá su estado
+        </Link>
+      </p>
     </div>
   );
 }

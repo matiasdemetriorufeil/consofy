@@ -22,13 +22,23 @@ import { getClientIp } from "@/lib/request-ip";
 import { UNIQUE_VIOLATION, unwrapPostgresError } from "@/lib/postgres-errors";
 
 import type { PublicBuilding, TicketCategory } from "./queries";
-import { getBuildingByPublicToken, getCategoryForTicket } from "./queries";
+import {
+  getBuildingByPublicToken,
+  getCategoryForTicket,
+  getTicketStatusByPublicCode,
+} from "./queries";
 import {
   isAttachmentUploadRateLimited,
+  isStatusLookupRateLimited,
   isTicketSubmissionRateLimited,
   recordAttachmentUploadAttempt,
+  recordStatusLookupAttempt,
   recordTicketSubmissionAttempt,
 } from "./rate-limit";
+import {
+  ticketStatusLookupSchema,
+  type TicketStatusLookupState,
+} from "./status-lookup-schema";
 import { getExistingAttachmentPaths } from "./storage-objects";
 import {
   createTicketInputSchema,
@@ -617,4 +627,70 @@ export async function registerWhatsappHandoffOpenedAction(
     actorType: "neighbor",
     actorLabel,
   });
+}
+
+// Consulta de estado de un reclamo por public_code TIPEADO A MANO (paso
+// 11.1, vía b -- la débil). Pública a propósito, mismo criterio que
+// createTicketAction: no hay sesión. La "autorización" es el token público
+// del edificio en la URL de `/r/[token]/estado` (la misma credencial de
+// `/r/[token]`), que resuelve la organización ANTES de mirar el código --
+// nunca una búsqueda global a ciegas por public_code.
+//
+// Devuelve SOLO lo mínimo para confirmar el reclamo (ver
+// getTicketStatusByPublicCode y PublicTicketStatus): sin descripción, sin
+// nombre de quien reportó, sin fotos, sin asignado, sin notas. La vista
+// rica sigue detrás de `attachments_token` (`/s/[token]`), que esta acción
+// NO revela -- adivinar un código corto no puede escalar a esos datos.
+export async function lookupTicketStatusAction(
+  _prevState: TicketStatusLookupState,
+  input: unknown,
+): Promise<TicketStatusLookupState> {
+  const parsed = ticketStatusLookupSchema.safeParse(input);
+  if (!parsed.success) {
+    return {
+      status: "error",
+      message: "Revisá el código: tiene que ser como TC-2026-0007.",
+    };
+  }
+
+  // Rate limit ANTES de tocar la base -- mismo lugar y criterio que
+  // createTicketAction (ver rate-limit.ts para los umbrales y por qué esta
+  // vía los necesita). Un bloqueo NO se registra (no alarga su propia
+  // ventana) y no distingue "código inválido" de "demasiadas consultas"
+  // más de lo necesario.
+  const ip = await getClientIp();
+  if (await isStatusLookupRateLimited(ip)) {
+    return {
+      status: "error",
+      message:
+        "Hiciste muchas consultas seguidas. Esperá unos minutos e intentá de nuevo.",
+    };
+  }
+  await recordStatusLookupAttempt(ip);
+
+  // El token resuelve el edificio (y con él la organización). Token
+  // inválido o edificio dado de baja: mismo mensaje ambiguo que todo lo
+  // demás. NO se chequea `building.active`: un edificio que dejó de
+  // recibir reclamos NUEVOS igual tiene reclamos viejos cuyo estado un
+  // vecino puede querer consultar (decisión propia, ver el reporte).
+  const building = await getBuildingByPublicToken(parsed.data.token);
+  if (!building) {
+    return {
+      status: "error",
+      message: "No encontramos ningún reclamo con ese código.",
+    };
+  }
+
+  const ticket = await getTicketStatusByPublicCode(
+    building.id,
+    parsed.data.publicCode,
+  );
+  if (!ticket) {
+    return {
+      status: "error",
+      message: "No encontramos ningún reclamo con ese código.",
+    };
+  }
+
+  return { status: "found", ticket };
 }

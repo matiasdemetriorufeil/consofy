@@ -14,6 +14,8 @@ import {
   units,
 } from "@/db/schema";
 
+import type { PublicTicketStatus } from "./status-lookup-schema";
+
 export type PublicBuilding = {
   id: string;
   organizationId: string;
@@ -147,6 +149,13 @@ export type TicketAttachmentFile = {
 
 export type TicketGallery = {
   publicCode: string;
+  // title/status se suman en el paso 11.1: `/s/[token]` deja de mostrar
+  // SOLO las fotos y pasa a confirmar también en qué anda el reclamo (el
+  // link ya se llamaba "Ver el estado de tu reclamo" desde el paso 5.8). El
+  // asignado y las notas internas siguen AFUERA -- ver el comentario de
+  // s/[token]/page.tsx.
+  title: string;
+  status: (typeof tickets.$inferSelect)["status"];
   description: string;
   reportedAt: Date;
   buildingName: string;
@@ -175,6 +184,25 @@ export type TicketGallery = {
 // ambigüedad que `/r/[token]`: no hay una pantalla distinta para "el
 // edificio de este reclamo está dado de baja", cae al mismo 404 que un
 // token inválido.
+// Misma fórmula que formatUnitLabel (unit-combobox.tsx) para una unidad
+// real elegida de la lista; texto libre tal cual si el vecino no la
+// encontró (ver el CHECK tickets_unit_id_or_label_present -- siempre hay
+// uno de los dos). Se repite acá en vez de importar esa función porque vive
+// en un componente "use client" -- las dos consultas públicas por token de
+// este archivo la usan.
+function resolvePublicUnitLabel(row: {
+  unitTower: string | null;
+  unitFloor: string | null;
+  unitNumber: string | null;
+  unitLabelRaw: string | null;
+}): string {
+  return row.unitTower
+    ? `${row.unitTower} - ${row.unitFloor}°${row.unitNumber}`
+    : row.unitFloor && row.unitNumber
+      ? `${row.unitFloor}°${row.unitNumber}`
+      : (row.unitLabelRaw ?? "");
+}
+
 export async function getTicketByAttachmentsToken(
   token: string,
 ): Promise<TicketGallery | null> {
@@ -182,6 +210,8 @@ export async function getTicketByAttachmentsToken(
     .select({
       id: tickets.id,
       publicCode: tickets.publicCode,
+      title: tickets.title,
+      status: tickets.status,
       description: tickets.description,
       reportedAt: tickets.reportedAt,
       unitLabelRaw: tickets.unitLabelRaw,
@@ -212,18 +242,7 @@ export async function getTicketByAttachmentsToken(
     return null;
   }
 
-  // Misma fórmula que formatUnitLabel (unit-combobox.tsx) para una unidad
-  // real elegida de la lista; texto libre tal cual si el vecino no la
-  // encontró (ver el CHECK tickets_unit_id_or_label_present -- siempre
-  // hay uno de los dos). Se repite acá en vez de importar esa función
-  // porque vive en un componente "use client" -- duplicar dos líneas es
-  // más simple que sacarla de ahí para un único consumidor nuevo del lado
-  // del servidor.
-  const unitLabel = row.unitTower
-    ? `${row.unitTower} - ${row.unitFloor}°${row.unitNumber}`
-    : row.unitFloor && row.unitNumber
-      ? `${row.unitFloor}°${row.unitNumber}`
-      : (row.unitLabelRaw ?? "");
+  const unitLabel = resolvePublicUnitLabel(row);
 
   const neighborName = [row.neighborFirstName, row.neighborLastName]
     .filter(Boolean)
@@ -242,6 +261,8 @@ export async function getTicketByAttachmentsToken(
 
   return {
     publicCode: row.publicCode,
+    title: row.title,
+    status: row.status,
     description: row.description,
     reportedAt: row.reportedAt,
     buildingName: row.buildingName,
@@ -250,5 +271,69 @@ export async function getTicketByAttachmentsToken(
     categoryName: row.categoryName,
     neighborName,
     attachments,
+  };
+}
+
+// Consulta de estado por public_code TIPEADO A MANO (paso 11.1, la vía
+// débil de `/r/[token]/estado`). El `buildingId` NO viene del cliente: lo
+// resuelve la Server Action desde el token público del edificio (que ya es
+// la credencial de `/r/[token]`), así que acá ya se conoce la organización
+// -- exactamente el escenario que anticipaba el comentario del UNIQUE
+// `tickets_organization_id_public_code_unique` en el schema ("nunca hace
+// falta una búsqueda ciega global"). Se filtra por `building_id` (más
+// ajustado todavía que por organización, y el prefijo del código ya es por
+// edificio); el UNIQUE por organización garantiza a lo sumo una fila igual.
+//
+// Devuelve SOLO lo mínimo para confirmar el reclamo (estado, edificio/
+// unidad, categoría, fecha) -- NADA de título, descripción, nombre de
+// quien reportó, teléfono, fotos ni asignado: quien llega por esta vía
+// adivinó (o enumeró) un código corto, no tiene un token no adivinable. El
+// título NO se trae -- se deriva de la descripción libre del vecino (ver
+// PublicTicketStatus); la categoría cumple la misma función de "¿es este mi
+// reclamo?" sin filtrar texto libre. La vista rica (título, descripción)
+// sigue detrás de `attachments_token` (`/s/[token]`), que no se entrega por
+// acá. `deleted_at IS NULL` en reclamo y edificio, misma ambigüedad de
+// siempre para "no existe".
+export async function getTicketStatusByPublicCode(
+  buildingId: string,
+  publicCode: string,
+): Promise<PublicTicketStatus | null> {
+  const [row] = await db
+    .select({
+      status: tickets.status,
+      reportedAt: tickets.reportedAt,
+      unitLabelRaw: tickets.unitLabelRaw,
+      buildingName: buildings.name,
+      organizationTimezone: organizations.timezone,
+      categoryName: categories.name,
+      unitTower: units.tower,
+      unitFloor: units.floor,
+      unitNumber: units.number,
+    })
+    .from(tickets)
+    .innerJoin(buildings, eq(tickets.buildingId, buildings.id))
+    .innerJoin(organizations, eq(buildings.organizationId, organizations.id))
+    .innerJoin(categories, eq(tickets.categoryId, categories.id))
+    .leftJoin(units, eq(tickets.unitId, units.id))
+    .where(
+      and(
+        eq(tickets.buildingId, buildingId),
+        eq(tickets.publicCode, publicCode),
+        isNull(tickets.deletedAt),
+        isNull(buildings.deletedAt),
+      ),
+    );
+
+  if (!row) {
+    return null;
+  }
+
+  return {
+    status: row.status,
+    buildingName: row.buildingName,
+    unitLabel: resolvePublicUnitLabel(row),
+    categoryName: row.categoryName,
+    reportedAt: row.reportedAt,
+    organizationTimezone: row.organizationTimezone,
   };
 }

@@ -60,8 +60,25 @@ const TICKET_SUBMISSION_IP_MAX = 15;
 const ATTACHMENT_UPLOAD_WINDOW_MINUTES = 30;
 const ATTACHMENT_UPLOAD_IP_MAX = 30;
 
+// Consulta de estado por public_code tipeado a mano (paso 11.1). Esta vía
+// es deliberadamente la débil: el código es corto y enumerable a propósito
+// (PREFIJO-AÑO-NNNN, ver tickets.public_code) -- decidido y documentado así
+// desde el paso 2.4b, NO un bug de este paso. El rate limit es la
+// mitigación mínima pedida: hace que barrer el espacio de códigos de un
+// edificio (unos cientos de NNNN por año en la práctica) sea lento y
+// ruidoso, sin molestar a un vecino real.
+//
+// Solo por IP (sin teléfono): el vecino que consulta no se identifica,
+// solo tipea el código -- mismo caso que attachment_upload. Ventana de 15
+// min (alineada con login) y 10 intentos: un vecino que copia y pega su
+// código de la pantalla de confirmación o del WhatsApp acierta a la
+// primera; 10 en 15 minutos ya es tipeo a ciegas o un script. A ese ritmo,
+// probar 300 códigos lleva ~7,5 horas por IP.
+const STATUS_LOOKUP_WINDOW_MINUTES = 15;
+const STATUS_LOOKUP_IP_MAX = 10;
+
 async function countAttempts(
-  kind: "ticket_submission" | "attachment_upload",
+  kind: "ticket_submission" | "attachment_upload" | "status_lookup",
   column: "ip" | "phone",
   value: string,
   windowMinutes: number,
@@ -135,4 +152,23 @@ export async function recordAttachmentUploadAttempt(ip: string): Promise<void> {
   await db
     .insert(publicFormRateLimitAttempts)
     .values({ kind: "attachment_upload", ip, phone: null });
+}
+
+// Consulta de estado por public_code (paso 11.1) -- solo por IP, ver el
+// comentario de los umbrales arriba. Igual que attachment_upload: se cuenta
+// CADA intento (acertado o no), el volumen es la señal.
+export async function isStatusLookupRateLimited(ip: string): Promise<boolean> {
+  const ipCount = await countAttempts(
+    "status_lookup",
+    "ip",
+    ip,
+    STATUS_LOOKUP_WINDOW_MINUTES,
+  );
+  return ipCount >= STATUS_LOOKUP_IP_MAX;
+}
+
+export async function recordStatusLookupAttempt(ip: string): Promise<void> {
+  await db
+    .insert(publicFormRateLimitAttempts)
+    .values({ kind: "status_lookup", ip, phone: null });
 }

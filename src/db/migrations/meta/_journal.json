@@ -267,6 +267,13 @@
       "when": 1788022556728,
       "tag": "0037_storage_building_documents_bucket",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1788207310410,
+      "tag": "0038_youthful_shinko_yamashiro",
+      "breakpoints": true
     }
   ]
 }

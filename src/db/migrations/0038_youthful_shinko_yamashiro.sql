@@ -1,0 +1,1 @@
+ALTER TYPE "public"."public_form_rate_limit_kind" ADD VALUE 'status_lookup';

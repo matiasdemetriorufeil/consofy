@@ -7133,6 +7133,136 @@ decimales).
 **Sin dependencias nuevas ni migraciones** -- no toca esquema. `radix-ui`
 ya estaba (no se usó `<Progress>` igual).
 
+## Consulta de estado de un reclamo, sin login (paso 11.1)
+
+Primer paso de la Etapa 11 (que el vecino "se entere"). Resuelve por "pull"
+el Pendiente anotado en el paso 6.4 ("avisarle algo al vecino cuando se
+resuelve"): no hay canal de push (WhatsApp Cloud API es pago y se descartó,
+no hay envío de mails) -- lo que sí es barato es que el vecino VUELVA a
+mirar una página que ya tiene el link.
+
+**Qué era `/r/[token]` y `/s/[token]` antes de este paso (verificado
+contra el código, no de memoria):**
+
+- `/r/[token]` -- `token` = `buildings.public_token` (uuid global, la
+  credencial del formulario). Es el formulario para CARGAR un reclamo (paso
+  5.1/5.2). No es una consulta de estado.
+- `/s/[token]` -- `token` = `tickets.attachments_token` (uuid random
+  `defaultRandom()`, `unique` global, **distinto de `public_code` a
+  propósito**: `public_code` es `PREFIJO-AÑO-NNNN`, corto y enumerable, por
+  diseño desde el paso 2.4b -- inválido como credencial). Es la galería de
+  fotos del paso 5.10. "s" ya era de **seguimiento**
+  (`format-ticket-message.ts`), el link ya viajaba en el mensaje de
+  WhatsApp (línea `📷 Adjuntos`) y en la pantalla de confirmación como
+  "Ver el estado de tu reclamo" (paso 5.8) -- o sea: el mecanismo de "link
+  al vecino" YA existía. Este paso lo **extiende**, no crea una ruta nueva
+  para la vía (a).
+
+**Vía (a) -- por el link (`/s/[token]`, `attachments_token`).** Se le
+suman `title` y `status` a `getTicketByAttachmentsToken` y a la página. El
+token no adivinable ya autoriza a quien lo tiene; se le agrega el estado y
+nada más -- el teléfono, el asignado, las notas internas y la línea de
+tiempo completa (11.2) siguen AFUERA. Se reusa el uuid existente
+(`attachments_token`), no se generó uno nuevo: ya es no adivinable, ya es
+la credencial pública de ESE reclamo, y no está expuesto de forma
+enumerable en ningún lado (`format-ticket-message.test.ts` ya prueba que
+el link nunca usa `public_code`). `tickets.id` NO se usa como token.
+
+**Vía (b) -- por `public_code` tipeado a mano (`/r/[token]/estado`, NUEVA
+ruta, hija de `/r/[token]`).** Vive bajo el token del edificio a propósito:
+ese token resuelve la organización ANTES de mirar el código, tal como
+anticipaba el comentario del `UNIQUE tickets_organization_id_public_code`
+("nunca hace falta una búsqueda ciega global"). `getTicketStatusByPublicCode
+(buildingId, code)` filtra por `building_id` + `public_code` +
+`deleted_at IS NULL` (reclamo y edificio). Es la vía deliberadamente débil
+(código enumerable) -- devuelve SOLO el mínimo para confirmar el reclamo
+(**estado, categoría, edificio/unidad, fecha**) y **nada más**: sin título,
+sin descripción, sin nombre de quien reportó, sin fotos, sin
+`attachments_token` (adivinar un código corto no puede escalar a la
+galería).
+
+**Ajuste posterior (motivo del cambio):** en la primera versión esta vía
+también mostraba el `title`. Pero el título de un reclamo del formulario
+público se deriva de las primeras ~80 letras de la descripción libre que
+escribió el vecino (`deriveTicketTitle`, paso 5.5) -- mostrarlo por una vía
+cuyo código es corto y adivinable a propósito filtra texto libre de
+terceros. Se lo reemplazó por la **categoría** (valor de enum fijo, nunca
+texto libre), que cumple la misma función de "¿es este mi reclamo?" sin ese
+riesgo. `getTicketStatusByPublicCode` ya no trae `tickets.title` y
+`PublicTicketStatus` ya no lo tiene. La vía (a) (`/s/[token]`, token no
+adivinable) **no cambió**: ahí sí se muestran título y descripción, ese
+riesgo no aplica.
+
+**Rate limit de la vía (b) -- se reusa el mecanismo Postgres del paso
+5.11** (`public_form_rate_limit_attempts` + `rate-limit.ts`), no el de
+login: login filtra por `email` + `succeeded`, que no aplican acá; el del
+formulario público ya es "contar TODOS los intentos por IP", exactamente
+lo que hace falta. Se agregó el valor `status_lookup` al enum
+`public_form_rate_limit_kind` (migración `0038`, un solo `ALTER TYPE ...
+ADD VALUE`) y el par `isStatusLookupRateLimited`/`recordStatusLookupAttempt`
+(solo por IP, igual que `attachment_upload` -- el que consulta no se
+identifica). Umbral: **10 por IP cada 15 min**. Un vecino que copia y pega
+su código acierta a la primera; a 10/15 min, barrer 300 códigos lleva
+~7,5 h por IP. Un intento bloqueado NO se registra (no alarga su propia
+ventana), mismo criterio que `createTicketAction`.
+
+**Ambos caminos -- qué NO devuelve nunca (verificado contra las dos
+superficies, no declarado):** notas internas (`ticket_events` tiene
+`denyAnonAuthenticated()` + RLS y este flujo ni la consulta), `assignee`,
+teléfono/email de nadie. `/s/[token]` sí sigue mostrando el nombre de
+QUIEN reportó y la descripción -- eso es del paso 5.10 (token no
+adivinable, mismos datos que el mensaje de WhatsApp), no se toca acá;
+`/r/[token]/estado` (vía débil) no muestra ninguno de los dos.
+
+**`/r/[token]/estado` no chequea `building.active`** (decisión propia): un
+edificio que dejó de recibir reclamos NUEVOS igual tiene reclamos viejos
+cuyo estado un vecino puede querer consultar. Solo `notFound()` si el
+token no resuelve un edificio (mismo mensaje ambiguo de siempre, cae en
+`/r/[token]/not-found.tsx`).
+
+**Componentes:** `TicketStatusSummary` + `PublicTicketStatusBadge`
+(`public-form/components/ticket-status-summary.tsx`, Server Components
+puros) -- el badge lo reusa `/s/[token]`, el summary completo lo usa el
+resultado de la vía (b). `PUBLIC_TICKET_STATUS_LABEL`
+(`status-lookup-schema.ts`) es vocabulario para el vecino, no el del panel
+("Recibido"/"En curso"/..., y `discarded` -> "Cerrado sin resolución", no
+el seco "Descartado"). `TicketStatusLookupForm` sigue el patrón de
+`LoginForm` (RHF + `useActionState` + `startTransition` a mano).
+
+**Verificado de punta a punta (Playwright + dev server + base real, datos
+`PRUEBA111` dados de baja lógica al terminar):**
+
+- **Vía (a):** `/s/{attachments_token}` de un reclamo `in_progress` ->
+  muestra título, "En curso", edificio, categoría, código. HTML sin la
+  nota interna, sin el asignado, sin el teléfono.
+- **Adivinar/mutar el token del link:** último carácter cambiado, primer
+  bloque +1, y un uuid al azar -> los tres **HTTP 404** con la copia
+  ambigua de siempre, ninguno filtra otro reclamo.
+- **Vía (b):** `/r/{building_token}/estado`, código tipeado en MINÚSCULA
+  (`ec-2026-1538`) -> se normaliza y encuentra el reclamo: **categoría**
+  ("Ascensores"), estado ("Recibido"), edificio, fecha. **Sin título**
+  (el título derivado era "PRUEBA111 ascensor quedó parado entre el 3 y el
+  4..." -- distinto de la categoría; no aparece), **sin** descripción,
+  **sin** el nombre de quien reportó, HTML sin nota/asignado/teléfono.
+  Código bien formado pero inexistente -> "No encontramos ningún reclamo
+  con ese código."
+- **Rate limit vía (b):** 9 intentos por IP -> no bloquea; el 10º ->
+  bloquea (`isStatusLookupRateLimited` true), verificado también con un
+  contador SQL directo. Otra IP en paralelo: no afectada. En el navegador,
+  tras varios envíos seguidos -> "Hiciste muchas consultas seguidas.
+  Esperá unos minutos e intentá de nuevo."
+
+**Unit tests -- +10 (193 -> 203).** `status-lookup-schema.test.ts` (+8):
+`ticketStatusLookupSchema` (token+código válidos, normalización a
+mayúsculas/trim, rechazo de 7 formatos malos, rechazo de token no uuid);
+`PUBLIC_CODE_REGEX`; `PUBLIC_TICKET_STATUS_LABEL` (cubre los 5 valores del
+enum, vocabulario público). `ticket-status-summary.test.tsx` (+2): la vía
+(b) renderiza categoría/estado/edificio/fecha y NO el rótulo "Reclamo" ni
+texto libre.
+
+**Migración `0038`** -- `ALTER TYPE public_form_rate_limit_kind ADD VALUE
+'status_lookup'`. Sin dependencias nuevas.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
