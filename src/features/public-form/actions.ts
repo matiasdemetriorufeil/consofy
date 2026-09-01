@@ -1,5 +1,6 @@
 "use server";
 
+import { after } from "next/server";
 import { and, count, eq, isNotNull, isNull } from "drizzle-orm";
 import { z } from "zod";
 
@@ -26,6 +27,7 @@ import {
   buildUrgentTicketNotification,
 } from "@/features/notifications/notification-content";
 import { detectAndFlagSimilarTickets } from "@/features/tickets/detect-similar-tickets-on-create";
+import { embedAndStoreTicket } from "@/features/tickets/embeddings/embed-ticket";
 import { getClientIp } from "@/lib/request-ip";
 import { UNIQUE_VIOLATION, unwrapPostgresError } from "@/lib/postgres-errors";
 
@@ -292,6 +294,30 @@ async function attemptCreateTicket(
     description: data.description,
     reportedAt: ticket.reportedAt,
   });
+
+  // Embedding del reclamo para la detección de duplicados semántica (paso
+  // 14.2). A diferencia de detectAndFlagSimilarTickets (que se `await`ea
+  // acá arriba: es una consulta local rápida), esto es una llamada HTTP
+  // EXTERNA a la API de Gemini con hasta 3 reintentos y backoff (~1s/2s/4s)
+  // -- `await`earlo podría sumarle varios segundos a la espera del vecino.
+  // Por eso va con `after()` de next/server: la respuesta se envía primero,
+  // el embedding se genera después SIN bloquearla. `embedAndStoreTicket()`
+  // tiene su propio try/catch y NUNCA tira (misma regla dura que el 7.2);
+  // si aun así falla los 3 intentos, `tickets.embedding` queda en NULL y lo
+  // levanta el barrido diario (sweep-missing-embeddings.ts, plegado a
+  // runDailyCron). `after()` corre el callback igual en dev (proceso
+  // persistente) y en producción (Vercel lo mantiene vivo con waitUntil),
+  // a diferencia de una promesa suelta sin await, que en serverless podría
+  // morir con la instancia -- ahí el barrido igual sería la red de
+  // seguridad, pero `after()` hace que el caso feliz sea confiable.
+  after(() =>
+    embedAndStoreTicket({
+      ticketId: ticket.id,
+      organizationId: building.organizationId,
+      categoryName: category.name,
+      description: data.description,
+    }),
+  );
 
   // Alerta inmediata por email (paso 9.5, punto 4) -- mismo evento que ya
   // dispara la notificación `urgent_ticket` del centro de notificaciones

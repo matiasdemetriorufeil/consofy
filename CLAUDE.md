@@ -7934,6 +7934,121 @@ tope de dimensiones de pgvector:
 [pgvector issue #461](https://github.com/pgvector/pgvector/issues/461),
 [Supabase -- HNSW indexes](https://supabase.com/docs/guides/ai/vector-indexes/hnsw-indexes).
 
+### Cliente, disparo en el alta y reprocesamiento (paso 14.2)
+
+Este paso genera el embedding de cada reclamo y lo guarda en la columna
+`tickets.embedding` del 14.1. NO compara embeddings todavía (eso es 14.3+)
+ni corre el backfill masivo de los reclamos históricos (también 14.3).
+
+**Cliente -- `fetch` directo, sin SDK** (`src/features/tickets/embeddings/
+gemini-embedding.ts`). Mismo criterio que Resend / Supabase Storage en
+este proyecto: un cliente mínimo, sin sumar `@google/genai`. Shape del
+request **confirmado contra la API real** (no de memoria, no contra la
+doc):
+
+```
+POST https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent
+headers: { "x-goog-api-key": <GEMINI_API_KEY>, "content-type": "application/json" }
+body:    { model: "models/gemini-embedding-001",
+           content: { parts: [{ text }] },
+           outputDimensionality: 768 }
+-> 200  { embedding: { values: number[768] } }
+```
+
+El vector devuelto **no viene normalizado** (norma L2 medida ~0.60) -- se
+normaliza a norma unitaria en la app (`normalizeVector`, `vector-math.ts`,
+puro y testeado), porque el índice HNSW del 14.1 usa
+`vector_cosine_ops`. Timeout de 15s por llamada (AbortController).
+
+**Texto que se embebe: `{categoría}\n\n{descripción}`**
+(`composeTicketEmbeddingText`, puro y testeado). Categoría primero (ancla
+temática: "Ascensores", "Plomería"), después la descripción libre del
+vecino. Mismo insumo conceptual que `findSimilarTickets` (paso 7.1) pero
+con la categoría en lugar del título derivado -- el título sale de los
+primeros ~80 caracteres de la descripción (paso 5.5), incluirlo sería casi
+duplicarla. Sin normalizar acentos/mayúsculas (a diferencia del 7.1): el
+modelo usa el texto natural.
+
+**Disparo en el alta -- `after()` de `next/server`, no `await`.**
+`attemptCreateTicket` (`public-form/actions.ts`), DESPUÉS del commit de la
+transacción del ticket, hace `after(() => embedAndStoreTicket({...}))`. A
+diferencia de `detectAndFlagSimilarTickets` (que sí se `await`ea ahí mismo
+-- es una consulta local rápida), el embedding es una llamada HTTP externa
+con hasta 3 reintentos y backoff: `await`earla podría sumarle varios
+segundos a la espera del vecino. `after()` corre el callback DESPUÉS de
+enviar la respuesta, sin bloquearla, y de forma confiable tanto en dev
+(proceso persistente) como en producción (Vercel lo mantiene vivo con
+`waitUntil`) -- a diferencia de una promesa suelta sin `await`, que en
+serverless podría morir con la instancia. `embedAndStoreTicket()` tiene su
+propio try/catch y **nunca tira** (misma regla dura que el 7.2). Medido
+(no asumido, ver el reporte del paso): el trabajo del embedding -- llamada
+a Gemini + escritura -- empieza SIEMPRE unos ms DESPUÉS de que
+`attemptCreateTicket` devuelve, nunca dentro de su duración; el alta del
+reclamo no lo espera.
+
+**Reintentos -- 3 intentos, backoff ~1s / ~2s / ~4s con jitter**
+(`embed-ticket.ts`). Solo se reintenta un error TRANSITORIO
+(`GeminiEmbeddingError.transient`: HTTP 429, 5xx, o timeout/error de red);
+un 4xx (texto inválido, key mala) no se reintenta. Números chicos a
+propósito: el camino en vivo (dentro de `after()`) no debe acumular
+trabajo de fondo largo. Agotados los 3, `tickets.embedding` queda en NULL
+y lo levanta el barrido diario. El `UPDATE` lleva `embedding IS NULL` en
+el WHERE -- idempotente si el camino en vivo y el barrido procesan el
+mismo reclamo casi a la vez.
+
+**Cuota -- Opción A del arquitecto: no se trackea nada.** El free tier de
+`gemini-embedding-001` da (según un miembro del equipo de Google en el
+[foro oficial](https://discuss.ai.google.dev/t/gemini-embedding-free-tier-documentation/112553))
+100 RPM / 30.000 TPM / 1.000 RPD. **Además, el proyecto de Google Cloud
+detrás de esta key tiene facturación con crédito prepago habilitada** (no
+es nivel 100% gratuito), lo que da límites más altos que el free tier y un
+costo estimado insignificante para el volumen del proyecto -- a
+~US$0,15 / millón de tokens de entrada, incluso el backfill completo de
+los ~1.279 reclamos históricos (14.3) costaría centavos. Con un puñado de
+reclamos por día (tres edificios de Córdoba, ver "Qué es este proyecto" y
+el análisis del 5.11), el volumen no se acerca al límite ni de lejos --
+un contador (tabla `login_attempts`-style, o en memoria) sería
+infraestructura para un problema que no existe. Los 429 esporádicos los
+absorbe el backoff de arriba.
+
+**Cola de reprocesamiento -- Opción A del arquitecto: `embedding IS NULL`
+como cola implícita, plegada al cron diario existente.** Sin tabla ni
+contador ni columnas nuevas. `sweepMissingTicketEmbeddings(organizationId)`
+(`sweep-missing-embeddings.ts`) hace
+`SELECT ... WHERE embedding IS NULL AND deleted_at IS NULL ORDER BY
+reported_at DESC LIMIT 25`, y reintenta cada uno con el mismo
+`embedAndStoreTicket()`. Se llama desde `runDailyCron()` (paso 9.6) como
+una cuarta tarea por organización, con el mismo aislamiento de errores que
+las otras tres (su propio try/catch en el orquestador + la regla dura
+interna de la función). Mismo workflow de GitHub Actions
+(`daily-cron.yml`), mismo `CRON_SECRET`, misma cadencia 1×/día -- no se
+agregó ningún cron ni endpoint nuevo. El resultado se refleja en el JSON
+de respuesta (`embeddingsBackfilledTotal`, `perOrganization[].embeddingsBackfilled`).
+
+- **Lote de 25 por corrida:** el barrido es la RED DE SEGURIDAD para el
+  reclamo cuyo intento en vivo falló de forma persistente (cuota
+  agotada, corte de red largo, 5xx sostenido). El proyecto crea un
+  puñado de reclamos por día; la fracción que ADEMÁS falla los 3
+  intentos en vivo es minúscula. 25/corrida drena cualquier
+  acumulación realista de un día en una sola pasada, y 25 llamadas
+  secuenciales (~10-15s) quedan muy por debajo de cualquier límite por
+  minuto. Un backlog mayor (un día entero de caída de Gemini) se drena
+  en corridas sucesivas. El backfill masivo de los ~1.279 reclamos
+  históricos es el 14.3, con su propio ritmo -- este lote de 25 no está
+  pensado para eso.
+
+**`GEMINI_API_KEY` -- variable requerida** (`src/lib/env.ts`), mismo
+patrón que `RESEND_API_KEY` / `CRON_SECRET`: sin `.default()`, la app no
+arranca sin ella. Se crea a mano en Google AI Studio (como las cuentas de
+la etapa 0 / Resend), nunca por script. En `.env.example` con su
+comentario. Para producción (Etapa 15) hay que cargarla también como
+variable de entorno en Vercel -- mismo pendiente manual, fuera del repo,
+que `RESEND_API_KEY` y `CRON_SECRET`.
+
+**La columna `tickets.embedding` sigue sin declararse en el schema DSL de
+Drizzle** (decisión del 14.1): se lee/escribe con SQL crudo (`db.execute`)
+en `embed-ticket.ts` y `sweep-missing-embeddings.ts`.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.

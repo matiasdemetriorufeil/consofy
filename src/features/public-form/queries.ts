@@ -115,6 +115,7 @@ export const getActiveCategoriesForBuilding = cache(
 
 export type TicketCategory = {
   id: string;
+  name: string;
   defaultPriority: (typeof categories.$inferSelect)["defaultPriority"];
 };
 
@@ -127,13 +128,19 @@ export type TicketCategory = {
 // un reclamo NUEVO, sin importar qué haya elegido el cliente. También trae
 // `defaultPriority`, que es de donde sale la prioridad real del reclamo
 // (paso 5.2: "sin campo de prioridad en el formulario, sale de la
-// categoría").
+// categoría"). Y `name` (paso 14.2): el texto que se manda a la API de
+// embeddings es `{categoría}\n\n{descripción}` -- ver
+// composeTicketEmbeddingText.
 export async function getCategoryForTicket(
   organizationId: string,
   categoryId: string,
 ): Promise<TicketCategory | null> {
   const [row] = await db
-    .select({ id: categories.id, defaultPriority: categories.defaultPriority })
+    .select({
+      id: categories.id,
+      name: categories.name,
+      defaultPriority: categories.defaultPriority,
+    })
     .from(categories)
     .where(
       and(

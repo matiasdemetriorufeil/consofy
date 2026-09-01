@@ -6,6 +6,7 @@ import { db } from "@/db";
 import { organizations } from "@/db/schema";
 import { sendDailySummaryEmail } from "@/features/notifications/email/send-daily-summary-email";
 import { sweepDueReminders } from "@/features/reminders/sweep-due-reminders";
+import { sweepMissingTicketEmbeddings } from "@/features/tickets/embeddings/sweep-missing-embeddings";
 import { sweepOverdueTickets } from "@/features/tickets/sweep-overdue-tickets";
 
 export type DailyCronOrgResult = {
@@ -13,6 +14,7 @@ export type DailyCronOrgResult = {
   ticketsNotified: number | null;
   remindersNotified: number | null;
   dailySummaryStatus: string;
+  embeddingsBackfilled: number | null;
 };
 
 export type DailyCronResult = {
@@ -20,6 +22,7 @@ export type DailyCronResult = {
   ticketsNotifiedTotal: number;
   remindersNotifiedTotal: number;
   dailySummariesSent: number;
+  embeddingsBackfilledTotal: number;
   errors: string[];
   perOrganization: DailyCronOrgResult[];
 };
@@ -42,16 +45,20 @@ async function getActiveOrganizations(): Promise<
 }
 
 // Orquestador del cron diario (paso 9.6) -- conecta, por cada organización
-// activa, las tres piezas que ya existían pero nunca se dispararon solas:
-// el barrido de reclamos vencidos (9.4), el de recordatorios (9.4) y el
-// resumen diario por email (9.5). Llamado por el único caller real,
-// `src/app/api/cron/daily/route.ts`, después de validar el secreto.
+// activa, las piezas que ya existían pero nunca se dispararon solas: el
+// barrido de reclamos vencidos (9.4), el de recordatorios (9.4), el
+// resumen diario por email (9.5) y, desde el paso 14.2, el barrido de
+// reclamos que quedaron sin embedding (`embedding IS NULL` como cola
+// implícita -- Opción A del arquitecto, sin tabla ni contador nuevos).
+// Llamado por el único caller real, `src/app/api/cron/daily/route.ts`,
+// después de validar el secreto.
 //
-// Aislamiento de errores (punto 7 del enunciado: "si una de las tres
-// tareas falla, las otras dos igual se tienen que ejecutar -- no todo o
-// nada") en DOS niveles, no uno:
-// 1. Las tres funciones que se llaman acá (`sweepOverdueTickets`,
-//    `sweepDueReminders`, `sendDailySummaryEmail`) ya tienen su propia
+// Aislamiento de errores (punto 7 del enunciado: "si una tarea falla, las
+// demás igual se tienen que ejecutar -- no todo o nada") en DOS niveles,
+// no uno:
+// 1. Las funciones que se llaman acá (`sweepOverdueTickets`,
+//    `sweepDueReminders`, `sendDailySummaryEmail`,
+//    `sweepMissingTicketEmbeddings`) ya tienen su propia
 //    REGLA DURA de "nunca propaga una excepción" (mismo patrón que
 //    `detectAndFlagSimilarTickets`, paso 7.2) -- de por sí, que UNA falle
 //    no impide que la línea siguiente corra.
@@ -79,6 +86,7 @@ export async function runDailyCron(): Promise<DailyCronResult> {
     ticketsNotifiedTotal: 0,
     remindersNotifiedTotal: 0,
     dailySummariesSent: 0,
+    embeddingsBackfilledTotal: 0,
     errors: [],
     perOrganization: [],
   };
@@ -133,11 +141,35 @@ export async function runDailyCron(): Promise<DailyCronResult> {
       );
     }
 
+    // Barrido de reprocesamiento de embeddings (paso 14.2, frente 5) --
+    // red de seguridad para reclamos que quedaron con `embedding IS NULL`
+    // porque su intento en vivo (dentro de `after()`, tras el alta) falló.
+    // NO es el backfill masivo de los reclamos históricos: eso es el paso
+    // 14.3. Ver sweep-missing-embeddings.ts para el tamaño de lote y su
+    // razonamiento.
+    let embeddingsBackfilled: number | null = null;
+    try {
+      const embeddingResult = await sweepMissingTicketEmbeddings(org.id);
+      if (embeddingResult.ok) {
+        embeddingsBackfilled = embeddingResult.storedCount;
+        result.embeddingsBackfilledTotal += embeddingResult.storedCount;
+      } else {
+        result.errors.push(
+          `[org ${org.id}] sweepMissingTicketEmbeddings: ${embeddingResult.error}`,
+        );
+      }
+    } catch (error) {
+      result.errors.push(
+        `[org ${org.id}] sweepMissingTicketEmbeddings: ${String(error)}`,
+      );
+    }
+
     result.perOrganization.push({
       organizationId: org.id,
       ticketsNotified,
       remindersNotified,
       dailySummaryStatus,
+      embeddingsBackfilled,
     });
   }
 

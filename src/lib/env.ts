@@ -15,8 +15,10 @@ import { publicEnv } from "./env.public";
 // (MESSAGING_PROVIDER, paso 8.1 -- el momento en que por fin algo la
 // importa de verdad, después de que esta misma regla bloqueó agregarla
 // antes de tiempo), src/features/notifications/email/resend-provider.ts
-// (RESEND_API_KEY, paso 9.5) y src/app/api/cron/daily/route.ts
-// (CRON_SECRET, paso 9.6). Validar variables que nada consume obliga a
+// (RESEND_API_KEY, paso 9.5), src/app/api/cron/daily/route.ts
+// (CRON_SECRET, paso 9.6) y
+// src/features/tickets/embeddings/gemini-embedding.ts (GEMINI_API_KEY,
+// paso 14.2). Validar variables que nada consume obliga a
 // rellenarlas con dummies para poder probar cualquier otra cosa, y eso
 // invalida la validación -- no repitas ese error con la próxima variable
 // nueva.
@@ -54,6 +56,16 @@ import { publicEnv } from "./env.public";
 // paso) dejaría de arrancar la app -- "console" es el default seguro
 // porque no abre nada real, solo imprime en la terminal.
 //
+// GEMINI_API_KEY: mismo criterio que RESEND_API_KEY -- sin default. La
+// única función es autenticar contra la API de embeddings de Gemini (paso
+// 14.2, detección de duplicados semántica); un valor vacío o ausente no
+// tiene un "modo seguro" razonable (dejaría a todos los reclamos sin
+// embedding en silencio). La cuenta y la key se crean a mano en Google AI
+// Studio (mismo criterio que las cuentas externas de la etapa 0 / Resend),
+// nunca por script. El proyecto de Google Cloud de esta key tiene
+// facturación con crédito prepago habilitada -- ver CLAUDE.md > Detección
+// de duplicados por embeddings.
+//
 // NEXT_PUBLIC_APP_URL vive ACÁ (esquema de servidor) y no en
 // src/lib/env.public.ts a propósito: el enlace público del edificio se arma
 // siempre en el servidor (Server Component / Route Handler, nunca en
@@ -80,6 +92,7 @@ const schema = z.object({
   MESSAGING_PROVIDER: z.enum(["console", "manual_link"]).default("console"),
   RESEND_API_KEY: z.string().min(1),
   CRON_SECRET: z.string().min(1),
+  GEMINI_API_KEY: z.string().min(1),
 });
 
 // -----------------------------------------------------------------------
@@ -163,6 +176,7 @@ function parseEnv() {
     MESSAGING_PROVIDER: process.env.MESSAGING_PROVIDER || undefined,
     RESEND_API_KEY: process.env.RESEND_API_KEY,
     CRON_SECRET: process.env.CRON_SECRET,
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
   });
 
   if (!parsed.success) {
