@@ -7534,6 +7534,150 @@ agregó...", nunca "nota"; texto verbatim en `detail`.
 (`ticket_event_type += resident_update_added`, `public_form_rate_limit_kind
 += resident_update`). Sin dependencias nuevas.
 
+## Auditoría de la superficie pública (paso 11.5, cierra la Etapa 11)
+
+Revisión completa de todo lo público de las etapas 5 y 11. **No se
+encontró ninguna fuga de datos.** Criterio de aceptación de la etapa
+demostrado: **con el link de un reclamo (`/s/[token]`) no se accede a
+ningún otro reclamo modificando la URL** (probado activamente, ver abajo).
+Sin cambios de código -- esta sección es la referencia de qué se cubrió.
+
+### Inventario (por grep, no de memoria)
+
+| #       | Superficie                            | Credencial                                                                | Query/tabla                                                                                                                                                                                               | ¿Rate limit?                                                                                                                    |
+| ------- | ------------------------------------- | ------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Rutas   | `/r/[token]`                          | `buildings.public_token` (uuid random, único global)                      | `getBuildingByPublicToken` (`buildings`) + `getActiveCategoriesForBuilding` (`categories`) + `getUnitsForBuilding` (`units` del edificio -- alimenta el picker, sin datos de persona)                     | n/a (GET)                                                                                                                       |
+|         | `/r/[token]/estado`                   | ídem                                                                      | `getBuildingByPublicToken`                                                                                                                                                                                | n/a (GET)                                                                                                                       |
+|         | `/r/[token]/documentos`               | ídem                                                                      | `getBuildingByPublicToken` + `getPublicBuildingDocuments` (`documents WHERE visibility='residents'`)                                                                                                      | n/a (GET)                                                                                                                       |
+|         | `/s/[token]`                          | `tickets.attachments_token` (uuid random `defaultRandom()`, único global) | `getTicketByAttachmentsToken` (`tickets`+`buildings`+`organizations`+`categories`+`people`(nombre)+`units`(unidad propia)+`ticket_attachments`(propios)+`ticket_events`(SOLO tipos públicos))             | n/a (GET)                                                                                                                       |
+| Actions | `createTicketAction`                  | `public_token`                                                            | resuelve edificio/categoría/unidad y valida cada dato contra la org del token (5.5); `getExistingAttachmentPaths` valida los `storage_path` contra `storage.objects` + prefijo `pending/<formSessionId>/` | **SÍ** (`isTicketSubmissionRateLimited`, teléfono+IP, 5.11)                                                                     |
+|         | `checkAttachmentUploadAllowedAction`  | -- (solo IP)                                                              | ninguna tabla de negocio; es la compuerta de rate limit                                                                                                                                                   | **ES** el rate limit (IP, 5.11)                                                                                                 |
+|         | `registerWhatsappHandoffOpenedAction` | `public_token` + `public_code` (filtra `org` **Y** `building`)            | escribe 1 evento `whatsapp_handoff_opened` sin payload                                                                                                                                                    | **NO** -- devuelve `void`, no toca ningún dato, acotado a 1 reclamo por llamada; analizado y aceptado en 5.9                    |
+|         | `lookupTicketStatusAction`            | `public_token` + `public_code` (11.1)                                     | `getTicketStatusByPublicCode(buildingId, code)` -- `WHERE building_id` (del token) `AND public_code`                                                                                                      | **SÍ** (`isStatusLookupRateLimited`, IP, 11.1)                                                                                  |
+|         | `getPublicDocumentDownloadUrlAction`  | `public_token` + `documentId` (11.3)                                      | `WHERE id AND building_id AND organization_id AND visibility='residents'`                                                                                                                                 | **NO** -- `documentId` es uuid random no adivinable, un solo SELECT indexado antes de fallar; motivo del 11.3, **sigue válido** |
+|         | `addResidentUpdateAction`             | `attachments_token` (11.4)                                                | `getResidentUpdateTicket(token)` + tope de adjuntos                                                                                                                                                       | **SÍ** (`isResidentUpdateRateLimited`, IP, 11.4)                                                                                |
+
+Rutas públicas NO de esta superficie: `/` (placeholder sin datos),
+`/login` (auth), `/dev/styleguide` (galería de componentes, sin base,
+"eliminar antes de producción"), `/api/cron/daily` (Bearer + `timingSafeEqual`).
+El middleware (`src/proxy.ts`) solo gatea `/panel/*`; todo el resto es
+público. No hay ninguna otra Server Action pública (los demás
+`actions.ts` van con `authorizedAction()`; `loginAction`/`logoutAction`
+son de auth, sin datos de reclamos).
+
+### Matriz de pruebas (2 edificios misma org, 2 reclamos, doc visible + doc privado, con nota interna / asignado / `priority_changed` / teléfono / email de prueba en el reclamo A)
+
+**a) token/código inválido, mal formado, o de OTRO tipo (cross-type):**
+
+| Prueba                                                                                           | Resultado                                                          |
+| ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------ |
+| `/s/{public_token de edificio}` (token de edificio como si fuera de reclamo)                     | **HTTP 404** "No encontramos este enlace"                          |
+| `/r/{attachments_token de reclamo}` (token de reclamo como si fuera de edificio)                 | **HTTP 404**                                                       |
+| `/r/{attachments_token}/documentos`                                                              | **HTTP 404**                                                       |
+| `/s/{uuid al azar}`                                                                              | **HTTP 404**                                                       |
+| `getPublicDocumentDownloadUrlAction({token: attachments_token de reclamo, documentId: visible})` | `{ok:false,"No encontramos ese documento."}`                       |
+| `lookupTicketStatusAction({token: attachments_token de reclamo, code})`                          | `{status:"error","No encontramos ningún reclamo con ese código."}` |
+| `addResidentUpdateAction({token: public_token de edificio})`                                     | `{status:"error","No encontramos ese reclamo."}`                   |
+
+**b) token/código VÁLIDO pero de otro edificio/reclamo/documento:**
+
+| Prueba                                                                                    | Resultado                                                                                                                                                 |
+| ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `getPublicDocumentDownloadUrlAction({token: edif A, documentId: privado de A})`           | `{ok:false,"No encontramos ese documento."}`                                                                                                              |
+| `getPublicDocumentDownloadUrlAction({token: edif A, documentId: uuid al azar})`           | ídem                                                                                                                                                      |
+| `getPublicDocumentDownloadUrlAction({token: edif A, documentId: visible de A})` (control) | `{ok:true, url:.../object/sign/...}`                                                                                                                      |
+| `/r/{token edif A}/documentos`                                                            | lista el doc visible; **NO** el privado; **NO** docs de B                                                                                                 |
+| `lookupTicketStatusAction({token: edif A, code de reclamo B})` (misma org, otro edificio) | `{status:"error","No encontramos ningún reclamo con ese código."}`                                                                                        |
+| `lookupTicketStatusAction({token: edif B, code de reclamo B})` (control)                  | `{status:"found", ticket:{status, buildingName, unitLabel, categoryName, reportedAt, timezone}}` -- **sin** nombre, **sin** descripción, **sin** teléfono |
+| `/s/{token reclamo B}`                                                                    | muestra B, **no** A; sin nota/asignado/actor-label/teléfono/email de A                                                                                    |
+
+**c) modificar un carácter del token:**
+
+| Prueba                                                                    | Resultado                                                                 |
+| ------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `/s/{attachments_token con 1 char cambiado}`                              | **HTTP 404**, no filtra nada (ya cubierto a fondo en 11.1, re-confirmado) |
+| `addResidentUpdateAction({token: attachments_token con 1 char cambiado})` | `{status:"error","No encontramos ese reclamo."}`                          |
+
+**d) la respuesta NO incluye datos internos ni de terceros:** el HTML de
+`/s/{tokenA}` (reclamo con nota interna, asignado, `priority_changed` y
+persona con teléfono+email cargados) **no contiene**: el texto de la nota,
+el nombre del asignado, el `actor_label` del administrador
+(`PRUEBA115 ...`), el teléfono ni el email de la persona, ni ningún dato
+del reclamo B. La línea de tiempo pública solo muestra `created` (desde
+`reported_at`), `status_changed` (traducido, sin el valor crudo) y
+`resident_update_added` (resumen, sin el texto verbatim); `note_added` /
+`assigned` / `priority_changed` **ni siquiera salen de la base** (la query
+filtra `type IN PUBLIC_TIMELINE_EVENT_TYPES`). Lo que **sí** muestra
+`/s/[token]` -- nombre de QUIEN reportó, descripción, unidad del propio
+reclamo -- es dato del propio recurso, decisión explícita del 11.1
+(mismos datos que ya viajan en el mensaje de WhatsApp; el token es no
+adivinable). `getTicketByAttachmentsToken` **no hace ningún JOIN a
+`unit_occupancies`** -> nunca aparece otro ocupante de la unidad.
+
+**e) rate limit:** ver la tabla del inventario. Las dos acciones sin
+rate limit (`registerWhatsappHandoffOpenedAction`,
+`getPublicDocumentDownloadUrlAction`) tienen su motivo documentado y
+revisado: ninguna **filtra datos** (una devuelve `void` y escribe un
+evento vacío; la otra necesita un `documentId` uuid random no adivinable y
+solo sirve documentos ya marcados `residents`-visibles). El residual de
+cada una es abuso de escritura/volumen, no una fuga -- fuera del alcance
+de este paso, mismo criterio que 5.9/11.3.
+
+**f) mensajes de error ambiguos ("no existe" == "no tenés acceso"):**
+
+- `getPublicDocumentDownloadUrlAction`: **100% uniforme** -- parse inválido,
+  token malo, edificio de otro, documento privado, id inexistente ->
+  todos `"No encontramos ese documento."`
+- `lookupTicketStatusAction`: token malo / código de otro edificio /
+  código inexistente -> todos `"No encontramos ningún reclamo con ese
+código."`. El hint de formato (`"tiene que ser como TC-2026-0007"`) solo
+  aparece para un string que ni siquiera matchea el regex del código --
+  no distingue "existe" de "no accedés", solo "tu input no es un código".
+- `/s/[token]` y `/r/[token]`(+hijas): uuid mal formado y uuid válido sin
+  match -> el MISMO `notFound()`.
+- **Dos no-ambigüedades, deliberadas y NO explotables** (documentadas en
+  pasos previos, se re-confirman acá):
+  1. **Edificio inactivo:** `/r/[token]` y `/r/[token]/documentos` muestran
+     el NOMBRE del edificio en la tarjeta de "no recibe reclamos"
+     (`/r/[token]/estado` no bloquea por inactivo -- divergencia propia del
+     11.1). Llegar a esa pantalla requiere un `public_token` real y
+     vigente (uuid random, no adivinable), así que confirmarle el nombre a
+     quien ya lo tiene no es una divulgación nueva -- decisión del 5.1.
+  2. **`addResidentUpdateAction`:** token inválido -> `"No encontramos ese
+reclamo."`; token VÁLIDO de un reclamo cerrado -> `"Este reclamo ya
+no está abierto..."`. La segunda solo la ve quien tiene el
+     `attachments_token` (no adivinable), y el estado abierto/cerrado ya
+     está a la vista en `/s/[token]` -- no hay divulgación nueva ni bypass
+     de acceso.
+
+### Verificación del criterio de aceptación (paso 3)
+
+Además de lo del 11.1 (mutar cada carácter del token de `/s/[token]` ->
+404, no repetido acá), se cubrieron ángulos nuevos, **todos negativos**:
+
+- **Cross-type de tokens:** `public_token` de edificio en `/s/[token]` ->
+  404; `attachments_token` de reclamo en `/r/[token]` y
+  `/r/[token]/documentos` -> 404; `attachments_token` como `token` de
+  `getPublicDocumentDownloadUrlAction` y de `lookupTicketStatusAction` ->
+  respuesta ambigua; `public_token` de edificio como `token` de
+  `addResidentUpdateAction` -> "No encontramos ese reclamo".
+- **Query params inyectados:** `/s/{tokenA}?ticketId=<B>&admin=1&token=<B>`
+  -> HTTP 200, sigue mostrando A, cero datos de B, cero fugas (la page
+  solo lee `params.token`).
+- **Rutas hermanas inexistentes:** `/s/{token}/estado`,
+  `/s/{token}/documentos` -> 404.
+- **Path traversal:** `/s/{tokenA}%2F..%2F{tokenB}` -> 404, no muestra B.
+- **`getPublicDocumentDownloadUrlAction` + token de reclamo:** no se puede
+  descargar ningún documento con el `attachments_token` de un reclamo
+  (falla en `getBuildingByPublicToken`).
+- **`public_code` cruzado entre edificios de la misma org:** el código del
+  reclamo B, consultado con el token del edificio A, no resuelve nada
+  (`getTicketStatusByPublicCode` filtra por `building_id`; lo mismo hace
+  `registerWhatsappHandoffOpenedAction`).
+
+Datos de prueba (`PRUEBA115`) borrados al terminar (reclamos y persona con
+baja lógica; eventos y objetos de Storage borrados).
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
