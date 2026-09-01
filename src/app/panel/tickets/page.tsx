@@ -113,11 +113,26 @@ export default async function TicketsPage({
     if (!explicitFilters) {
       const hasAnyTicket = await organizationHasAnyTicket(organization.id);
       if (!hasAnyTicket) {
+        // Acción sugerida (paso 12.5, punto 4): los reclamos entran por el
+        // formulario público, así que lo útil para un administrador que
+        // todavía no tiene ninguno es llegar al enlace/QR de ese
+        // formulario. Vive en la pestaña "Enlace público" de cada
+        // edificio: con uno solo, se linkea directo; con varios, al
+        // listado de edificios para que elija. (Destino exacto: decisión
+        // de producto -- ver el reporte del paso 12.5.)
+        const singleBuilding =
+          buildingOptions.length === 1 ? buildingOptions[0] : null;
         return (
           <EmptyState
             icon={Inbox}
             title="Todavía no hay reclamos cargados"
-            description="Acá va a aparecer la bandeja de reclamos de los vecinos, con su estado y prioridad, apenas alguien cargue el primero desde el formulario público."
+            description="Los reclamos entran por el formulario público que completan los vecinos. Compartí el enlace o el QR de tu edificio para que empiecen a llegar."
+            action={{
+              label: "Ver el enlace del formulario",
+              href: singleBuilding
+                ? `/panel/buildings/${singleBuilding.id}/public-link`
+                : "/panel/buildings",
+            }}
           />
         );
       }

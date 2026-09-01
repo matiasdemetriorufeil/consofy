@@ -2,6 +2,7 @@ import { Building2 } from "lucide-react";
 import { Suspense } from "react";
 
 import { EmptyState } from "@/components/empty-state";
+import { SectionErrorBoundary } from "@/components/section-error-boundary";
 import { PanelGreeting } from "@/features/auth/components/panel-greeting";
 import { getActiveBuildings } from "@/features/buildings/queries";
 import { getSelectedBuilding } from "@/features/buildings/selected-building";
@@ -47,19 +48,31 @@ export default async function PanelHomePage() {
         />
       ) : (
         <>
-          <Suspense fallback={<AttentionSectionSkeleton />}>
-            <AttentionSection
-              organizationId={organization.id}
-              buildingId={buildingId}
-              timezone={organization.timezone}
-            />
-          </Suspense>
-          <Suspense fallback={<BuildingSummaryCardsSkeleton />}>
-            <BuildingSummaryCards
-              organizationId={organization.id}
-              buildingId={buildingId}
-            />
-          </Suspense>
+          {/* Cada sección envuelta en su propio error boundary (paso 12.5,
+              punto 2): son dos consultas independientes (getAttentionTickets
+              y getTicketSummaryByBuilding). Si una falla, la otra sigue
+              mostrándose -- sin el boundary, cualquiera de las dos tiraba
+              abajo el dashboard entero al `error.tsx` del panel. El
+              boundary va POR FUERA del <Suspense>: si el Server Component
+              rechaza su render, el <Suspense> no puede resolver el
+              fallback para siempre, el error propaga al boundary. */}
+          <SectionErrorBoundary title="la sección de atención inmediata">
+            <Suspense fallback={<AttentionSectionSkeleton />}>
+              <AttentionSection
+                organizationId={organization.id}
+                buildingId={buildingId}
+                timezone={organization.timezone}
+              />
+            </Suspense>
+          </SectionErrorBoundary>
+          <SectionErrorBoundary title="el resumen por edificio">
+            <Suspense fallback={<BuildingSummaryCardsSkeleton />}>
+              <BuildingSummaryCards
+                organizationId={organization.id}
+                buildingId={buildingId}
+              />
+            </Suspense>
+          </SectionErrorBoundary>
         </>
       )}
     </div>
