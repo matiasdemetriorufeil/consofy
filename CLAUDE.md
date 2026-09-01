@@ -7678,6 +7678,145 @@ Además de lo del 11.1 (mutar cada carácter del token de `/s/[token]` ->
 Datos de prueba (`PRUEBA115`) borrados al terminar (reclamos y persona con
 baja lógica; eventos y objetos de Storage borrados).
 
+## Auditoría de seguridad (paso 12.3)
+
+Auditoría de tres frentes sobre todo lo que ya existe, antes de producción:
+políticas RLS, Server Actions del panel, y headers de seguridad HTTP.
+**Áreas 1 y 2 sin hallazgos. Área 3: no había ningún header de seguridad
+configurado -- se aplicó ahora el set mínimo, el resto queda deferido a la
+Etapa 15 a propósito (ver abajo).** Verificado contra la base de desarrollo
+real (no solo por lectura de código) y contra respuestas HTTP reales del
+dev server.
+
+### Área 1 -- Políticas RLS: sin hallazgos
+
+Verificado contra la base real (`pg_class`, `pg_policies`, `pg_default_acl`,
+`information_schema.role_table_grants`, `pg_roles`) más una prueba funcional
+impersonando `anon` y `authenticated` dentro de transacciones revertidas:
+
+- **21/21 tablas de `public` con RLS activo**, cada una con exactamente una
+  policy `deny_anon_authenticated` **RESTRICTIVE**, `FOR ALL`,
+  `TO anon, authenticated`, `USING (false) WITH CHECK (false)`. Cero
+  policies PERMISSIVE en `public`. Cero tablas con RLS activo y sin policy.
+  Ninguna policy que dé más acceso del documentado.
+- **Prueba funcional:** `anon` y `authenticated` reciben `permission denied`
+  (SQLSTATE 42501) en SELECT/INSERT/UPDATE sobre `tickets`, `organizations`,
+  `app_users`, `documents`, `ticket_events`, `login_attempts`. El bloqueo es
+  a nivel GRANT (`REVOKE ALL`, migración 0013), evaluado antes de RLS -- la
+  segunda capa funciona. `GRANTS to anon/authenticated on public.* -> (none)`.
+- **`ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public`** activo:
+  una tabla creada por una migración futura nace sin grants para
+  `anon`/`authenticated`/`PUBLIC`. Funciones (`set_ticket_public_code`,
+  `set_updated_at`) y la única secuencia (`health_check_id_seq`): sin
+  `EXECUTE`/acceso para esos roles (migración 0014).
+- **Storage:** exactamente 2 policies, ambas en `storage.objects`, ambas
+  `PERMISSIVE TO anon` (correcto -- otorgan acceso angosto, no deniegan):
+  INSERT y DELETE restringidas a
+  `bucket_id = 'ticket-attachments' AND name ~~ 'pending/%'`.
+  `building-documents` no tiene ninguna. Los dos buckets `public = false`.
+  Coincide con CLAUDE.md > Fotos y adjuntos (5.4) y > Biblioteca de
+  documentos (10.1).
+- **BYPASSRLS:** 5 roles -- `postgres` (el rol de la app), `service_role`,
+  `supabase_admin`, `supabase_etl_admin`, `supabase_read_only_user`. **Los 5
+  son roles administrados por la plataforma Supabase, ninguno creado por
+  este proyecto.** `anon` y `authenticated` NO tienen BYPASSRLS. El riesgo
+  aceptado (el rol de la app evade RLS, la defensa real es el filtro por
+  organización en la capa de aplicación) sigue sin cambios y acotado a ese
+  rol.
+
+### Área 2 -- Server Actions: sin hallazgos
+
+- **50 Server Actions del panel** en 10 archivos `actions.ts`
+  (`announcements` 9, `buildings` 7, `documents` 4, `imports` 2, `incidents`
+  1, `notifications` 4, `people` 6, `reminders` 3, `tickets` 7, `units` 7)
+  -- **las 50 envueltas en `authorizedAction()`**. Ninguna función exportada
+  que no lo esté.
+- **`getUser()`, no `getSession()`:** `authorizedAction` -> `requireUser` ->
+  `resolveAuthorizedUser` -> `getSession()` (nombre local en
+  `src/lib/auth.ts`) que internamente llama `supabase.auth.getUser()` --
+  round-trip real al servidor de Auth, revalida el JWT. Nunca
+  `supabase.auth.getSession()` de supabase-js.
+- **Filtro por `organization_id`:** toda operación `db.select/insert/update/
+delete` y toda llamada a `features/*/queries.ts` de cada action del panel
+  usa `context.organization.id` (de la sesión verificada, join
+  `app_users ⋈ organizations` con `isNull(deletedAt)`). Los helpers internos
+  que reciben un `organizationId: string` crudo (`translateBuildingError`,
+  `isValidBuildingSelection`, `maybeMarkAnnouncementSent`,
+  `resolveRowsAgainstDatabase`, `createMissingUnits`, `createMissingPeople`,
+  `resolveSelectionIds`) solo se invocan con `context.organization.id`.
+  Ninguna action lee `organizationId` del payload del cliente.
+- **Excepciones públicas:** `loginAction` + `logoutAction`
+  (`auth/actions.ts`), sin cambios. `public-form/actions.ts` expone
+  **exactamente las 6** del inventario del paso 11.5
+  (`createTicketAction`, `checkAttachmentUploadAllowedAction`,
+  `registerWhatsappHandoffOpenedAction`, `lookupTicketStatusAction`,
+  `getPublicDocumentDownloadUrlAction`, `addResidentUpdateAction`) --
+  ninguna nueva, ninguna usando `authorizedAction`/`requireUser`/`getSession`
+  (no se coló sesión de admin). El directive `"use server"` no aparece en
+  ningún archivo fuera de esos 12; cero Server Actions inline en componentes.
+- **Route Handlers** (revisados de paso): `/api/cron/daily` (Bearer
+  `CRON_SECRET` + `timingSafeEqual`), `/panel/buildings/[id]/public-link/qr`
+  y `/panel/tickets/export` (los dos con `requireUser()` propio + query
+  filtrada por `organization.id`).
+
+### Área 3 -- Headers de seguridad: hallazgo + set mínimo aplicado
+
+**Hallazgo:** `next.config.ts` estaba vacío, no había `vercel.json`, y
+`src/proxy.ts` solo seteaba `Cache-Control: no-store` en `/panel/*` (medida
+anti-bfcache del paso 3.2). Faltaban todos los headers de seguridad
+estándar.
+
+**Contexto que baja la urgencia** (no es una vulnerabilidad explotable en la
+arquitectura actual): la app todavía no está desplegada (deploy es Etapa
+15); las Server Actions de Next 16 traen verificación de `Origin`/
+same-origin incorporada (CSRF cross-site mitigado de fábrica); no se
+encontró ningún sink de XSS (todo texto de usuario se renderiza como
+children de React escapados, cero `dangerouslySetInnerHTML`).
+
+**Decisión (arquitecto): aplicar ahora el set mínimo, deferir el resto a la
+Etapa 15.** En `next.config.ts`, vía `headers()` sobre `source: "/:path*"`
+(todas las rutas):
+
+| Header                   | Valor                             | Amenaza concreta que cubre en este proyecto                                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------ | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `X-Frame-Options`        | `DENY`                            | **Clickjacking.** El panel autenticado tiene controles que cambian estado real (estado de un reclamo, baja de un edificio, visibilidad de un documento hacia los vecinos); `/r/[token]` y `/s/[token]` tienen botones que escriben (enviar reclamo, agregar info/fotos del vecino). Ninguna pantalla tiene un motivo legítimo para ser enmarcada. `DENY`, no `SAMEORIGIN`: la app tampoco se enmarca a sí misma. |
+| `X-Content-Type-Options` | `nosniff`                         | **MIME-sniffing:** impide que un navegador reinterprete una respuesta como un tipo distinto del declarado. Defensa en profundidad de costo cero.                                                                                                                                                                                                                                                                 |
+| `Referrer-Policy`        | `strict-origin-when-cross-origin` | Las URLs públicas llevan **tokens secretos en el path** (`/r/<uuid>`, `/s/<attachments_token>`). Hoy esas páginas no linkean a terceros, así que no hay fuga -- pero el diseño "token en el path" hace que un futuro link saliente filtre el token entero en el header `Referer`. Esta policy es la red de seguridad para ese caso.                                                                              |
+
+**Verificado con requests reales al dev server** (no solo que
+`next.config.ts` compiló): los tres headers aparecen en la respuesta de
+`/`, `/login`, `/panel` (307 -> `/login`), `/panel/tickets` (307),
+`/r/[token]` (200) y `/s/[token]` (200) -- incluidas las respuestas de
+redirect que genera el proxy. `Cache-Control: no-store` de `proxy.ts` sigue
+intacto, sin regresión.
+
+**Headers deferidos a la Etapa 15 (deploy), a propósito -- decisión de
+diseño real pendiente, NO un descuido:**
+
+- **`Content-Security-Policy`:** una CSP correcta para Next requiere
+  inventariar cada fuente real de `script-src` (los bootstrap scripts inline
+  de Next necesitan `'nonce-...'` o hashes), `connect-src` (Supabase Auth/
+  Storage/PostgREST, Resend si aplica del lado del cliente), `img-src`
+  (URLs firmadas de Supabase Storage), `font-src`, `style-src`. Es una tarea
+  de tuning con su propio ciclo de prueba, no un valor que se pueda fijar
+  sin contexto. Valor alto (reduce el radio de un XSS), pero hoy no hay
+  ningún vector de XSS conocido en la app, así que el costo de hacerlo mal
+  (romper el bundle en producción) supera el beneficio inmediato. Va en un
+  paso propio junto al deploy.
+- **`Strict-Transport-Security` (HSTS):** Vercel ya sirve HSTS en
+  `*.vercel.app` y en dominios propios una vez configurados, así que el gap
+  real es acotado. Agregarlo igual como defensa en profundidad implica
+  decidir `max-age`, y si va `includeSubDomains` (¿todos los subdominios del
+  dominio final van por HTTPS?) y `preload` (irreversible a corto plazo).
+  Esas decisiones dependen del dominio real, que se define en la Etapa 15.
+- **`Permissions-Policy`:** el formulario público usa `capture="environment"`
+  (cámara) para subir fotos, así que una policy restrictiva tendría que
+  _habilitar_ cámara en `/r/*` y bloquearla en el resto -- necesita
+  granularidad por ruta, no un valor global. Prioridad baja.
+- **`poweredByHeader: false` / quitar `X-Powered-By`:** no mitiga una
+  amenaza real (la versión/framework es inferible por otras vías). No se
+  agrega "por completitud" -- mismo criterio que el resto de esta auditoría.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
