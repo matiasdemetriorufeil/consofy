@@ -242,6 +242,15 @@ export function TicketForm({
 }) {
   const [step, setStep] = useState(1);
   const [hydrated, setHydrated] = useState(false);
+  // Foco al cambiar de paso -- ver el comentario completo de goToStep()
+  // más abajo. stepHeadingRef apunta al <h2> de cada paso (título "Tu
+  // unidad y contacto"/etc., ver PUBLIC_TICKET_STEPS); confirmationHeadingRef,
+  // al <h2> de la pantalla de confirmación ("Listo, tu reclamo ya quedó
+  // registrado"), que reemplaza el formulario entero cuando sentTicket
+  // deja de ser null -- mismo problema de foco perdido, mismo fix.
+  const stepHeadingRef = useRef<HTMLHeadingElement>(null);
+  const confirmationHeadingRef = useRef<HTMLHeadingElement>(null);
+  const manualStepChangeRef = useRef(false);
   // Un id por CARGA del formulario, no por reclamo -- ver
   // upload-attachment.ts para el porqué completo. Se genera acá mismo
   // (lazy initializer de useState, corre una sola vez) y el efecto de
@@ -426,17 +435,63 @@ export function TicketForm({
       });
   }, [attachments, attachmentsBusy, formSessionId]);
 
+  // Ver el comentario largo de stepHeadingRef/confirmationHeadingRef más
+  // arriba: mueve el foco al título del paso nuevo, pero SOLO cuando el
+  // cambio de paso lo disparó goToStep() (un click real en "Continuar"/
+  // "Volver"), nunca cuando `step` cambia por la restauración de un
+  // borrador guardado (el efecto de hidratación, arriba del todo) -- ahí
+  // la persona no tocó nada, robarle el foco al cargar la página sería
+  // peor que no moverlo.
+  useEffect(() => {
+    if (manualStepChangeRef.current) {
+      manualStepChangeRef.current = false;
+      stepHeadingRef.current?.focus();
+    }
+  }, [step]);
+
+  // Mismo mecanismo para la pantalla de confirmación: reemplaza el
+  // formulario entero apenas `sentTicket` deja de ser null (ver el `if
+  // (sentTicket) return (...)` más abajo) -- un cambio de contenido tan
+  // grande como cualquier cambio de paso, con el mismo problema de foco
+  // perdido. Acá no hace falta distinguir "restauración" de "envío real":
+  // sentTicket también se restaura desde sentKey() al montar (mismo
+  // efecto de hidratación), y en ESE caso mover el foco al título de
+  // todos modos es razonable -- es la primera vez que ESTA carga de
+  // página muestra la confirmación, sea porque se acaba de enviar o
+  // porque se recargó la pantalla ya confirmada.
+  useEffect(() => {
+    if (sentTicket) {
+      confirmationHeadingRef.current?.focus();
+    }
+  }, [sentTicket]);
+
+  // Foco al cambiar de paso (accesibilidad, paso 12.6) -- encontrado
+  // navegando el formulario a mano con teclado: sin esto, "Continuar"/
+  // "Volver" cambiaban el contenido visible pero el foco se quedaba en el
+  // botón que acababa de desaparecer del layout del paso anterior (React
+  // lo desmonta), así que el siguiente Tab arrancaba de nuevo desde
+  // arriba del documento -- y un lector de pantalla no anunciaba nada del
+  // cambio de paso. `manualStepChangeRef` distingue un cambio de paso
+  // REAL (este click) de un `setStep` disparado por la restauración de un
+  // borrador (el efecto de hidratación de arriba, en el mount) -- ese
+  // caso no debe robarle el foco a nadie, la persona ni tocó nada
+  // todavía.
+  function goToStep(next: number) {
+    manualStepChangeRef.current = true;
+    setStep(next);
+  }
+
   async function goNext() {
     const fieldsToValidate =
       step === 1 ? IDENTIFICATION_STEP_FIELDS : PROBLEM_STEP_FIELDS;
     const valid = await trigger([...fieldsToValidate]);
     if (valid) {
-      setStep((current) => current + 1);
+      goToStep(step + 1);
     }
   }
 
   function goBack() {
-    setStep((current) => Math.max(1, current - 1));
+    goToStep(Math.max(1, step - 1));
   }
 
   function handleAttachmentChange(event: ChangeEvent<HTMLInputElement>) {
@@ -754,7 +809,11 @@ export function TicketForm({
         <CardContent className="flex flex-col gap-5">
           <div className="flex flex-col items-center gap-2 py-2 text-center">
             <CircleCheck className="text-primary size-10" />
-            <h2 className="text-ink font-display text-lg font-semibold">
+            <h2
+              ref={confirmationHeadingRef}
+              tabIndex={-1}
+              className="text-ink font-display text-lg font-semibold outline-none"
+            >
               Listo, tu reclamo ya quedó registrado
             </h2>
             <p className="text-ink-muted text-sm">
@@ -824,7 +883,11 @@ export function TicketForm({
     <Card className="w-full">
       <CardContent className="flex flex-col gap-5">
         <StepProgress step={step} />
-        <h2 className="text-ink font-display text-lg font-semibold">
+        <h2
+          ref={stepHeadingRef}
+          tabIndex={-1}
+          className="text-ink font-display text-lg font-semibold outline-none"
+        >
           {PUBLIC_TICKET_STEPS.find((s) => s.id === step)?.title}
         </h2>
 
@@ -1052,7 +1115,7 @@ export function TicketForm({
                     type="button"
                     className="flex-1"
                     disabled={attachmentsInFlight}
-                    onClick={() => setStep(4)}
+                    onClick={() => goToStep(4)}
                   >
                     Continuar
                   </Button>

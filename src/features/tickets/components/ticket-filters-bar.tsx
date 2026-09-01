@@ -220,224 +220,238 @@ export function TicketFiltersBar({
   // flex-col en mobile (dentro del Sheet, apilado), flex-row + wrap en
   // desktop (md:) -- cada <Field> lleva un ancho fijo en md: para que el
   // wrap arme filas prolijas en vez de una sola columna angosta empujando
-  // la tabla hacia la derecha. Mismo árbol de JSX para las dos, sin
-  // duplicar el formulario -- solo cambian las clases responsive.
-  const filterControls = (
-    <div className="flex flex-col gap-4 md:flex-row md:flex-wrap md:items-end">
-      <Field className="md:w-44">
-        <FieldLabel htmlFor="filter-building">Edificio</FieldLabel>
-        <Select
-          value={current.building ?? ALL_VALUE}
-          onValueChange={handleBuildingChange}
-        >
-          <SelectTrigger id="filter-building">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={ALL_VALUE}>Todos los edificios</SelectItem>
-            {buildingOptions.map((b) => (
-              <SelectItem key={b.id} value={b.id}>
-                {b.name}
-                {!b.active && " (pausado)"}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </Field>
-
-      <Field className="md:w-44">
-        <FieldLabel htmlFor="filter-unit">Unidad</FieldLabel>
-        <Select
-          value={current.unit ?? ALL_VALUE}
-          onValueChange={(value) =>
-            updateParams({ unit: value === ALL_VALUE ? null : value })
-          }
-          disabled={!current.building}
-        >
-          <SelectTrigger id="filter-unit">
-            <SelectValue
-              placeholder={
-                current.building
-                  ? "Todas las unidades"
-                  : "Elegí un edificio primero"
-              }
-            />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={ALL_VALUE}>Todas las unidades</SelectItem>
-            {unitOptions.map((u) => (
-              <SelectItem key={u.id} value={u.id}>
-                {formatUnitOptionLabel(u)}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </Field>
-
-      <Field className="md:w-44">
-        <FieldLabel htmlFor="filter-category">Categoría</FieldLabel>
-        <Select
-          value={current.category ?? ALL_VALUE}
-          onValueChange={(value) =>
-            updateParams({ category: value === ALL_VALUE ? null : value })
-          }
-        >
-          <SelectTrigger id="filter-category">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={ALL_VALUE}>Todas las categorías</SelectItem>
-            {categoryOptions.map((c) => (
-              <SelectItem key={c.id} value={c.id}>
-                {c.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </Field>
-
-      <Field className="md:w-36">
-        <FieldLabel htmlFor="filter-status">Estado</FieldLabel>
-        <Select
-          value={current.status}
-          onValueChange={(value) => updateParams({ status: value })}
-        >
-          <SelectTrigger id="filter-status">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {TICKET_STATUS_FILTER_VALUES.map((value) => (
-              <SelectItem key={value} value={value}>
-                {STATUS_LABELS[value]}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </Field>
-
-      <Field className="md:w-36">
-        <FieldLabel htmlFor="filter-priority">Prioridad</FieldLabel>
-        <Select
-          value={current.priority ?? ALL_VALUE}
-          onValueChange={(value) =>
-            updateParams({ priority: value === ALL_VALUE ? null : value })
-          }
-        >
-          <SelectTrigger id="filter-priority">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={ALL_VALUE}>Todas las prioridades</SelectItem>
-            {TICKET_PRIORITY_FILTER_VALUES.map((p) => (
-              <SelectItem key={p} value={p}>
-                {PRIORITY_LABELS[p]}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </Field>
-
-      <Field className="md:w-44">
-        <FieldLabel htmlFor="filter-assignee">Responsable</FieldLabel>
-        <Select
-          value={current.assignee ?? ALL_VALUE}
-          onValueChange={(value) =>
-            updateParams({ assignee: value === ALL_VALUE ? null : value })
-          }
-        >
-          <SelectTrigger id="filter-assignee">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value={ALL_VALUE}>Todos</SelectItem>
-            <SelectItem value={UNASSIGNED_ASSIGNEE_VALUE}>
-              Sin asignar
-            </SelectItem>
-            {assigneeOptions.map((a) => (
-              <SelectItem key={a} value={a}>
-                {a}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </Field>
-
-      <div className="grid grid-cols-2 gap-3 md:w-56">
-        <Field>
-          <FieldLabel htmlFor="filter-from">Desde</FieldLabel>
-          <Input
-            id="filter-from"
-            type="date"
-            value={current.from ?? ""}
-            max={current.to ?? undefined}
-            onChange={(e) => updateParams({ from: e.target.value || null })}
-          />
+  // la tabla hacia la derecha. Misma función para las dos, sin duplicar el
+  // formulario -- solo cambian las clases responsive.
+  //
+  // `idPrefix` (accesibilidad, paso 12.6) -- encontrado con el foco atrapado
+  // del Sheet de filtros en mobile: como las DOS copias (esta función se
+  // llama una vez para el Sheet y otra para el bloque "hidden md:block" de
+  // desktop) estaban en el DOM a la vez con los MISMOS ids (`filter-building`,
+  // etc. -- la copia de desktop nunca se desmonta, solo queda con
+  // `display:none` en mobile), cada `<label for="filter-building">` de
+  // DENTRO del Sheet resolvía, por `getElementById`, al `<SelectTrigger>`
+  // de la copia de desktop invisible -- no al control real y visible del
+  // Sheet. Tocar la etiqueta "Edificio" en el Sheet no enfocaba nada. Con
+  // un prefijo distinto por copia, cada `<label for>` apunta siempre a SU
+  // PROPIO control.
+  function renderFilterControls(idPrefix: string) {
+    return (
+      <div className="flex flex-col gap-4 md:flex-row md:flex-wrap md:items-end">
+        <Field className="md:w-44">
+          <FieldLabel htmlFor={`${idPrefix}building`}>Edificio</FieldLabel>
+          <Select
+            value={current.building ?? ALL_VALUE}
+            onValueChange={handleBuildingChange}
+          >
+            <SelectTrigger id={`${idPrefix}building`}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={ALL_VALUE}>Todos los edificios</SelectItem>
+              {buildingOptions.map((b) => (
+                <SelectItem key={b.id} value={b.id}>
+                  {b.name}
+                  {!b.active && " (pausado)"}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </Field>
-        <Field>
-          <FieldLabel htmlFor="filter-to">Hasta</FieldLabel>
-          <Input
-            id="filter-to"
-            type="date"
-            value={current.to ?? ""}
-            min={current.from ?? undefined}
-            onChange={(e) => updateParams({ to: e.target.value || null })}
-          />
-        </Field>
-      </div>
 
-      <Field className="md:w-56">
-        <FieldLabel htmlFor="filter-sort">Ordenar por</FieldLabel>
-        <Select
-          value={`${current.sort}-${current.dir}`}
-          onValueChange={(value) => {
-            const option = SORT_OPTIONS.find((o) => o.value === value);
-            if (!option) {
-              return;
+        <Field className="md:w-44">
+          <FieldLabel htmlFor={`${idPrefix}unit`}>Unidad</FieldLabel>
+          <Select
+            value={current.unit ?? ALL_VALUE}
+            onValueChange={(value) =>
+              updateParams({ unit: value === ALL_VALUE ? null : value })
             }
-            updateParams({
-              sort: option.sort === "reportedAt" ? null : option.sort,
-              dir: option.dir === "desc" ? null : option.dir,
-            });
-          }}
-        >
-          <SelectTrigger id="filter-sort">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {SORT_OPTIONS.map((o) => (
-              <SelectItem key={o.value} value={o.value}>
-                {o.label}
+            disabled={!current.building}
+          >
+            <SelectTrigger id={`${idPrefix}unit`}>
+              <SelectValue
+                placeholder={
+                  current.building
+                    ? "Todas las unidades"
+                    : "Elegí un edificio primero"
+                }
+              />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={ALL_VALUE}>Todas las unidades</SelectItem>
+              {unitOptions.map((u) => (
+                <SelectItem key={u.id} value={u.id}>
+                  {formatUnitOptionLabel(u)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+
+        <Field className="md:w-44">
+          <FieldLabel htmlFor={`${idPrefix}category`}>Categoría</FieldLabel>
+          <Select
+            value={current.category ?? ALL_VALUE}
+            onValueChange={(value) =>
+              updateParams({ category: value === ALL_VALUE ? null : value })
+            }
+          >
+            <SelectTrigger id={`${idPrefix}category`}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={ALL_VALUE}>Todas las categorías</SelectItem>
+              {categoryOptions.map((c) => (
+                <SelectItem key={c.id} value={c.id}>
+                  {c.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+
+        <Field className="md:w-36">
+          <FieldLabel htmlFor={`${idPrefix}status`}>Estado</FieldLabel>
+          <Select
+            value={current.status}
+            onValueChange={(value) => updateParams({ status: value })}
+          >
+            <SelectTrigger id={`${idPrefix}status`}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {TICKET_STATUS_FILTER_VALUES.map((value) => (
+                <SelectItem key={value} value={value}>
+                  {STATUS_LABELS[value]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+
+        <Field className="md:w-36">
+          <FieldLabel htmlFor={`${idPrefix}priority`}>Prioridad</FieldLabel>
+          <Select
+            value={current.priority ?? ALL_VALUE}
+            onValueChange={(value) =>
+              updateParams({ priority: value === ALL_VALUE ? null : value })
+            }
+          >
+            <SelectTrigger id={`${idPrefix}priority`}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={ALL_VALUE}>Todas las prioridades</SelectItem>
+              {TICKET_PRIORITY_FILTER_VALUES.map((p) => (
+                <SelectItem key={p} value={p}>
+                  {PRIORITY_LABELS[p]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+
+        <Field className="md:w-44">
+          <FieldLabel htmlFor={`${idPrefix}assignee`}>Responsable</FieldLabel>
+          <Select
+            value={current.assignee ?? ALL_VALUE}
+            onValueChange={(value) =>
+              updateParams({ assignee: value === ALL_VALUE ? null : value })
+            }
+          >
+            <SelectTrigger id={`${idPrefix}assignee`}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value={ALL_VALUE}>Todos</SelectItem>
+              <SelectItem value={UNASSIGNED_ASSIGNEE_VALUE}>
+                Sin asignar
               </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </Field>
+              {assigneeOptions.map((a) => (
+                <SelectItem key={a} value={a}>
+                  {a}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
 
-      {activeFilterCount > 0 && (
-        <Button
-          variant="outline"
-          className="md:self-end"
-          onClick={() => {
-            router.push(pathname, { scroll: false });
-            setSheetOpen(false);
-          }}
-        >
-          <X aria-hidden="true" />
-          Limpiar filtros
+        <div className="grid grid-cols-2 gap-3 md:w-56">
+          <Field>
+            <FieldLabel htmlFor={`${idPrefix}from`}>Desde</FieldLabel>
+            <Input
+              id={`${idPrefix}from`}
+              type="date"
+              value={current.from ?? ""}
+              max={current.to ?? undefined}
+              onChange={(e) => updateParams({ from: e.target.value || null })}
+            />
+          </Field>
+          <Field>
+            <FieldLabel htmlFor={`${idPrefix}to`}>Hasta</FieldLabel>
+            <Input
+              id={`${idPrefix}to`}
+              type="date"
+              value={current.to ?? ""}
+              min={current.from ?? undefined}
+              onChange={(e) => updateParams({ to: e.target.value || null })}
+            />
+          </Field>
+        </div>
+
+        <Field className="md:w-56">
+          <FieldLabel htmlFor={`${idPrefix}sort`}>Ordenar por</FieldLabel>
+          <Select
+            value={`${current.sort}-${current.dir}`}
+            onValueChange={(value) => {
+              const option = SORT_OPTIONS.find((o) => o.value === value);
+              if (!option) {
+                return;
+              }
+              updateParams({
+                sort: option.sort === "reportedAt" ? null : option.sort,
+                dir: option.dir === "desc" ? null : option.dir,
+              });
+            }}
+          >
+            <SelectTrigger id={`${idPrefix}sort`}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {SORT_OPTIONS.map((o) => (
+                <SelectItem key={o.value} value={o.value}>
+                  {o.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+
+        {activeFilterCount > 0 && (
+          <Button
+            variant="outline"
+            className="md:self-end"
+            onClick={() => {
+              router.push(pathname, { scroll: false });
+              setSheetOpen(false);
+            }}
+          >
+            <X aria-hidden="true" />
+            Limpiar filtros
+          </Button>
+        )}
+
+        {/* Paso 6.7 -- siempre visible (a diferencia de "Limpiar filtros"),
+            incluso sin ningún filtro explícito puesto: el default implícito
+            "abiertos" (paso 6.1) también es una selección exportable. */}
+        <Button asChild variant="outline" className="md:self-end">
+          <a href={exportHref} download>
+            <Download aria-hidden="true" />
+            Exportar CSV
+          </a>
         </Button>
-      )}
-
-      {/* Paso 6.7 -- siempre visible (a diferencia de "Limpiar filtros"),
-          incluso sin ningún filtro explícito puesto: el default implícito
-          "abiertos" (paso 6.1) también es una selección exportable. */}
-      <Button asChild variant="outline" className="md:self-end">
-        <a href={exportHref} download>
-          <Download aria-hidden="true" />
-          Exportar CSV
-        </a>
-      </Button>
-    </div>
-  );
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-3">
@@ -476,14 +490,16 @@ export function TicketFiltersBar({
             <SheetHeader>
               <SheetTitle>Filtros</SheetTitle>
             </SheetHeader>
-            <div className="px-4 pb-6">{filterControls}</div>
+            <div className="px-4 pb-6">
+              {renderFilterControls("sheet-filter-")}
+            </div>
           </SheetContent>
         </Sheet>
       </div>
 
-      {/* filterControls ya trae su propio flex-row/flex-wrap en md: (ver
-          arriba) -- este contenedor solo decide si se muestra o no. */}
-      <div className="hidden md:block">{filterControls}</div>
+      {/* renderFilterControls ya trae su propio flex-row/flex-wrap en md:
+          (ver arriba) -- este contenedor solo decide si se muestra o no. */}
+      <div className="hidden md:block">{renderFilterControls("filter-")}</div>
     </div>
   );
 }

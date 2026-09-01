@@ -107,7 +107,11 @@ export function DocumentVisibilityControl({
             ? "Visibilidad: privado. Cambiar a visible para vecinos"
             : "Visibilidad: visible para vecinos. Cambiar a privado"
         }
-        className="group focus-visible:ring-ring/50 inline-flex items-center gap-1 rounded-full outline-none focus-visible:ring-2 disabled:opacity-60"
+        // min-h-6 (24px) sin tocar el alto del <Badge> de adentro (h-5):
+        // agranda el destino táctil al mínimo de WCAG 2.5.8 (paso 12.6)
+        // sin cambiar el diseño visible de la fila -- items-center deja el
+        // badge centrado en esos 24px.
+        className="group focus-visible:ring-ring/50 inline-flex min-h-6 items-center gap-1 rounded-full outline-none focus-visible:ring-2 disabled:opacity-60"
       >
         <Badge
           variant={visibility === "residents" ? "outline" : "secondary"}

@@ -110,7 +110,12 @@
 
   /* Semánticos de estado y prioridad. */
   --urgente: #b42318;
-  --alta: #b54708;
+  /* #ae4408, no #b54708 (~4% más oscuro): con el tinte bg-alta/10 que
+     comparten todos los badges semánticos, sobre --canvas el par
+     text-alta/bg-alta/10 llegaba a 4.32:1, por debajo del 4.5:1 de
+     WCAG 1.4.3 para texto chico (paso 12.6). El resto de la paleta y los
+     otros cuatro semánticos no cambian -- ya pasaban. */
+  --alta: #ae4408;
   --media: #175cd3;
   --baja: #5b6169;
   --resuelto: #067647;
