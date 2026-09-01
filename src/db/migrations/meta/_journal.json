@@ -288,6 +288,13 @@
       "when": 1788271703186,
       "tag": "0040_unique_makkari",
       "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1788284898122,
+      "tag": "0041_enable_pgvector_ticket_embedding",
+      "breakpoints": true
     }
   ]
 }

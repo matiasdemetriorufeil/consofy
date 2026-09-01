@@ -7817,6 +7817,123 @@ diseño real pendiente, NO un descuido:**
   amenaza real (la versión/framework es inferible por otras vías). No se
   agrega "por completitud" -- mismo criterio que el resto de esta auditoría.
 
+## Detección de duplicados por embeddings (paso 14.1)
+
+Primer paso de la Etapa 14. La Etapa 13 (Cloud API de WhatsApp para el
+flujo de salida) queda **pausada a propósito** -- el plan pide no
+arrancarla hasta tener un edificio real en uso, y todavía no hay ninguno.
+La Etapa 14 mejora la detección de reclamos repetidos: hoy la resuelve
+`findSimilarTickets()` (paso 7.1) con `pg_trgm` sobre texto normalizado y
+un umbral de similitud por edificio (`DEFAULT_SIMILARITY_THRESHOLD = 0.2`,
+paso 7.6) -- una heurística de trigramas que capta bien el copy-paste y
+las reformulaciones parecidas, pero no la similitud _semántica_ ("el
+ascensor no anda" vs. "hace tres días que no puedo bajar en el elevador").
+Los embeddings apuntan a esa capa que a los trigramas se les escapa.
+
+Este paso **solo deja el esquema listo** (extensión + columna + índice).
+Calcular los embeddings (llamar a la API), guardarlos y compararlos son
+los pasos 14.2 (integración de la API en el alta) y 14.3 (backfill de los
+reclamos existentes).
+
+### Modelo y dimensión -- decisión del arquitecto, no propia
+
+**Modelo: `gemini-embedding-001`** (Gemini API, free tier). Se investigaron
+dos candidatos y la decisión la tomó el arquitecto:
+
+- `gemini-embedding-001` -- GA/estable, solo texto, free tier
+  (~10 M tokens/min de TPM en el tier gratis; el RPM/RPD exacto se mira en
+  AI Studio del proyecto). Pago: US$0.15 / 1M tokens de entrada.
+- `gemini-embedding-2` -- más nuevo, primer modelo multimodal de la Gemini
+  API, también con free tier, pero **en preview** y con un espacio de
+  embeddings **incompatible** con `001` (cambiar de uno al otro obliga a
+  re-embeddear todo). Descartado: preview = la API/disponibilidad puede
+  cambiar, y lo multimodal no aporta nada al caso de uso (dedup de texto
+  de reclamos).
+
+**Dimensión: 768**, vía el parámetro `output_dimensionality` del modelo.
+`gemini-embedding-001` usa Matryoshka Representation Learning (MRL): la
+salida por defecto es 3072-dim pero se puede truncar a una dimensión menor
+sin colapsar la calidad. Google recomienda explícitamente **768, 1536 o
+3072**, y describe 768 como _"near-peak quality at one-quarter the storage
+cost of 3,072"_. Para "¿este reclamo es un duplicado de uno reciente del
+mismo edificio + categoría + ventana temporal?" -- una tarea que ya se
+resuelve aceptablemente con trigramas a 0.20 -- 768 dimensiones semánticas
+sobran. Con `001` (a diferencia de `gemini-embedding-2`) hay que
+**normalizar el vector a norma unitaria del lado de la aplicación** cuando
+se usa una dimensión distinta de 3072 -- eso lo hará el paso 14.2 antes de
+guardar; el índice de coseno de acá asume vectores normalizados.
+
+### pgvector, la columna y el índice
+
+- **Extensión `vector` (pgvector) 0.8.2**, habilitada en el esquema
+  `extensions` -- mismo esquema que `pgcrypto`/`uuid-ossp`/`pg_trgm`/
+  `pg_stat_statements`, y mismo criterio que la migración 0022 de
+  `pg_trgm` (Supabase no instala extensiones en `public`). El
+  `search_path` de la conexión de migraciones ya incluye `extensions`
+  (`"$user", public, extensions`, confirmado con `SHOW search_path`), así
+  que el tipo `vector` resuelve sin calificar.
+- **Columna `tickets.embedding vector(768)`, NULLABLE, sin default.** Los
+  reclamos que ya existen quedan con `NULL` hasta que el backfill del paso
+  14.3 los procese; un reclamo nuevo recibe su embedding recién después de
+  que el paso 14.2 llame a la API -- **fuera de la transacción de alta**,
+  igual que `detectAndFlagSimilarTickets()` (paso 7.2): un problema con la
+  API de embeddings nunca puede bloquear ni demorar que el reclamo se
+  guarde.
+- **Índice `tickets_embedding_hnsw_idx`, HNSW, operador de coseno**
+  (`extensions.vector_cosine_ops`, calificado con el esquema igual que la
+  0022 hace con `gin_trgm_ops`). Coseno y no L2/producto interno porque
+  los embeddings van normalizados a norma unitaria. Parámetros de
+  construcción (`m` = 16, `ef_construction` = 64) en el default de
+  pgvector -- alcanza para el volumen de reclamos de esta app y se pueden
+  reconstruir con otros valores sin tocar el esquema.
+- **La columna NO se declara en `src/db/schema/tickets.ts`.**
+  `drizzle-kit generate` no modela extensiones ni índices HNSW con opclass
+  calificada, así que el DDL va escrito a mano dentro del archivo de
+  migración custom (`0041_enable_pgvector_ticket_embedding.sql`), mismo
+  patrón exacto que los índices GIN de trigram de la 0022 y que los
+  triggers de base. Este proyecto usa `generate` + `migrate`, nunca
+  `push`/`pull`, así que un objeto ausente del schema DSL es simplemente
+  invisible para `generate` -- no se intenta borrar en una migración
+  futura.
+
+### Camino de upgrade a 1536 (sin `halfvec`)
+
+pgvector impone un tope de **2000 dimensiones** a los índices HNSW/IVFFlat
+sobre el tipo `vector`. 768 y 1536 entran; 3072 **no** -- 3072 exigiría el
+tipo `halfvec` (media precisión, tope de 4000 dims para índices) como tipo
+de columna o vía un índice de expresión, con su complejidad. Quedarse en
+768 deja el upgrade natural a 1536 **dentro del rango indexable como
+`vector`**, sin `halfvec`:
+
+1. Nueva migración custom: `ALTER TABLE tickets ALTER COLUMN embedding TYPE vector(1536)`
+   (o `DROP COLUMN` + `ADD COLUMN`, más simple si ya no hay nada que
+   preservar), y recrear `tickets_embedding_hnsw_idx`.
+2. Re-embeddear todos los reclamos con `output_dimensionality: 1536`
+   (mismo flujo del backfill del paso 14.3, con otra dimensión).
+
+Sigue siendo el tipo `vector`, sin cambio de familia de tipo, sin
+`halfvec`. Solo se justificaría subir si hay evidencia medida de que 768
+se pierde duplicados reales -- no por las dudas. 3072 se evita a
+propósito.
+
+### Aplicación
+
+Migración `0041_enable_pgvector_ticket_embedding.sql` generada con
+`drizzle-kit generate --custom` y aplicada contra **desarrollo** con
+`drizzle-kit migrate`. **No se aplica a producción** -- no existe todavía
+(Etapa 15). Verificado contra la base real después de aplicar: `vector`
+0.8.2 instalada en `extensions`; `tickets.embedding` con tipo
+`vector(768)` y nullable; `tickets_embedding_hnsw_idx` con método `hnsw` y
+opclass `vector_cosine_ops`.
+
+**Fuentes de la investigación de modelo/dimensión:**
+[Embeddings -- Gemini API (docs de Google)](https://ai.google.dev/gemini-api/docs/embeddings),
+[Gemini Embedding GA -- Google Developers Blog](https://developers.googleblog.com/gemini-embedding-available-gemini-api/),
+[Gemini Embedding 2 (buildfastwithai)](https://www.buildfastwithai.com/blogs/gemini-embedding-2-multimodal-model);
+tope de dimensiones de pgvector:
+[pgvector issue #461](https://github.com/pgvector/pgvector/issues/461),
+[Supabase -- HNSW indexes](https://supabase.com/docs/guides/ai/vector-indexes/hnsw-indexes).
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
