@@ -281,6 +281,13 @@
       "when": 1788215396202,
       "tag": "0039_outstanding_harry_osborn",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1788271703186,
+      "tag": "0040_unique_makkari",
+      "breakpoints": true
     }
   ]
 }

@@ -79,6 +79,18 @@ export const documents = pgTable(
       t.category,
       t.visibility,
     ),
+    // Paso 12.4 (optimización) -- el explorador (paso 10.2,
+    // `getDocumentList`) en la vista "Todos los edificios" (sin edificio
+    // en el selector del header) filtra solo por `organization_id` +
+    // `deleted_at IS NULL` y ordena por `created_at DESC`. Sin edificio, el
+    // índice de arriba no aplica y la consulta es un Seq Scan + sort --
+    // confirmado con EXPLAIN ANALYZE a volumen. Con un edificio elegido
+    // (el caso más común) sigue usando el índice de arriba. Misma forma
+    // que `notifications_organization_id_created_at_idx`.
+    index("documents_organization_id_created_at_idx").on(
+      t.organizationId,
+      t.createdAt,
+    ),
     denyAnonAuthenticated(),
   ],
 ).enableRLS();

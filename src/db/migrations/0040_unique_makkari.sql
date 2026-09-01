@@ -1,0 +1,3 @@
+CREATE INDEX "documents_organization_id_created_at_idx" ON "documents" USING btree ("organization_id","created_at");--> statement-breakpoint
+CREATE INDEX "ticket_events_status_changed_ticket_id_created_at_idx" ON "ticket_events" USING btree ("ticket_id","created_at") WHERE "ticket_events"."type" = 'status_changed';--> statement-breakpoint
+CREATE INDEX "notifications_organization_id_created_at_idx" ON "notifications" USING btree ("organization_id","created_at");

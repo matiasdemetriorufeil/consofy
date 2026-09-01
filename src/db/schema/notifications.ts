@@ -95,6 +95,20 @@ export const notifications = pgTable(
     index("notifications_organization_id_unread_idx")
       .on(t.organizationId)
       .where(sql`${t.readAt} is null`),
+    // Paso 12.4 (optimización) -- el listado del centro de notificaciones
+    // (paso 9.3, `getRecentNotifications`) trae los 21 registros más
+    // recientes de la organización (leídos y no leídos) ordenados por
+    // `created_at DESC` en cada apertura de la campana. El índice parcial
+    // de arriba solo cubre las NO leídas (para el contador); sin este
+    // segundo índice el listado completo es un Seq Scan + sort --
+    // confirmado con EXPLAIN ANALYZE a volumen (6k filas escaneadas). Es
+    // org-level (nunca hay filtro por edificio acá), así que no hay ningún
+    // otro camino de acceso posible. Misma forma que
+    // `announcements_building_id_created_at_idx`.
+    index("notifications_organization_id_created_at_idx").on(
+      t.organizationId,
+      t.createdAt,
+    ),
     denyAnonAuthenticated(),
   ],
 ).enableRLS();

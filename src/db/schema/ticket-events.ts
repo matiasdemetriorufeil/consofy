@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   foreignKey,
   index,
@@ -136,6 +137,21 @@ export const ticketEvents = pgTable(
     // igual que ticket_attachments, no es una de las 4 consultas de
     // bandeja del punto 6 pero es la razón de ser de esta tabla.
     index("ticket_events_ticket_id_created_at_idx").on(t.ticketId, t.createdAt),
+    // Paso 12.4 (optimización) -- `getAttentionTickets` (dashboard, paso
+    // 3.5) computa `max(created_at)` por ticket sobre los eventos
+    // `status_changed` de TODA la organización en cada carga del panel de
+    // inicio. Sin este índice ese subquery es un Seq Scan de toda la tabla
+    // filtrando `type = 'status_changed'` -- confirmado con EXPLAIN ANALYZE
+    // a volumen (~22k filas descartadas por el filtro). Parcial sobre ese
+    // único `type`, mismo criterio que
+    // `ticket_similarity_candidates_..._pending_idx` (WHERE status =
+    // 'pending'): el índice queda chico y sirve como Index Only Scan
+    // pre-agrupado por `ticket_id`. Es el ÚNICO consumidor de este patrón
+    // de acceso (todo el resto lee la línea de tiempo de UN ticket, que ya
+    // cubre el índice de arriba).
+    index("ticket_events_status_changed_ticket_id_created_at_idx")
+      .on(t.ticketId, t.createdAt)
+      .where(sql`${t.type} = 'status_changed'`),
     denyAnonAuthenticated(),
   ],
 ).enableRLS();
