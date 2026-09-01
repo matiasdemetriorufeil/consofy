@@ -47,4 +47,22 @@ describe("normalizeTicketText", () => {
       "el ascensor de la torre norte se quedo trabado entre el 3er y 4to piso esta manana",
     );
   });
+
+  it("es idempotente: normalizar un texto ya normalizado no lo cambia", () => {
+    // El SQL equivalente (normalizedColumnSql, find-similar-tickets.ts) se
+    // aplica UNA vez sobre cada columna cruda; esta función se aplica sobre
+    // el texto de referencia. Si no fuera idempotente, un texto que YA pasó
+    // por acá (ej. reusado como entrada de otra comparación) podría salir
+    // distinto de su versión cruda normalizada -- y las dos mitades
+    // dejarían de comparar lo mismo.
+    const once = normalizeTicketText(
+      "  ¡El ASCENSOR   no\tfrena!  Otra vez ñoño.  ",
+    );
+    expect(normalizeTicketText(once)).toBe(once);
+  });
+
+  it("un string vacío o compuesto solo por espacios se normaliza a string vacío", () => {
+    expect(normalizeTicketText("")).toBe("");
+    expect(normalizeTicketText("   \t\n  ")).toBe("");
+  });
 });

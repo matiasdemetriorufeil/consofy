@@ -72,6 +72,16 @@ describe("buildWhatsAppUrl", () => {
     expect(() => buildWhatsAppUrl("", "hola")).toThrow(/vacío/);
   });
 
+  it("un mensaje vacío arma la URL igual, con text= sin valor, sin tirar", () => {
+    // encodeURIComponent("") === "" -- no es un caso que
+    // formatTicketMessage() produzca (siempre arma al menos los campos
+    // fijos), pero un caller que pase un string vacío no debería recibir
+    // una excepción: la URL resultante es válida, solo con el parámetro
+    // text vacío.
+    const url = buildWhatsAppUrl("+5493511234567", "");
+    expect(url).toBe("https://api.whatsapp.com/send?phone=5493511234567&text=");
+  });
+
   it("codifica saltos de línea del mensaje como %0A", () => {
     const url = buildWhatsAppUrl("+5493511234567", "línea 1\nlínea 2");
     expect(url).toContain("l%C3%ADnea%201%0Al%C3%ADnea%202");

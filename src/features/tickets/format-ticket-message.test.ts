@@ -198,4 +198,35 @@ describe("formatTicketMessage", () => {
     );
     expect(message).toContain("🔖 Código: TC-2026-0025");
   });
+
+  it("recorta los espacios al principio y al final de la descripción", () => {
+    // truncateDescriptionToFit hace `.trim()` de la descripción SIEMPRE
+    // (no solo al truncar) -- una descripción que ya entra en el
+    // presupuesto igual sale sin espacios colgando. Sin este test, alguien
+    // podría "optimizar" ese trim pensando que solo importa en la rama de
+    // truncado.
+    const message = formatTicketMessage(
+      baseInput({ description: "   Pierde agua en la cocina.   " }),
+    );
+    const problemLine = message
+      .split("\n")
+      .find((line) => line.startsWith("📝 Problema:"));
+    expect(problemLine).toBe("📝 Problema: Pierde agua en la cocina.");
+  });
+
+  it("al truncar fuerte, la línea de Adjuntos queda intacta (solo cede la descripción)", () => {
+    // Complementa "trunca respetando un límite configurado más chico": ese
+    // test verifica que Edificio y Código sobreviven, pero NO la línea
+    // `📷 Adjuntos` -- y esa es la que lleva la credencial del link de la
+    // galería (attachmentsToken). Si el truncado alguna vez comiera parte
+    // de un campo fijo, este link quedaría cortado y llevaría a la nada.
+    const message = formatTicketMessage(
+      baseInput({ description: "Problema muy largo. ".repeat(300) }),
+      { maxEncodedLength: 420 },
+    );
+    expect(message).toContain(
+      "📷 Adjuntos: https://consofy.app/s/a1111111-1111-1111-1111-111111111111",
+    );
+    expect(message).toContain("…");
+  });
 });
