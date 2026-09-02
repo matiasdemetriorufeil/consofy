@@ -161,6 +161,98 @@
   --sidebar-ring: oklch(0.708 0 0);
 }
 
+/* -----------------------------------------------------------------------
+   Landing pública (Etapa 16, paso 16.2). Tokens PROPIOS de la landing, con
+   prefijo `--landing-*` -- ninguno colisiona con la paleta del panel
+   (`--ink`/`--ink-muted`/`--surface`/`--canvas`/`--primary`/`--alta`/
+   `--media`/`--border`/`--radius`/`--text-*`/... arriba). Se declaran SOLO
+   dentro de `.landing-theme`: ninguna otra ruta lleva esa clase, así que
+   `/panel` y `/r/[token]` no heredan absolutamente nada de esto (es un
+   selector de clase, sin reglas de `:root`, de elemento ni de `*`).
+
+   El azul es el color de marca de la LANDING únicamente. El panel sigue
+   con su teal `--primary` (#14484f) intacto.
+
+   Dirección (16.2): profesional y confiable. Hero con tinte azul muy
+   claro; texto principal en azul oscuro (no negro puro); CTA en azul
+   sólido con texto blanco; fuera del hero, blanco / gris muy claro con el
+   azul como acento, nunca como fondo general.
+
+   Contrastes verificados (WCAG 1.4.3, 4.5:1 mínimo para texto normal --
+   mismo criterio del paso 12.6). Ver CLAUDE.md > Landing page pública,
+   "Paleta y tipografía (paso 16.2)" para la tabla completa. Resumen:
+     --landing-text sobre --landing-bg .......... 14.1:1
+     --landing-text sobre --landing-hero-bg ..... 12.5:1
+     --landing-text sobre --landing-bg-subtle ... 13.2:1
+     --landing-text-muted sobre --landing-bg .... 7.4:1
+     --landing-text-muted sobre --landing-hero-bg 6.5:1
+     --landing-accent-fg sobre --landing-accent . 5.2:1  (texto del CTA)
+     --landing-accent-strong sobre --landing-bg . 6.7:1  (links en texto)
+     --landing-accent-strong sobre hero-bg ...... 5.9:1
+   Nota: --landing-accent (#2563eb) como TEXTO sobre el hero da 4.56:1
+   (pasa, pero justo) -- para texto/links sobre el hero usar
+   --landing-accent-strong; --landing-accent se reserva para RELLENOS
+   (fondo del CTA, subrayados decorativos, íconos).
+
+   Fuentes: se reutilizan las que ya carga el layout raíz (Archivo para
+   títulos, Inter para cuerpo) -- NO se suma ninguna fuente nueva. Los
+   pesos declarados (700/600/400) existen en las familias cargadas
+   (Archivo 500/600/700, Inter 400/500/600): 700 solo va con la de
+   títulos; el cuerpo en negrita es 600.
+   ----------------------------------------------------------------------- */
+.landing-theme {
+  /* Superficies y bordes */
+  --landing-bg: #ffffff;
+  --landing-bg-subtle: #f5f7fa;
+  --landing-surface: #ffffff;
+  --landing-border: #e3e7ee;
+  --landing-hero-bg: #eaf1ff;
+
+  /* Texto */
+  --landing-text: #132a53;
+  --landing-text-muted: #495671;
+
+  /* Azul de marca */
+  --landing-accent: #2563eb;
+  --landing-accent-strong: #1d4ed8;
+  --landing-accent-fg: #ffffff;
+  --landing-ring: #2563eb;
+
+  /* Tipografía -- familias reutilizadas del layout raíz */
+  --landing-font-heading: var(--font-display);
+  --landing-font-body: var(--font-body);
+
+  /* Escala propia de la landing: títulos más grandes que la del panel
+     (que topa en --text-4xl = 2.25rem, pensada para densidad). Fluida con
+     clamp(): mobile -> desktop. */
+  --landing-text-hero: clamp(2.25rem, 1.55rem + 3.2vw, 3.5rem); /* 36 -> 56 */
+  --landing-text-h2: clamp(1.75rem, 1.4rem + 1.4vw, 2.25rem); /* 28 -> 36 */
+  --landing-text-h3: 1.25rem; /* 20 */
+  --landing-text-lead: clamp(1.0625rem, 1rem + 0.35vw, 1.25rem); /* 17 -> 20 */
+  --landing-text-body: 1rem; /* 16 (el panel usa 15) */
+  --landing-text-small: 0.875rem; /* 14 */
+
+  --landing-leading-tight: 1.1;
+  --landing-leading-snug: 1.25;
+  --landing-leading-normal: 1.6;
+
+  --landing-tracking-tight: -0.02em;
+
+  --landing-weight-heading: 700;
+  --landing-weight-strong: 600;
+  --landing-weight-regular: 400;
+
+  /* Base del contenedor: la landing pinta su propio fondo/texto/fuente y
+     NO hereda `bg-background`/`text-foreground`/`font-sans` del panel.
+     Regla SIN `@layer` -> gana sobre las de `@layer base` (body/html) sin
+     depender de especificidad. */
+  background-color: var(--landing-bg);
+  color: var(--landing-text);
+  font-family: var(--landing-font-body);
+  font-size: var(--landing-text-body);
+  line-height: var(--landing-leading-normal);
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

@@ -8385,6 +8385,9 @@ paso aparte: al ser un `mailto:` simple, se resuelve dentro del 16.3):
   contenido; no toca código (salvo esta misma sección).
 - **16.2 -- Paleta y tipografía.** Dirección ya elegida, fuera del alcance
   del propio paso: profesional y confiable, con azul como color de marca.
+  Tokens `--landing-*` definidos en `globals.css` bajo `.landing-theme`,
+  acotados solo a la landing -- ver "Paleta y tipografía (paso 16.2)" más
+  abajo.
 - **16.3 -- Construcción de la landing como ruta nueva.** Reemplazo de
   `src/app/page.tsx` por la landing real, con la paleta del 16.2. Incluye
   cablear los dos CTA (el `mailto:` de "Solicitá una prueba gratuita" y el
@@ -8491,6 +8494,100 @@ promesa fuerte (la app está desplegada pero con bloqueantes conocidos --
 recuperación de contraseña, alta self-service); sin envío masivo
 automático de avisos (hoy es un link manual por destinatario, la Cloud API
 es la Etapa 13); sin app móvil (es web); sin integraciones contables.
+
+### Paleta y tipografía (paso 16.2)
+
+Tokens PROPIOS de la landing, prefijo `--landing-*`, definidos en
+`src/app/globals.css` **dentro de `.landing-theme`** (no en `:root`).
+Ninguno colisiona con la paleta del panel (`--ink` / `--canvas` /
+`--surface` / `--primary` / `--alta` / `--media` / `--border` / `--radius`
+/ `--text-*` / ...). El azul es color de marca de la LANDING; el panel
+sigue con su teal `--primary` (#14484f) intacto.
+
+**Acotamiento -- clase contenedora, no un layout nuevo.** Todo lo que la
+landing pinte va dentro de un `<div className="landing-theme">`. El bloque
+CSS es un único selector de clase, sin reglas de `:root`, de elemento ni de
+`*` -- las variables `--landing-*` no existen fuera de ese subárbol.
+`.landing-theme` además setea `background-color` / `color` / `font-family`
+/ `font-size` / `line-height` propios (regla sin `@layer`, gana sobre
+`@layer base` -> `body`/`html` sin depender de especificidad), así que la
+landing no hereda `bg-background` / `text-foreground` / `font-sans` del
+panel. El 16.3 puede mover este bloque a un `landing.css` importado solo
+por el layout de la landing si se quiere sacar esos bytes del bundle del
+panel -- el mecanismo de acotamiento no cambia.
+
+**Verificado de verdad** (Playwright, dev server, `getComputedStyle`):
+`/`, `/login`, `/panel` y `/r/[token]` -> `body` sigue en
+`rgb(243,245,244)` (`--canvas`) y `rgb(22,24,29)` (`--ink`), 0 elementos
+con `.landing-theme`, y `--landing-accent` **no resuelve** (queda vacío) en
+ninguna de esas rutas. En `/dev/landing-tokens`, el `.landing-theme`
+resuelve `#ffffff` / `#132a53` / `--landing-accent = #2563eb`, y el `body`
+raíz de esa misma página sigue en canvas/ink. El formulario público
+(`/r/[token]`) se ve idéntico: botón teal, links teal, cero azul de marca.
+
+**Colores** (modo claro; la app no tiene modo oscuro):
+
+| Token                     | Valor     | Uso                                        |
+| ------------------------- | --------- | ------------------------------------------ |
+| `--landing-bg`            | `#ffffff` | Fondo de la página fuera del hero          |
+| `--landing-bg-subtle`     | `#f5f7fa` | Bandas alternadas (gris muy claro, frío)   |
+| `--landing-surface`       | `#ffffff` | Tarjetas                                   |
+| `--landing-border`        | `#e3e7ee` | Hairlines (decorativo, no texto)           |
+| `--landing-hero-bg`       | `#eaf1ff` | Tinte azul muy claro, SOLO el hero         |
+| `--landing-text`          | `#132a53` | Texto principal (azul oscuro, no negro)    |
+| `--landing-text-muted`    | `#495671` | Texto secundario (azul-gris)               |
+| `--landing-accent`        | `#2563eb` | RELLENO: fondo del CTA, subrayados, íconos |
+| `--landing-accent-strong` | `#1d4ed8` | TEXTO: links inline, hover del CTA         |
+| `--landing-accent-fg`     | `#ffffff` | Texto/íconos sobre `--landing-accent`      |
+| `--landing-ring`          | `#2563eb` | Anillo de foco (16.5 lo audita)            |
+
+**Contrastes medidos** (WCAG 1.4.3, mínimo 4.5:1 para texto normal --
+mismo criterio del paso 12.6). Todos pasan:
+
+| Par                                                            | Ratio  |
+| -------------------------------------------------------------- | ------ |
+| `--landing-text` sobre `--landing-bg`                          | 14.1:1 |
+| `--landing-text` sobre `--landing-hero-bg`                     | 12.5:1 |
+| `--landing-text` sobre `--landing-bg-subtle`                   | 13.2:1 |
+| `--landing-text-muted` sobre `--landing-bg`                    | 7.4:1  |
+| `--landing-text-muted` sobre `--landing-hero-bg`               | 6.5:1  |
+| `--landing-text-muted` sobre `--landing-bg-subtle`             | 6.9:1  |
+| `--landing-accent-fg` sobre `--landing-accent` (texto del CTA) | 5.2:1  |
+| `--landing-accent-strong` sobre `--landing-bg` (links)         | 6.7:1  |
+| `--landing-accent-strong` sobre `--landing-hero-bg`            | 5.9:1  |
+
+Cuidado documentado: `--landing-accent` (#2563eb) **como texto** sobre el
+hero da 4.56:1 -- pasa, pero justo. Para texto/links sobre el hero se usa
+`--landing-accent-strong`; `--landing-accent` se reserva para rellenos.
+
+**Tipografía -- se reutilizan las fuentes ya cargadas, NO se suma ninguna.**
+Archivo (`--font-display`) para títulos, Inter (`--font-body`) para cuerpo
+-- las mismas del layout raíz. Escala PROPIA, más grande que la del panel
+(que topa en `--text-4xl` = 2.25rem, pensada para densidad de tablas):
+
+| Token                  | Valor                                      | px (mobile→desktop)  |
+| ---------------------- | ------------------------------------------ | -------------------- |
+| `--landing-text-hero`  | `clamp(2.25rem, 1.55rem + 3.2vw, 3.5rem)`  | 36 → 56              |
+| `--landing-text-h2`    | `clamp(1.75rem, 1.4rem + 1.4vw, 2.25rem)`  | 28 → 36              |
+| `--landing-text-h3`    | `1.25rem`                                  | 20                   |
+| `--landing-text-lead`  | `clamp(1.0625rem, 1rem + 0.35vw, 1.25rem)` | 17 → 20              |
+| `--landing-text-body`  | `1rem`                                     | 16 (el panel usa 15) |
+| `--landing-text-small` | `0.875rem`                                 | 14                   |
+
+Más `--landing-leading-{tight:1.1, snug:1.25, normal:1.6}`,
+`--landing-tracking-tight: -0.02em`, y
+`--landing-weight-{heading:700, strong:600, regular:400}` (700 solo con
+Archivo, que la tiene cargada; el cuerpo en negrita es 600, que Inter sí
+tiene -- nada de faux-bold).
+
+**Prueba visual:** `/dev/landing-tokens` (ruta de dev, se elimina con
+`/dev/styleguide` antes de producción; `/dev/*` ya bloqueado en prod).
+Muestra un hero de mentira (tinte azul, headline navy en Archivo, CTA azul
+sólido con texto blanco, "Ingresar" como link en azul fuerte), los 10
+swatches, las 9 filas de contraste con su ratio, y la escala tipográfica
+completa. A 1280px y a 375px: sin desbordes, la escala fluida baja de 56 a
+36 en el headline. Fuera del hero todo es blanco/gris con el azul solo
+como acento.
 
 ## Reglas de seguridad (no negociables)
 
