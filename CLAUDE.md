@@ -8172,6 +8172,97 @@ la fila en `ticket_similarity_candidates` (`pending`, `similarity`
 en el payload. La capa semántica cazó un duplicado real que a los
 trigramas se les escapaba.
 
+### Pantalla de evaluación para calibrar el umbral (paso 14.5)
+
+Cierra la Etapa 14. Pantalla de **solo lectura** sobre el histórico de
+sugerencias de duplicado ya resueltas, para poder ajustar con datos reales
+los dos umbrales provisorios del 14.4
+(`DEFAULT_COSINE_SIMILARITY_THRESHOLD`, `COMBINED_SIMILARITY_THRESHOLD`) en
+vez de a ojo. No toca el flujo de aceptar/rechazar del 7.3.
+
+**Inventario previo (verificado, no asumido).**
+
+- `ticket_similarity_candidates` (paso 7.2): columnas `ticket_id` (el
+  reclamo nuevo que disparó la detección), `candidate_ticket_id` (el
+  viejo), `similarity` (`real`), `status`
+  (`ticket_similarity_status`: `pending` | `grouped` | `discarded`),
+  `created_at` / `updated_at` / `deleted_at`. **La columna `similarity`
+  guarda UN solo número**: desde el 14.4 es el `combinedScore`; en filas
+  anteriores era el de trigram.
+- **Los tres scores NO están juntos.** `trigramSimilarity` y
+  `cosineSimilarity` viven SOLO en el `payload` (jsonb) del evento
+  `similar_ticket_detected`, y solo desde el 14.4. La pantalla los trae con
+  un `LEFT JOIN` a ese evento (`ticket_id` + `payload->>'candidateTicketId'`
+  = `candidate_ticket_id`); un candidato anterior al 14.4 sale con `null`
+  en los dos -- lo que el enunciado ya anticipaba.
+- Flujo del 7.3: `resolveSimilarityCandidateAction` (`tickets/actions.ts`)
+  hace un compare-and-swap de `status` (`pending` -> `grouped`/`discarded`)
+  y escribe un evento `similar_ticket_grouped` / `similar_ticket_discarded`
+  en CADA reclamo del par. **Nada pone `deleted_at` en esta tabla** (solo
+  la limpieza de datos de prueba lo hizo) -- en producción una fila
+  resuelta queda con `deleted_at IS NULL` para siempre.
+- **Fecha de la decisión = `updated_at`.** El trigger `set_updated_at` lo
+  mueve al cambiar `status`, y como nada más actualiza una fila ya
+  resuelta, ese timestamp ES la fecha en que se agrupó/descartó. No hace
+  falta unir con el evento de resolución para tenerla.
+
+**Ubicación: `/panel/settings/duplicate-detection`.** El nav ya tiene
+"Configuración" (`/panel/settings`), que hasta ahora era un placeholder
+vacío -- pasa a ser un índice con una fila (esta pantalla; se agregarán
+más cuando existan). Se descartó colgarla del layout de
+`/panel/buildings/[id]` al lado del `SimilaritySettingsCard` del 7.6: ese
+card es config **por edificio**, y lo que se calibra acá es un umbral
+**global** (`COMBINED_SIMILARITY_THRESHOLD`) -- mirarlo partido por
+edificio fragmentaría justo el dato que se quiere ver entero. Ruta en
+inglés como el resto (`/panel/tickets/export`, etc.); protegida por el
+`requireUser()` del layout de `/panel` + el propio de la página, todo
+filtrado por `organization_id`.
+
+**Cómo se ve.**
+
+- Encabezado + una línea que explica para qué sirve ("mirá si los scores
+  más bajos casi siempre se descartan para ajustar el umbral").
+- **Card de resumen** (`SimilarityEvaluationSummaryCard`, Server Component):
+  conteo de decisiones / agrupadas / descartadas; score combinado promedio
+  de cada grupo (solo si ese grupo tiene >= 2 filas); y una tablita "score
+  combinado -> agrupadas / descartadas" en franjas de 0.1 (solo si hay >= 6
+  decisiones en total, y recortando las franjas vacías de los extremos).
+  Con poco volumen, en vez de la tablita muestra una línea aclarando que
+  todavía es pronto para conclusiones. Sin gráficos.
+- **Lista escaneable** (`SimilarityEvaluationList`, Server Component, un
+  `<ul>` con filas divididas, mismo patrón que la vista de próximos
+  vencimientos del 9.2): por fila, el par de reclamos (código mono + título
+  corto, unidos por una flecha "posible duplicado de"), la línea
+  `edificio · categoría · resuelto hace N días` (`<RelativeDate>`), un
+  badge de resultado (**Agrupado** con color primario / **Descartado**
+  en `outline`) y los tres scores como chips (`trigram` · `coseno` ·
+  **`combinado`** resaltado; `—` cuando el crudo es `null`). Orden por
+  defecto: la decisión más reciente primero (`order by updated_at desc`).
+- Sin decisiones resueltas todavía: un `EmptyState` explicando que la
+  pantalla se va a poblar a medida que se agrupen/descarten posibles
+  duplicados desde el detalle de un reclamo.
+
+**Módulos** (todos bajo `src/features/tickets/`):
+`similarity-evaluation.ts` (server-only, la consulta -- SQL crudo con
+`db.execute` por los dos self-joins sobre `tickets` + la extracción de
+JSON, mismo criterio que `detect-similar-tickets-on-create.ts`);
+`similarity-evaluation-summary.ts` (**puro**, sin `server-only` --
+`summarizeResolvedCandidates`, testeado); los dos componentes en
+`components/`. Ningún cambio de schema, ninguna migración, ninguna Server
+Action (es solo lectura).
+
+**Verificado con datos sembrados** (9 candidatos resueltos realistas
+-- 5 agrupados, 4 descartados, dos de ellos "estilo pre-14.4" sin scores
+crudos --, distribuidos en el rango de score a propósito): la pantalla,
+cargada con una sesión real de admin descartable, mostró el resumen
+correcto (promedios 84% agrupadas / 58% descartadas) y la tablita de
+franjas dejó ver el patrón de una: **todo lo < 0.70 se descartó (4/4),
+todo lo >= 0.70 se agrupó (5/5)** -- exactamente el tipo de lectura para la
+que existe la pantalla (sugiere subir `COMBINED_SIMILARITY_THRESHOLD` de
+0.5 hacia ~0.68-0.70). Los datos de prueba (18 reclamos sintéticos + sus
+candidatos y eventos) se borraron físicamente al terminar; la cuenta de
+admin descartable, también.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
