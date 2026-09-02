@@ -8365,6 +8365,133 @@ falta nada; si se quiere la detección semántica, cargar `GEMINI_API_KEY`
 en Vercel -- mismo pendiente manual, fuera del repo, que `RESEND_API_KEY`
 y `CRON_SECRET`.
 
+## Landing page pública (Etapa 16)
+
+Etapa nueva, no estaba en el plan original. Hoy la ruta `/`
+(`src/app/page.tsx`) es un placeholder honesto -- solo el nombre "Consofy"
+y una línea de descripción, con un comentario que dice "se reemplaza por la
+landing real más adelante". La Etapa 16 construye esa landing: una página
+pública que explica qué es el producto, el problema que resuelve, cómo
+funciona, para quién es, y un llamado a la acción. Superficie pública sin
+login, como `/r/[token]` -- no toca el panel ni el formulario de reclamos.
+
+Cinco pasos (eran seis -- el 16.5 "forma de contacto" se eliminó como
+paso aparte: al ser un `mailto:` simple, se resuelve dentro del 16.3):
+
+- **16.1 -- Contenido y estructura de la landing.** Inventario de la ruta
+  `/` y copy final de las siete secciones (abajo), en español rioplatense,
+  tono profesional y confiable, basado solo en lo que este archivo ya
+  documenta del producto real -- sin inventar funcionalidad. Solo
+  contenido; no toca código (salvo esta misma sección).
+- **16.2 -- Paleta y tipografía.** Dirección ya elegida, fuera del alcance
+  del propio paso: profesional y confiable, con azul como color de marca.
+- **16.3 -- Construcción de la landing como ruta nueva.** Reemplazo de
+  `src/app/page.tsx` por la landing real, con la paleta del 16.2. Incluye
+  cablear los dos CTA (el `mailto:` de "Solicitá una prueba gratuita" y el
+  "Ingresar" a `/login`) -- por eso ya no hay un paso de contacto aparte.
+- **16.4 -- SEO básico.** `metadata` propia de `/` (title, description,
+  Open Graph), headings semánticos, `robots`/`sitemap` si corresponde.
+- **16.5 -- Accesibilidad y mobile de la landing.** Auditoría a 375px,
+  navegación por teclado, contraste y foco -- mismo criterio que el paso
+  12.6 aplicó al resto de la app.
+
+### Contenido cerrado (paso 16.1)
+
+Decisiones tomadas (arquitecto + persona): CTA principal y de cierre
+**"Solicitá una prueba gratuita"** ->
+`mailto:matiasdemetriorufeil@gmail.com?subject=Quiero%20probar%20Consofy`;
+CTA secundario **"Ingresar"** -> `/login` (ya existía); sin mención de
+precio más allá de la palabra "prueba" (implica que después hay algo pago,
+sin comprometer un número); sin restricción geográfica en el copy; footer
+con wordmark + tagline + "Ingresar" + el mismo `mailto:` + año, sin links a
+Términos/Privacidad (no existen todavía, no se inventan).
+
+Siete secciones, de arriba abajo. Copy final (voseo rioplatense, sentence
+case, sin signos de admiración -- CLAUDE.md > Voz y escritura). Todo sale
+de funcionalidad real documentada en este archivo.
+
+**1. Hero**
+
+- Headline: "Los reclamos de tu edificio, en orden y en un solo lugar."
+- Subheadline: "Consofy le da a cada edificio un link para que los vecinos
+  carguen sus reclamos, y a vos un panel donde ves todo, cambiás estados y
+  no se te pierde nada."
+- CTA principal: **Solicitá una prueba gratuita** ->
+  `mailto:matiasdemetriorufeil@gmail.com?subject=Quiero%20probar%20Consofy`
+- CTA secundario: **Ingresar** -> `/login`
+
+**2. El problema**
+
+- Título: "Administrar un consorcio no debería vivir en un chat de
+  WhatsApp."
+- "Los reclamos llegan mezclados entre mensajes personales, audios y
+  reenvíos. No hay forma de ver cuáles siguen abiertos."
+- "La información importante del edificio queda en una planilla que
+  actualiza una sola persona, cuando se acuerda."
+- "El vecino escribe, nadie le confirma nada, y no sabe si su reclamo
+  llegó a algún lado. Los reclamos se pierden y la bronca queda."
+
+**3. Cómo funciona** (cuatro pasos)
+
+1. **Un link por edificio.** "Compartís el link del edificio o pegás su QR
+   en la entrada. El vecino no instala ni registra nada."
+2. **El vecino carga el reclamo.** "Cuatro pasos: quién es, qué
+   departamento, qué pasa y fotos si quiere. Recibe un código para
+   seguirlo después, sin llamarte."
+3. **Vos te enterás.** "El vecino te avisa por WhatsApp con un mensaje ya
+   redactado, desde su propio teléfono. Si no lo hace, el reclamo igual
+   aparece en tu panel; y te llega un mail al instante si es urgente, más
+   un resumen todos los días."
+4. **Lo gestionás desde el panel.** "Bandeja con filtros y estados,
+   asignación, notas internas y exportación. Consofy marca posibles
+   reclamos repetidos y te deja agruparlos como un solo problema."
+
+**4. Para quién es**
+
+- Título: "Para administraciones de consorcios."
+- Cuerpo: "Da igual si administrás un edificio o veinte. Consofy
+  centraliza los reclamos de todos, con la información de cada edificio,
+  sus departamentos y sus vecinos en un mismo lugar. Los vecinos no
+  necesitan cuenta: solo el link."
+
+**5. Más que reclamos**
+
+- **Avisos a los vecinos** -- "armás el mensaje una vez y Consofy te arma
+  la lista de destinatarios por edificio o por criterio, con un enlace de
+  WhatsApp listo para cada uno."
+- **Recordatorios** -- "vencimientos por edificio (expensas, seguros,
+  service de ascensor) con vista de calendario y aviso cuando se acercan."
+- **Biblioteca de documentos** -- "reglamentos, actas y comprobantes por
+  edificio y categoría, con control de qué ve cada vecino."
+- **Notificaciones** -- "una campana en el panel con lo nuevo: reclamos,
+  urgencias, vencimientos."
+
+**6. Cómo empezar** (CTA de cierre)
+
+- Título: "Probá Consofy en tu administración."
+- Cuerpo: "Escribinos y coordinamos una prueba: configuramos tu
+  administración con tus edificios y te dejamos el sistema andando para
+  que lo uses con reclamos reales."
+- CTA: **Solicitá una prueba gratuita** ->
+  `mailto:matiasdemetriorufeil@gmail.com?subject=Quiero%20probar%20Consofy`
+
+**7. Footer**
+
+- Wordmark "Consofy" + tagline "Gestión de consorcios para
+  administradores."
+- **Ingresar** -> `/login`.
+- Contacto: `matiasdemetriorufeil@gmail.com` (mismo `mailto:` con asunto
+  "Quiero probar Consofy").
+- "© 2026 Consofy". Sin links a Términos ni Privacidad -- no existen
+  todavía, no se inventan.
+
+**No afirmar** (para que el 16.3 no sobre-prometa): sin prueba social ni
+testimonios (hay un solo administrador real); sin "disponible ya" como
+promesa fuerte (la app está desplegada pero con bloqueantes conocidos --
+recuperación de contraseña, alta self-service); sin envío masivo
+automático de avisos (hoy es un link manual por destinatario, la Cloud API
+es la Etapa 13); sin app móvil (es web); sin integraciones contables.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
