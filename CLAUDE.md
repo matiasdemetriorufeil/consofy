@@ -8263,6 +8263,108 @@ que existe la pantalla (sugiere subir `COMBINED_SIMILARITY_THRESHOLD` de
 candidatos y eventos) se borraron físicamente al terminar; la cuenta de
 admin descartable, también.
 
+### Degradación elegante: la API de embeddings puede fallar sin romper nada (paso 14.6)
+
+Cierra la Etapa 14. Paso de auditoría con fallas reales inducidas (no de
+feature nueva): si Gemini falla, se agota la cuota, o falta la key, el
+sistema tiene que caer a la heurística de trigram sin romperse.
+
+**Lo que ya estaba resuelto de fábrica** (verificado con fallas forzadas,
+no leyendo el código -- servidor HTTP local haciendo de endpoint de
+Gemini, alta real por el formulario público):
+
+- **Falla persistente (timeout / caída total / 5xx sostenido):** el alta
+  del vecino no se demora ni falla (la confirmación llega en el mismo
+  tiempo que un alta sana), el reclamo se crea, `tickets.embedding` queda
+  NULL. Los 3 reintentos del 14.2 corren y se agotan dentro del `after()`,
+  después de la respuesta.
+- **Cuota agotada (429 sostenido):** tratado como transitorio, entra al
+  mismo backoff que un 5xx. Mismo resultado: alta OK, embedding NULL.
+- **Barrido diario bajo falla sostenida:** `runDailyCron` devuelve 200,
+  las otras tres tareas por organización corren igual,
+  `embeddingsBackfilledTotal: 0`, sin escrituras parciales. El aislamiento
+  de errores en dos niveles (regla dura de cada función + try/catch del
+  orquestador) aguanta.
+- **Pantalla de evaluación (14.5) con `cosineSimilarity` siempre null:**
+  `summarizeResolvedCandidates` solo lee `combinedScore` (columna
+  `similarity`, `CHECK 0..1 NOT NULL`) y `resolution` -- nunca toca los
+  scores crudos. Resumen y lista renderizan bien; la lista muestra `—`
+  donde no hay coseno.
+
+**El hallazgo real: `GEMINI_API_KEY` requerida rompía el arranque ENTERO.**
+Hasta el 14.6 estaba en `env.ts` como `z.string().min(1)` (sin default,
+mismo patrón que `RESEND_API_KEY` / `CRON_SECRET`). `env.ts` corre
+`parseEnv()` al cargar el módulo, y lo importa `src/db/index.ts` -- o sea,
+casi todo el código de servidor. Medido: `GEMINI_API_KEY=` (vacía o
+ausente) hacía **`next build` fallar con EXIT 1** ("Build error occurred",
+`env.ts` tira en "Collecting page data"). En Vercel eso es un deploy que no
+sale y un sitio que no se actualiza. Una key **presente pero inválida**
+(cualquier string no vacío) NO rompía el build -- arranca y falla recién en
+runtime con 400, que degrada bien. Es decir: lo único que tumbaba la app
+era una línea de config faltante; una key revocada/vencida del lado de
+Google deja la variable no vacía y cae en el camino elegante.
+
+**Opciones consideradas** (reportadas antes de elegir):
+
+- **B -- dejar requerida.** Consistente con las otras keys; una env var
+  faltante es una misconfiguración de deploy que conviene que falle fuerte.
+  Contra: obliga a tener la key para desplegar aunque el sistema esté
+  diseñado para correr sin embeddings, y el criterio del paso dice
+  explícitamente que romper el arranque lo contradice.
+- **C -- opcional + warning explícito + guard no transitorio (elegida).**
+- **A** (opcional pero silenciosa): peor en observabilidad. **D** (flag
+  `EMBEDDINGS_ENABLED` aparte): sobra, la presencia de la key ya es el
+  on/off natural.
+
+**Por qué C.** A diferencia de email (entregable central) o `CRON_SECRET`
+(límite de seguridad), los embeddings son un **complemento** de una
+heurística que ya funciona sola -- el `max()` del 14.4 trata
+`cosineSimilarity: null` como "esa métrica no vota". El blast radius de
+"sitio entero caído" vs "detección de duplicados un poco menos inteligente"
+es desproporcionado. Y este mismo `env.ts` ya tiene el precedente de
+`MESSAGING_PROVIDER` con `.default("console")` en vez de fallar duro.
+Costo aceptado: una misconfiguración silenciosa pasa a ser posible (se
+cacha por el `console.warn`, no por un build roto) -- mitigado por el
+warning y por `.env.example`.
+
+**Qué se aplicó** (3 cambios, decisión del arquitecto):
+
+1. `env.ts`: `GEMINI_API_KEY: z.string().min(1).optional()`, y en el
+   `safeParse` `process.env.GEMINI_API_KEY || undefined` (un `""` de
+   `.env.example` se normaliza a ausencia en vez de fallar `.min(1)`,
+   mismo truco que `MESSAGING_PROVIDER`).
+2. `parseEnv()`: si la key falta (y no `SKIP_ENV_VALIDATION`), un
+   `console.warn` explícito -- una vez al arrancar (más veces en
+   `next dev` por compilación por ruta; 14 en `next build` por los workers
+   paralelos). No es un `throw`.
+3. `fetchGeminiEmbedding` (`gemini-embedding.ts`): guard al inicio -- sin
+   key, `GeminiEmbeddingError({ transient: false })`. No transitorio a
+   propósito: que falte no se arregla reintentando en los ~7s del camino
+   en vivo. El barrido diario recoge los embeddings faltantes el día que
+   se configure la key.
+
+**Prueba real, con `GEMINI_API_KEY` ausente:**
+
+- `next build` -> **EXIT 0**, `✓ Compiled successfully`, build completo,
+  el warning en el log.
+- `next dev` -> `✓ Ready`, `/login` 200, el warning una vez en el log de
+  arranque.
+- Alta de un reclamo por el formulario público real -> confirmación en
+  ~6 s (igual que un alta sana), sin `pageerror`, sin respuesta 5xx.
+  Reclamo creado (`status: new`), `embedding` NULL. El `after()`:
+  `embedAndStoreTicket` pega el guard, falla sin reintentar (una sola
+  línea `[embedAndStoreTicket] ... GEMINI_API_KEY sin configurar` en el
+  log del servidor, cero llamadas HTTP), y `detectAndFlagSimilarTickets`
+  corre igual con trigram solo. Único evento del ticket: `created`. Nada
+  roto en ninguna pantalla.
+- Con la key de vuelta: 0 warnings (el warning está bien gateado a la
+  ausencia).
+
+**Para producción (Etapa 15):** si se decide correr sin la key, no hace
+falta nada; si se quiere la detección semántica, cargar `GEMINI_API_KEY`
+en Vercel -- mismo pendiente manual, fuera del repo, que `RESEND_API_KEY`
+y `CRON_SECRET`.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.

@@ -62,6 +62,22 @@ export class GeminiEmbeddingError extends Error {
 // Tira `GeminiEmbeddingError` en cualquier fallo, con `transient` marcado
 // según corresponda.
 export async function fetchGeminiEmbedding(text: string): Promise<number[]> {
+  // Paso 14.6 -- GEMINI_API_KEY es opcional (degradación elegante, ver
+  // CLAUDE.md > Detección de duplicados por embeddings). Sin key: error NO
+  // transitorio a propósito -- que falte no se arregla reintentando en los
+  // ~7s del camino en vivo (embed-ticket.ts), así que se evita quemar los
+  // 3 intentos. El resultado es el mismo que cualquier otra falla de
+  // embedding: `tickets.embedding` queda NULL, la detección híbrida cae a
+  // trigram solo (14.4), y el barrido diario recoge el hueco el día que se
+  // configure la key.
+  const apiKey = env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new GeminiEmbeddingError(
+      "GEMINI_API_KEY sin configurar -- la generación de embeddings está deshabilitada.",
+      { transient: false },
+    );
+  }
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
@@ -71,7 +87,7 @@ export async function fetchGeminiEmbedding(text: string): Promise<number[]> {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-goog-api-key": env.GEMINI_API_KEY,
+        "x-goog-api-key": apiKey,
       },
       body: JSON.stringify({
         model: `models/${EMBEDDING_MODEL}`,

@@ -56,15 +56,24 @@ import { publicEnv } from "./env.public";
 // paso) dejaría de arrancar la app -- "console" es el default seguro
 // porque no abre nada real, solo imprime en la terminal.
 //
-// GEMINI_API_KEY: mismo criterio que RESEND_API_KEY -- sin default. La
-// única función es autenticar contra la API de embeddings de Gemini (paso
-// 14.2, detección de duplicados semántica); un valor vacío o ausente no
-// tiene un "modo seguro" razonable (dejaría a todos los reclamos sin
-// embedding en silencio). La cuenta y la key se crean a mano en Google AI
-// Studio (mismo criterio que las cuentas externas de la etapa 0 / Resend),
-// nunca por script. El proyecto de Google Cloud de esta key tiene
-// facturación con crédito prepago habilitada -- ver CLAUDE.md > Detección
-// de duplicados por embeddings.
+// GEMINI_API_KEY: OPCIONAL (paso 14.6, decisión del arquitecto -- distinto
+// de RESEND_API_KEY/CRON_SECRET). La auditoría del 14.6 encontró que
+// dejarla requerida hacía que `next build` y el arranque fallaran ENTEROS
+// si faltaba -- una misconfiguración de deploy tiraba abajo toda la app,
+// desproporcionado para una función (embeddings) que es un COMPLEMENTO de
+// una heurística que ya funciona sola (trigram, etapa 7). Ahora, si falta:
+// `parseEnv()` emite un `console.warn` explícito (abajo) y la app arranca
+// normal; `fetchGeminiEmbedding` (gemini-embedding.ts) tira un error NO
+// transitorio y la detección de duplicados cae a trigram solo (14.4), sin
+// romper nada. El barrido diario recoge los embeddings faltantes el día
+// que se configure la key. Sí SIGUE siendo un error si está PRESENTE pero
+// vacía distinta de "" (ver el `|| undefined` de abajo, mismo truco que
+// MESSAGING_PROVIDER) o con espacios: `z.string().min(1)` cuando existe.
+// La cuenta y la key se crean a mano en Google AI Studio (mismo criterio
+// que las cuentas externas de la etapa 0 / Resend), nunca por script. El
+// proyecto de Google Cloud de esta key tiene facturación con crédito
+// prepago habilitada -- ver CLAUDE.md > Detección de duplicados por
+// embeddings, "Degradación elegante".
 //
 // NEXT_PUBLIC_APP_URL vive ACÁ (esquema de servidor) y no en
 // src/lib/env.public.ts a propósito: el enlace público del edificio se arma
@@ -92,7 +101,10 @@ const schema = z.object({
   MESSAGING_PROVIDER: z.enum(["console", "manual_link"]).default("console"),
   RESEND_API_KEY: z.string().min(1),
   CRON_SECRET: z.string().min(1),
-  GEMINI_API_KEY: z.string().min(1),
+  // Opcional (paso 14.6) -- ver el comentario largo de arriba. `.min(1)`
+  // sigue rigiendo si está presente, pero un `""` se normaliza a ausencia
+  // con el `|| undefined` del safeParse (mismo truco que MESSAGING_PROVIDER).
+  GEMINI_API_KEY: z.string().min(1).optional(),
 });
 
 // -----------------------------------------------------------------------
@@ -176,7 +188,13 @@ function parseEnv() {
     MESSAGING_PROVIDER: process.env.MESSAGING_PROVIDER || undefined,
     RESEND_API_KEY: process.env.RESEND_API_KEY,
     CRON_SECRET: process.env.CRON_SECRET,
-    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+    // `|| undefined`: un `.env.local` con la línea "GEMINI_API_KEY=" vacía
+    // (tal como queda al copiar `.env.example`) deja
+    // process.env.GEMINI_API_KEY === "", que fallaría `.min(1)` en vez de
+    // caer en `.optional()`. Convertir ese vacío en ausencia real es lo que
+    // hace que "sin key configurada" degrade en vez de romper el arranque
+    // (paso 14.6). Mismo truco que MESSAGING_PROVIDER.
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY || undefined,
   });
 
   if (!parsed.success) {
@@ -186,6 +204,17 @@ function parseEnv() {
 
     throw new Error(
       `Variables de entorno inválidas o faltantes. Revisá .env.local contra .env.example:\n${details}`,
+    );
+  }
+
+  // Paso 14.6 -- GEMINI_API_KEY es opcional (ver el comentario del schema).
+  // Si falta, la app arranca igual pero SIN detección de duplicados
+  // semántica; se avisa fuerte una vez al arrancar para que no pase
+  // inadvertido (los logs de Vercel lo van a mostrar). No es un throw: es
+  // degradación elegante, no un error de configuración.
+  if (!parsed.data.GEMINI_API_KEY) {
+    console.warn(
+      "[env] GEMINI_API_KEY sin configurar -- la detección de duplicados semántica (embeddings) queda deshabilitada; el sistema sigue funcionando con la heurística de trigram (etapa 7). Ver CLAUDE.md > Detección de duplicados por embeddings, 'Degradación elegante'.",
     );
   }
 
