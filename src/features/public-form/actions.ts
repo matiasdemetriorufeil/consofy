@@ -276,48 +276,48 @@ async function attemptCreateTicket(
     return ticket;
   });
 
-  // Detección de posibles duplicados (paso 7.2) -- DESPUÉS de que la
-  // transacción de arriba ya hizo commit, nunca adentro de ella: el
-  // enunciado exige que una falla acá NUNCA impida que el alta se
-  // complete, y detectAndFlagSimilarTickets() ya garantiza (con su propio
-  // try/catch interno) que nunca tira -- pero mantenerla afuera de la
-  // transacción del ticket es una segunda capa de la misma garantía, no
-  // solo confiar en esa función: aunque alguien rompiera esa garantía en
-  // el futuro, un error acá ya no podría hacer rollback de un ticket que
-  // el vecino ya ve confirmado.
-  await detectAndFlagSimilarTickets({
-    organizationId: building.organizationId,
-    ticketId: ticket.id,
-    buildingId: building.id,
-    categoryId: category.id,
-    title: ticketTitle,
-    description: data.description,
-    reportedAt: ticket.reportedAt,
-  });
-
-  // Embedding del reclamo para la detección de duplicados semántica (paso
-  // 14.2). A diferencia de detectAndFlagSimilarTickets (que se `await`ea
-  // acá arriba: es una consulta local rápida), esto es una llamada HTTP
-  // EXTERNA a la API de Gemini con hasta 3 reintentos y backoff (~1s/2s/4s)
-  // -- `await`earlo podría sumarle varios segundos a la espera del vecino.
-  // Por eso va con `after()` de next/server: la respuesta se envía primero,
-  // el embedding se genera después SIN bloquearla. `embedAndStoreTicket()`
-  // tiene su propio try/catch y NUNCA tira (misma regla dura que el 7.2);
-  // si aun así falla los 3 intentos, `tickets.embedding` queda en NULL y lo
-  // levanta el barrido diario (sweep-missing-embeddings.ts, plegado a
-  // runDailyCron). `after()` corre el callback igual en dev (proceso
-  // persistente) y en producción (Vercel lo mantiene vivo con waitUntil),
-  // a diferencia de una promesa suelta sin await, que en serverless podría
-  // morir con la instancia -- ahí el barrido igual sería la red de
-  // seguridad, pero `after()` hace que el caso feliz sea confiable.
-  after(() =>
-    embedAndStoreTicket({
+  // Embedding del reclamo (paso 14.2) + detección de posibles duplicados
+  // (paso 7.2, ahora HÍBRIDA -- paso 14.4), las dos DESPUÉS del commit de
+  // la transacción de arriba y las dos con `after()` de next/server, en
+  // secuencia.
+  //
+  // Hasta el 14.3 la detección se `await`eaba acá (era solo una consulta
+  // local de trigram, rápida). El 14.4 la hace híbrida: además del trigram
+  // compara el EMBEDDING del reclamo nuevo contra los candidatos (coseno,
+  // índice HNSW). Ese embedding es una llamada HTTP externa a Gemini con
+  // hasta 3 reintentos y backoff (~1s/2s/4s) -- `await`earla sumaría
+  // segundos a la espera del vecino. Por eso las dos pasan a `after()`:
+  // primero `embedAndStoreTicket` guarda `tickets.embedding`, después
+  // `detectAndFlagSimilarTickets` lo lee de la base y corre la comparación
+  // híbrida. Si el embedding falla los 3 reintentos, la detección corre
+  // igual (trigram solo -- el par se compara sin la capa semántica, que es
+  // el comportamiento esperado) y el barrido diario reintenta el embedding;
+  // NO se re-corre la detección para ese par (re-scorear pares históricos
+  // es alcance del 14.5).
+  //
+  // Las dos funciones tienen su propio try/catch y NUNCA tiran (regla dura
+  // del 7.2): una falla acá no puede hacer rollback de un ticket que el
+  // vecino ya ve confirmado. `after()` corre el callback igual en dev
+  // (proceso persistente) y en producción (Vercel lo sostiene con
+  // waitUntil), a diferencia de una promesa suelta sin await, que en
+  // serverless podría morir con la instancia.
+  after(async () => {
+    await embedAndStoreTicket({
       ticketId: ticket.id,
       organizationId: building.organizationId,
       categoryName: category.name,
       description: data.description,
-    }),
-  );
+    });
+    await detectAndFlagSimilarTickets({
+      organizationId: building.organizationId,
+      ticketId: ticket.id,
+      buildingId: building.id,
+      categoryId: category.id,
+      title: ticketTitle,
+      description: data.description,
+      reportedAt: ticket.reportedAt,
+    });
+  });
 
   // Alerta inmediata por email (paso 9.5, punto 4) -- mismo evento que ya
   // dispara la notificación `urgent_ticket` del centro de notificaciones

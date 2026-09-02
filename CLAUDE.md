@@ -7934,7 +7934,7 @@ tope de dimensiones de pgvector:
 [pgvector issue #461](https://github.com/pgvector/pgvector/issues/461),
 [Supabase -- HNSW indexes](https://supabase.com/docs/guides/ai/vector-indexes/hnsw-indexes).
 
-### Cliente, disparo en el alta y reprocesamiento (paso 14.2)
+### Cliente, disparo en el alta y reprocesamiento (pasos 14.2-14.3)
 
 Este paso genera el embedding de cada reclamo y lo guarda en la columna
 `tickets.embedding` del 14.1. NO compara embeddings todavía (eso es 14.3+)
@@ -8047,7 +8047,130 @@ que `RESEND_API_KEY` y `CRON_SECRET`.
 
 **La columna `tickets.embedding` sigue sin declararse en el schema DSL de
 Drizzle** (decisión del 14.1): se lee/escribe con SQL crudo (`db.execute`)
-en `embed-ticket.ts` y `sweep-missing-embeddings.ts`.
+en `embed-ticket.ts`, `sweep-missing-embeddings.ts`,
+`detect-similar-tickets-on-create.ts` (la lee para el reclamo de
+referencia) y `find-similar-tickets.ts` (el operador `<=>` de la consulta
+vectorial va en un fragmento `sql`` `, calificado `OPERATOR(extensions.<=>)`).
+
+### Búsqueda híbrida: trigram + coseno en un score combinado (paso 14.4)
+
+El corazón de la Etapa 14. Hasta el 14.3 la detección de duplicados
+(`detectAndFlagSimilarTickets`, paso 7.2) cortaba SOLO por el score de
+`pg_trgm` (`findSimilarTickets`, paso 7.1) contra el umbral por edificio
+(`buildings.similarity_threshold`, 0.20 default, paso 7.6). El 14.4 le
+suma la similitud SEMÁNTICA (coseno entre embeddings, columna
+`tickets.embedding`, índice HNSW) y combina las dos en un único score.
+**Complementa la heurística de trigram, no la reemplaza.**
+
+**Decisión del arquitecto: sin backfill de los ~1.279 históricos.** El
+barrido diario (`sweepMissingTicketEmbeddings`, 14.2) los va completando
+solo, priorizando los más recientes. Para este paso, cualquier reclamo sin
+embedding (el que se está dando de alta si su llamada a Gemini todavía no
+terminó o falló, o un candidato viejo sin backfillear) cae a comparación
+SOLO por trigram para ese par -- comportamiento esperado, no error.
+
+**La consulta vectorial (`find-similar-tickets.ts`).** Cuando el caller
+pasa `referenceEmbedding`, `findSimilarTickets` corre una SEGUNDA consulta
+además de la de trigram, **reusando el mismo array `conditions`** (mismo
+edificio + categoría + estado abierto + ventana + exclusión -- el alcance
+no se duplica) más `embedding IS NOT NULL`, con
+`ORDER BY embedding OPERATOR(extensions.<=>) ref LIMIT 20`
+(`VECTOR_CANDIDATE_LIMIT`). Esa forma -- top-k por distancia -- es la que
+el índice HNSW sabe resolver. El merge en JS: el universo de candidatos es
+el de trigram (sin umbral ni límite, trae todo el alcance); la consulta
+vectorial solo aporta el número de coseno para los k más cercanos; un
+candidato sin fila -> `cosineSimilarity: null` -> se compara solo por
+trigram.
+
+**HNSW vs. scan exacto -- EXPLAIN ANALYZE real, las dos formas.** El
+filtro de alcance de `findSimilarTickets` ya es MUY selectivo por diseño
+(paso 7.1: edificio + categoría + estado + ventana deja un puñado de filas
+usando el btree `tickets_building_id_category_id_reported_at_idx`). Sobre
+ese conjunto chico el planner elige -- correctamente -- calcular la
+distancia de coseno de forma EXACTA (`Bitmap Index Scan` + `Sort`), sin
+HNSW y sin `Seq Scan`: con < 20 filas, exacto es más rápido y más preciso
+que la aproximación de HNSW. Medido con las filas vivas de Torre
+Central/Ascensores: `Bitmap Index Scan` -> `Bitmap Heap Scan` (2 filas) ->
+`Sort` exacto, **Execution Time 0.38 ms**, sin `Seq Scan`. El índice HNSW
+NO es dead weight: es la red para cuando ese conjunto crezca. Verificado
+que el planner SÍ lo elige para la forma top-k con volumen -- 237
+embeddings temporales en Edificio Cabildo/Ascensores,
+`SELECT ... ORDER BY embedding <=> ref LIMIT 20` -> `Index Scan using
+tickets_embedding_hnsw_idx`, **0.70 ms**, sin `Seq Scan`. Sin el `LIMIT`
+el planner vuelve al bitmap + sort exacto: el `LIMIT` es lo que lo hace
+HNSW-elegible. (Esos 237 embeddings se revirtieron a NULL al terminar --
+el backfill es alcance del 14.3.)
+
+**Combinación de los dos scores -- `max` de métricas REESCALADAS**
+(`hybrid-similarity.ts`, módulo puro y testeado). El insight: trigram y
+coseno viven en escalas incomparables. "Parecido" para trigram arranca en
+~0.20 (calibrado con los pares reales del cluster del ascensor, paso 7.1);
+para coseno entre embeddings `gemini-embedding-001` normalizados el piso
+de ruido es ~0.55-0.70 y una reformulación genuina da 0.80-0.92 (medido en
+la prueba real de este paso). Un umbral crudo único es incoherente. La
+solución: `rescaleSimilarity(x, t)` mapea cada métrica a una escala común
+donde SU umbral cae siempre en 0.5 (`[0,t]->[0,0.5]`, `[t,1]->[0.5,1]`,
+lineal a tramos), y el score combinado es el **`max`** de las dos
+reescaladas.
+
+- **`max`, no promedio (simple ni ponderado), ni "vector como
+  desempate".** Se evaluaron las tres. Un promedio puede BAJAR un trigram
+  fuerte por debajo del corte por culpa de un coseno mediocre -- haría
+  REGRESAR casos que la etapa 7 ya detectaba, y el enunciado pide
+  complementar, no reemplazar. Con `max`, un par que el trigram ya
+  marcaría (reescalado >= 0.5) sigue marcándose pase lo que pase con el
+  coseno o si el candidato no tiene embedding; y un par léxicamente flojo
+  pero semánticamente fuerte ahora SÍ cruza. Es aditivo sobre el recall,
+  nunca sustractivo. Ver el análisis de las alternativas en el reporte del
+  paso 14.4.
+- **Punto de partida, se calibra en el 14.5** (la pantalla de calibración
+  con datos reales es justamente el paso siguiente). Los dos números que
+  este paso introduce, ambos documentados como "a ajustar":
+  `DEFAULT_COSINE_SIMILARITY_THRESHOLD = 0.78` (la barra semántica -- cae
+  en el hueco medido entre ruido y match genuino, tirando a conservador) y
+  `COMBINED_SIMILARITY_THRESHOLD = 0.5` (el corte del score combinado --
+  0.5 == "al menos una de las dos métricas alcanzó su propio umbral";
+  subirlo pasaría a exigir superarlo). El umbral de trigram POR EDIFICIO
+  del 7.6 NO desaparece: se sigue usando, ahora dentro del reescalado.
+
+**Integración -- `detectAndFlagSimilarTickets` corta por el score
+combinado.** Filtra `combinedScore >= COMBINED_SIMILARITY_THRESHOLD` en
+vez del viejo `trigramSimilarity >= threshold`. Persiste el score
+COMBINADO en `ticket_similarity_candidates.similarity` (la columna no
+cambia de tipo -- CHECK 0..1 --, cambia su significado); el payload del
+evento `similar_ticket_detected` lleva ADEMÁS los dos scores crudos
+(`trigramSimilarity`, `cosineSimilarity`) para poder auditar/calibrar en
+el 14.5 sin re-consultar. `findSimilarTickets` es su único consumidor real
+(grep), así que no hubo que tocar otros call sites.
+
+**Nunca bloquear ni demorar el alta -- la detección pasa a `after()`.**
+Hasta el 14.3 `detectAndFlagSimilarTickets` se `await`eaba en
+`attemptCreateTicket` (era una consulta local rápida). El 14.4 necesita el
+EMBEDDING del reclamo nuevo, que es una llamada HTTP a Gemini con
+reintentos -- `await`earla sumaría segundos. Ahora las dos cosas van en el
+MISMO `after()` de `next/server`, en secuencia: primero
+`embedAndStoreTicket` guarda `tickets.embedding`, después
+`detectAndFlagSimilarTickets` lo lee de la base y corre la comparación
+híbrida. Si el embedding falla los 3 reintentos, la detección corre igual
+(trigram solo) y el barrido diario reintenta el embedding -- pero NO
+re-corre la detección para ese par (re-scorear pares históricos es alcance
+del 14.5). Las dos funciones tienen su try/catch y nunca tiran (regla dura
+del 7.2).
+
+**Prueba real (paso 14.4), dos reclamos por el formulario público REAL,
+mismo edificio + categoría + ventana, borrados físicamente después:**
+descripciones del mismo hecho ("el ascensor no anda hace días") con
+vocabulario disjunto -- A: _"...el elevador del edificio no anda y tengo
+que bajar por la escalera cargando el changuito..."_; B: _"El montacargas
+de pasajeros lleva casi una semana detenido, sigue clavado arriba..."_.
+Resultado: **`trigramSimilarity = 0.1719`** -- POR DEBAJO del umbral 0.20
+de Torre Central: la heurística de trigram sola NO lo habría marcado.
+**`cosineSimilarity = 0.8257`** -- sobre la barra 0.78. **`combinedScore =
+0.6039`** (== la reescala del coseno) -- sobre el corte 0.5 -> se persiste
+la fila en `ticket_similarity_candidates` (`pending`, `similarity`
+0.603872) y el evento `similar_ticket_detected` con los dos scores crudos
+en el payload. La capa semántica cazó un duplicado real que a los
+trigramas se les escapaba.
 
 ## Reglas de seguridad (no negociables)
 
