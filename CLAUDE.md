@@ -8729,6 +8729,207 @@ navegador sobre la landing no matchea (header blanco / hero celeste). Un
 `export const viewport` propio en `page.tsx` lo arreglaría, pero es un
 cambio de color en un archivo compartido -- se deja anotado.
 
+## Selector de edificios para el vecino que escribe primero por WhatsApp (Etapa 17)
+
+Etapa nueva, no estaba en el plan original -- misma situación que las
+etapas 14 y 16, y como esas, su sección se agregó a CLAUDE.md recién al
+completarla (este texto). Dos pasos, los dos chicos y de UI.
+
+**Problema que resuelve:** el administrador usa UN solo número de WhatsApp
+Business para varios edificios. Cuando un vecino le escribe primero por ahí
+-- en vez de llegar por el link o el QR de su edificio (paso 4.6) -- desde
+ese chat no hay forma de mandarlo al formulario correcto. La Etapa 17 crea
+una página pública intermedia: dado el token de la ORGANIZACIÓN, lista sus
+edificios activos, cada uno con el link a su formulario de reclamos
+(`/r/[token del edificio]`). El administrador deja ese link como respuesta
+automática de su WhatsApp Business (o lo pega a mano) y el vecino elige su
+edificio ahí.
+
+La Etapa 13 (Cloud API de WhatsApp para el flujo de SALIDA) sigue pausada a
+propósito -- ver CLAUDE.md > Reglas de WhatsApp; no se arranca hasta tener
+un edificio real en uso. La Etapa 15 (producción) no empezó.
+
+### `organizations.public_token` y la página pública `/o/[token]` (paso 17.1)
+
+**Columna nueva `organizations.public_token`** (migración
+`0042_medical_gargoyle.sql`):
+
+```sql
+ALTER TABLE "organizations" ADD COLUMN "public_token" uuid DEFAULT gen_random_uuid() NOT NULL;
+ALTER TABLE "organizations" ADD CONSTRAINT "organizations_public_token_unique" UNIQUE("public_token");
+```
+
+MISMO mecanismo que `buildings.public_token` (paso 4.6, ver el comentario de
+esa columna en `src/db/schema/buildings.ts` y el de esta en
+`src/db/schema/organizations.ts`): uuid aleatorio, no adivinable ni
+secuencial, rotable sin tocar la identidad interna de la fila (`id`) ni las
+FKs que la referencian. `UNIQUE` **TOTAL**, no parcial `WHERE deleted_at IS
+NULL` -- un token de URL pública no se reutiliza aunque algún día la
+organización se archive, mismo criterio que el de `buildings` (CLAUDE.md >
+Acceso a datos). `DEFAULT gen_random_uuid()` backfilleó la única
+organización existente con un valor propio.
+
+**Ruta pública nueva `/o/[token]`** (`src/app/o/[token]/`, cuatro archivos:
+`page.tsx`, `layout.tsx`, `error.tsx`, `not-found.tsx`). La letra `o` es
+literal -- `o` de organización, igual que `r` (reclamo de un edificio) y `s`
+(seguimiento de un reclamo) son las otras dos rutas públicas de una sola
+letra. El token que resuelve esta ruta es el `public_token` de una
+ORGANIZACIÓN, tal como el de `/r` resuelve un edificio y el de `/s` un
+reclamo.
+
+- **`layout.tsx`** -- chrome puro, cero lógica, mismo patrón exacto que
+  `src/app/r/[token]/layout.tsx` y `src/app/s/[token]/layout.tsx`. La
+  resolución del token vive en `page.tsx`, NO en el layout: un `notFound()`
+  llamado desde un layout NO lo captura un `not-found.tsx` del MISMO
+  segmento, solo uno del segmento padre (bug real ya documentado en el paso
+  8.4). Con la lógica en `page.tsx`, `src/app/o/[token]/not-found.tsx`
+  (mismo segmento) alcanza sin ese problema.
+- **`page.tsx`** (`OrganizationBuildingsPage`) -- todo se valida y resuelve
+  en el servidor antes de mostrar nada, sin asumir que el valor de la URL
+  es válido: `z.uuid().safeParse(token)` (si no parsea -> `notFound()`),
+  después `getOrganizationByPublicToken(token)` (si `null` -> `notFound()`),
+  después `getActiveBuildingsForOrganization(organization.id)`.
+- **`error.tsx`** -- error boundary con perfil de VECINO (no de admin, igual
+  que `/r/[token]/error.tsx`): sin jerga técnica, sin "ir al panel", con
+  botón "Reintentar" (un error de render suele ser pasajero, a diferencia
+  de un enlace que no existe). No muestra el detalle de la excepción.
+
+**El 404 ambiguo, compartido con `/r` y `/s`.** Token mal formado, token que
+nunca existió, o token de **OTRO tipo** (ej. el `public_token` de un
+edificio pasado por error a esta ruta) -> los tres caen en
+`src/app/o/[token]/not-found.tsx` con el MISMO mensaje ("No encontramos este
+enlace"), sin distinguir "no existe" de "no tenés acceso". Un token de
+edificio simplemente no matchea ninguna fila en
+`getOrganizationByPublicToken` -> `null` -> el mismo 404. Mismo criterio de
+ambigüedad, palabra por palabra, que `src/app/r/[token]/not-found.tsx` y
+`src/app/s/[token]/not-found.tsx` (CLAUDE.md > Auditoría de la superficie
+pública, sección "cross-type de tokens").
+
+**El nombre de la organización SÍ se muestra.** Llegar hasta acá requiere un
+`public_token` real y vigente (uuid aleatorio, no adivinable), así que
+confirmarle a quien ya lo tiene que está en el lugar correcto es útil, no
+una divulgación nueva -- mismo criterio que `/r/[token]` con el nombre del
+edificio (CLAUDE.md > Auditoría de la superficie pública, punto f.1).
+
+**Organización válida pero sin ningún edificio activo -- 200 con mensaje, no
+404.** Se muestra un texto honesto ("Esta administración todavía no tiene
+edificios disponibles para cargar reclamos. Comunicate directo con tu
+administración.") en vez de esconder la página: el token ya autorizó a esta
+persona a ver esta pantalla, mismo criterio que `/s/[token]` con un reclamo
+sin fotos. **Decisión de producto ya confirmada, no reinterpretable.** Los
+edificios inactivos (`active = false`) o dados de baja (`deleted_at`) NO se
+listan -- no se les puede cargar un reclamo nuevo. Cada edificio activo
+listado es un `<Link href={/r/${building.publicToken}}>` (relativo, al
+formulario público de ESE edificio).
+
+**Queries nuevas** en `src/features/public-form/queries.ts` (`server-only`,
+`cache()` de React), espejo de las que ya usaba `/r/[token]`:
+
+- `getOrganizationByPublicToken(token)` -> `{ id, name } | null`.
+  `WHERE public_token = $1 AND deleted_at IS NULL`. Mismo shape y criterio
+  que `getBuildingByPublicToken`.
+- `getActiveBuildingsForOrganization(organizationId)` ->
+  `{ name, publicToken }[]`. `WHERE organization_id = $1 AND active = true
+  AND deleted_at IS NULL ORDER BY name`. El `organizationId` viene SIEMPRE
+  del caller (lo resolvió `getOrganizationByPublicToken` en la misma
+  request); esta función nunca resuelve su propia autorización -- patrón de
+  queries por organización de CLAUDE.md > Acceso a datos.
+
+**Sin cambio de RLS.** `organizations` ya tenía `denyAnonAuthenticated()` +
+RLS deny-all desde la etapa 1. La lectura de esta ruta pública pasa por el
+servidor (Server Component); la conexión de la app evade RLS igual que en
+todo el resto del proyecto, y `anon`/`authenticated` nunca tocan la tabla
+(CLAUDE.md > Políticas RLS). No hizo falta ninguna policy nueva.
+
+### La tarjeta del enlace en el panel (paso 17.2)
+
+El enlace completo de `/o/[token]` se muestra en el panel autenticado, con
+un botón para copiarlo, para que la administradora lo cargue a mano como
+mensaje de bienvenida en la app de WhatsApp Business (ese último paso lo
+hace ella, fuera del sistema -- no es parte de este paso).
+
+**Dónde vive: arriba del listado en `/panel/buildings`** (la pantalla
+"Edificios"), como una `Card` que precede al encabezado "Edificios" y a la
+tabla. **NO en Configuración (`/panel/settings`)**, y el motivo importa para
+quien retome el proyecto:
+
+- El enlace de un edificio PUNTUAL ya vive en la sección Edificios
+  (`/panel/buildings/[buildingId]/public-link`, pestaña del paso 4.6). El
+  enlace de la organización es la contracara exacta de esa pestaña -- el
+  mismo tipo de dato ("el enlace que le paso a los vecinos"), pero para toda
+  la administración en vez de un edificio -- así que su lugar natural es la
+  misma sección.
+- `/o/[token]` ES, literalmente, la lista de los edificios activos de la
+  organización. Mostrar su enlace justo donde el administrador gestiona esos
+  edificios es lo más coherente y lo hace descubrible sin navegación extra.
+- `/panel/settings` hoy es un índice de links a sub-páginas (paso 14.5), no
+  un lugar para tarjetas inline. Meterlo ahí obligaba a crear una sub-ruta
+  entera (con su `not-found`, su fila en la lista de secciones) para un
+  único campo de solo lectura -- desproporcionado para un paso puramente de
+  UI. El razonamiento del 14.5 para llevar algo "global" a Configuración
+  aplica a una PANTALLA de calibración con estado, no a un enlace.
+
+**Archivos y funciones nuevas:**
+
+- **`src/features/organizations/public-link.ts`** ->
+  `getOrganizationPublicUrl(publicToken)` -> `` `${env.NEXT_PUBLIC_APP_URL}/o/${publicToken}` ``.
+  `server-only`. Es el hermano de `getBuildingPublicUrl`
+  (`src/features/buildings/public-link.ts`, paso 4.6) pero apuntando a
+  `/o/[token]` en vez de `/r/[token]`. Se arma SIEMPRE en el servidor y se
+  pasa ya resuelto como string a los componentes cliente -- mismo criterio
+  que el enlace de edificio (`NEXT_PUBLIC_APP_URL` vive en el schema de
+  SERVIDOR, `src/lib/env.ts`, ver el comentario de esa variable). **No se
+  duplica la construcción de la URL**: ni el card ni la page la arman
+  inline, las dos llaman a esta función.
+- **`src/features/organizations/queries.ts`** ->
+  `getOrganizationPublicToken(organizationId)` -> `Promise<string | null>`.
+  `server-only`, `cache()`. Un solo `SELECT public_token FROM organizations
+  WHERE id = $1`. **NO se agregó `publicToken` a `AuthorizedUser` /
+  `requireUser()`** a propósito: cargaría ese dato en cada request del panel
+  para algo que hoy usa una sola pantalla. El `organizationId` viene siempre
+  del caller (la page, vía `requireUser()`), nunca se resuelve adentro
+  (CLAUDE.md > Acceso a datos).
+- **`src/features/organizations/components/organization-public-link-card.tsx`**
+  -> `OrganizationPublicLinkCard({ publicUrl })`, Client Component. Reusa el
+  MISMO patrón de la tarjeta "Enlace público" de `PublicLinkPanel` (paso
+  4.6): `Card` + `Input` de solo lectura (fuente mono, select-on-focus) +
+  `CopyButton`. Recibe la URL ya armada como prop -- no construye ninguna
+  URL.
+- **`src/components/copy-button.tsx`** (nuevo) -> `CopyButton` +
+  `useCopyToClipboard` (privado del módulo). **Extraídos tal cual** de
+  `public-link-panel.tsx`, donde estaban inline y sin exportar, cuando este
+  paso sumó un segundo lugar que necesita "mostrar un valor y copiarlo con
+  un botón". Es UI genérica, sin conocimiento del dominio -> vive en
+  `src/components/` (CLAUDE.md > Estructura de carpetas). El comportamiento
+  es idéntico al que tenía inline (Clipboard API, feedback "Copiado" con
+  reset a 1.5s, `aria-label`); `public-link-panel.tsx` ahora lo importa de
+  ahí y no cambió de comportamiento en ninguno de sus dos usos.
+- **`src/app/panel/buildings/page.tsx`** -- además de `getManagedBuildings`,
+  resuelve `getOrganizationPublicToken(organization.id)` y renderiza
+  `<OrganizationPublicLinkCard>` arriba de `<BuildingsList>`. Guard
+  `if (!publicToken) notFound()` -- inalcanzable en la práctica
+  (`public_token` es `NOT NULL` desde el 17.1 y la organización ya la
+  validó `requireUser()`); se maneja explícito en vez de asumir con un `!`,
+  mismo criterio que la pestaña de enlace público de un edificio.
+
+**Sin cambios de DB, migración, RLS ni Server Actions.** El dato
+(`organizations.public_token`) ya existe desde el 17.1; esto es puramente de
+UI dentro del panel autenticado. La pantalla está protegida por el mismo
+mecanismo ya vigente: `requireUser()` de la propia page + `requireUser()`
+del layout de `/panel` + el middleware `src/proxy.ts` sobre `/panel/*`. El
+`public_token` solo viaja al cliente ya embebido en el string de la URL --
+que es exactamente lo que el administrador va a copiar y publicar a
+propósito.
+
+**Verificado** (contra la base de desarrollo y con Playwright): el token de
+la URL que muestra el panel coincide carácter por carácter con
+`organizations.public_token` de la fila real, y ese token resuelve de vuelta
+a la misma organización vía `getOrganizationByPublicToken` (el mecanismo del
+17.1). Los 4 tests e2e de los flujos críticos (alta pública de reclamos +
+gestión desde el panel) pasan, y `tsc --noEmit` / `eslint` / `format:check`
+/ `vitest` (254 tests) / `next build` quedaron en verde. Sin dependencias
+nuevas -- `package.json` / `package-lock.json` sin tocar.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
