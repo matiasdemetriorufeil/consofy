@@ -1,54 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { Check, Copy, Download } from "lucide-react";
+import { Download } from "lucide-react";
 
+import { CopyButton } from "@/components/copy-button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-
-function useCopyToClipboard() {
-  const [copied, setCopied] = useState(false);
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(
-    undefined,
-  );
-
-  useEffect(() => () => clearTimeout(timeoutRef.current), []);
-
-  async function copy(text: string) {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-      clearTimeout(timeoutRef.current);
-      timeoutRef.current = setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // Clipboard API puede no estar disponible (contexto no seguro o permiso denegado).
-    }
-  }
-
-  return { copied, copy };
-}
-
-function CopyButton({ text, label }: { text: string; label: string }) {
-  const { copied, copy } = useCopyToClipboard();
-
-  return (
-    <Button
-      type="button"
-      variant="outline"
-      onClick={() => copy(text)}
-      aria-label={copied ? `${label} copiado` : label}
-    >
-      {copied ? (
-        <Check className="text-resuelto" aria-hidden="true" />
-      ) : (
-        <Copy aria-hidden="true" />
-      )}
-      {copied ? "Copiado" : label}
-    </Button>
-  );
-}
 
 export function PublicLinkPanel({
   buildingId,
