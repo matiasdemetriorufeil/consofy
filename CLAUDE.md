@@ -8632,6 +8632,54 @@ borró.
   instante. Cae en "Accesibilidad y mobile" (16.5); acotarlo bien pide un
   `body:has(.landing-theme)` o un route group con layout propio.
 
+### SEO básico (paso 16.4)
+
+**Inventario previo:** la metadata de `/` (16.3) tenía `title.absolute` +
+`description`, sin canonical ni Open Graph. `src/app/robots.ts` bloqueaba
+**todo el sitio** (`disallow: ["/", "/dev/"]`) a propósito -- no había
+nada público que indexar, con un `TODO: revisar antes del lanzamiento`. No
+existía `sitemap.ts`.
+
+**Qué quedó:**
+
+- **`src/app/page.tsx`** -- se sumó `metadataBase: new URL(env.NEXT_PUBLIC_APP_URL)`
+  (misma var que `public-link.ts`, paso 4.6 -- el dominio NUNCA se
+  hardcodea; en dev es `http://localhost:3000`, en prod lo que tenga
+  Vercel), `alternates.canonical: "/"`, `openGraph` completo
+  (`title` / `description` / `url: "/"` / `siteName: "Consofy"` /
+  `type: "website"` / `locale: "es_AR"`), y `twitter`
+  (`card: "summary_large_image"` + `title` + `description`).
+  `title`/`description` reales de la landing, compartidos entre
+  `<title>`/`<meta>`/OG/twitter vía constantes para que no drifteen.
+  `<html lang="es-AR">` ya estaba en el layout raíz (confirmado).
+- **`src/app/robots.ts`** -- deja de bloquear `/`: la landing es contenido
+  público real. Ahora `disallow: ["/panel/", "/dev/"]` (privado /
+  interno). `/r/[token]` y `/s/[token]` NO se bloquean (públicas, sin link
+  rastreable hacia ellas -- el token no es adivinable) pero tampoco se
+  listan en el sitemap. Se agregó `sitemap:` apuntando a
+  `${NEXT_PUBLIC_APP_URL}/sitemap.xml`.
+- **`src/app/sitemap.ts`** (nuevo) -- App Router `sitemap.ts`, dos URLs:
+  `/` (`changeFrequency: monthly`) y `/login` (`yearly`). NO incluye
+  `/panel/**` (privado), `/r|/s/[token]/**` (por-token, enumerarlas sería
+  otra decisión) ni `/dev/**`.
+
+- **`src/app/opengraph-image.tsx`** (nuevo) -- decisión del arquitecto:
+  Opción 1, card generado con `next/og`, sin subir ningún asset. 1200×630,
+  fondo `--landing-hero-bg` (#eaf1ff), barra de acento `--landing-accent`
+  (#2563eb), wordmark "Consofy" + headline completo + tagline en
+  `--landing-text` / `--landing-text-muted` -- **los mismos hex del 16.2**
+  (Satori no resuelve `var(--...)`). Tipografía: la sans por defecto de
+  Satori (no se empaqueta ningún `.ttf`; renderizarlo en Archivo sería un
+  follow-up chico). Next detecta el archivo y arma `og:image` +
+  `og:image:{width,height,type,alt}` **y también** `twitter:image` (reusa
+  el mismo card automáticamente -- no hizo falta un `twitter-image.tsx`).
+  Vive en `src/app/` -> es el `og:image` de `/`; lo heredan las rutas
+  hijas sin uno propio (inofensivo: `/panel/**` está tras login y
+  bloqueado en robots).
+  Verificado: `curl /opengraph-image` -> `200`, `image/png`, **1200×630**;
+  el `<head>` de `/` incluye `og:image` y `twitter:image` apuntando al
+  mismo `/opengraph-image?<hash>` (URL absoluta vía `metadataBase`).
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
