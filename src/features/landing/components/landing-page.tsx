@@ -94,10 +94,18 @@ const s = {
   icon: { color: "var(--landing-accent)" },
 } satisfies Record<string, CSSProperties>;
 
-// Foco visible (base -- el 16.5 lo audita a fondo). Anillo con el token
-// `--landing-ring`; `[color:...]` desambigua que es color de outline.
+// Foco visible (auditado en el 16.5): anillo sólido de 2px con el token
+// `--landing-ring` en `:focus-visible` (solo teclado). SIN `outline-none`:
+// en Tailwind v4 `outline-none` pone `--tw-outline-style: none`, y como las
+// utilidades `outline-<n>` resuelven el estilo con `var(--tw-outline-style)`,
+// dejaba el anillo con ancho y color pero `outline-style: none` -> NO se
+// veía (confirmado midiendo `getComputedStyle` durante el foco). Sin esa
+// clase, el estilo queda en `solid` (el default de Tailwind) y el anillo
+// se ve. En reposo / click con mouse no aparece nada (`:focus-visible`, no
+// `:focus`). `[color:...]` desambigua que el valor arbitrario es color de
+// outline.
 const FOCUS =
-  "rounded-[6px] outline-none focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--landing-ring)]";
+  "rounded-[6px] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[color:var(--landing-ring)]";
 
 function PrimaryCta({
   children = "Solicitá una prueba gratuita",
@@ -116,8 +124,16 @@ function PrimaryCta({
 }
 
 function IngresarLink() {
+  // `py-2`: sin padding el link mide ~26px de alto -- pasa el mínimo de
+  // WCAG 2.2 (24px) pero es chico para tap en mobile. Con `py-2` queda
+  // ~42px, cómodo, sin afectar el layout (el header/hero/footer lo
+  // absorben). Paso 16.5.
   return (
-    <a href="/login" style={s.linkStrong} className={`inline-flex ${FOCUS}`}>
+    <a
+      href="/login"
+      style={s.linkStrong}
+      className={`inline-flex py-2 ${FOCUS}`}
+    >
       Ingresar
     </a>
   );
@@ -329,16 +345,18 @@ export function LandingPage() {
               Gestión de consorcios para administradores.
             </p>
           </div>
-          <div className="flex flex-col gap-2 sm:items-end">
+          <div className="flex flex-col gap-1 sm:items-end">
             <IngresarLink />
             <a
               href={CONTACT_MAILTO}
               style={s.linkStrong}
-              className={`inline-flex ${FOCUS}`}
+              className={`inline-flex py-2 ${FOCUS}`}
             >
               {CONTACT_EMAIL}
             </a>
-            <span style={s.small}>© 2026 Consofy</span>
+            <span style={s.small} className="mt-1">
+              © 2026 Consofy
+            </span>
           </div>
         </div>
       </footer>

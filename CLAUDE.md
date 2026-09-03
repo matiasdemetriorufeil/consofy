@@ -8626,11 +8626,10 @@ borró.
   5 `h2`, 8 `h3`, 1 header/main/footer. Los 3 `mailto` idénticos al del
   16.1; los 3 "Ingresar" a `/login`. A 375px `scrollWidth == clientWidth`
   (sin desborde horizontal). Formulario público idéntico (botón teal).
-- **Pendiente menor para el 16.5:** el `<body>` raíz sigue con
-  `bg-canvas`; la landing lo tapa con un contenedor `min-h-dvh` blanco,
-  pero un overscroll (rubber-band) en mobile deja ver el gris del panel un
-  instante. Cae en "Accesibilidad y mobile" (16.5); acotarlo bien pide un
-  `body:has(.landing-theme)` o un route group con layout propio.
+- ~~**Pendiente menor para el 16.5:** el `<body>` raíz sigue con
+  `bg-canvas`; overscroll (rubber-band) en mobile deja ver el gris del
+  panel.~~ **Resuelto en el 16.5** con `body:has(.landing-theme) {
+background-color: #ffffff }` -- ver esa subsección.
 
 ### SEO básico (paso 16.4)
 
@@ -8679,6 +8678,56 @@ existía `sitemap.ts`.
   Verificado: `curl /opengraph-image` -> `200`, `image/png`, **1200×630**;
   el `<head>` de `/` incluye `og:image` y `twitter:image` apuntando al
   mismo `/opengraph-image?<hash>` (URL absoluta vía `metadataBase`).
+
+### Accesibilidad y mobile (paso 16.5) -- cierra la Etapa 16
+
+Metodología del 12.6: axe-core (`node_modules/axe-core/axe.min.js`
+inyectado con Playwright), tags `wcag2a` + `wcag2aa` + `wcag21a` +
+`wcag21aa`, dos viewports (1280×800 y 375×812).
+
+- **axe: 0 violaciones** en los dos viewports (21 passes c/u --
+  `color-contrast`, `link-name`, `list`/`listitem`, `html-has-lang`,
+  `bypass`, `document-title`, etc. -- 0 `incomplete`).
+- **Teclado.** 6 elementos interactivos reales: "Ingresar" del header ->
+  CTA del hero -> "Ingresar" del hero -> CTA del cierre -> "Ingresar" del
+  footer -> mail del footer. El orden de foco == orden visual
+  (top→bottom, y en la fila del hero left→right), sin `tabIndex` en ningún
+  lado. (El único "salto" que marca el script es hacia el `nextjs-portal`
+  del overlay de dev, w=0/h=0, no está en la página real.)
+- **Foco visible -- FIX.** El 16.3 tenía `outline-none` +
+  `focus-visible:outline-2/-offset-2/-[color:var(--landing-ring)]`. Medido:
+  el anillo salía con ancho y color pero `outline-style: none` -> NO se
+  veía. Causa: en Tailwind v4 `outline-none` pone `--tw-outline-style: none`
+  y las utilidades `outline-<n>` resuelven el estilo con
+  `var(--tw-outline-style)`. Fix: **quitar `outline-none`** (el default de
+  `--tw-outline-style` es `solid`); en reposo / click con mouse no aparece
+  nada porque el prefijo es `:focus-visible`, no `:focus`. Confirmado
+  midiendo `getComputedStyle` durante el foco: `outline: rgb(37,99,235)
+solid 2px` (= `--landing-ring`).
+- **Íconos.** Los 8 `<svg>` de `lucide-react` ("Cómo funciona" +
+  "Más que reclamos") ya tenían `aria-hidden="true"`, sin `aria-label`, sin
+  `role`. Son **decorativos** -- el `<h3>` al lado dice lo mismo. Correcto,
+  no se toca (agregar `aria-label` sería redundante).
+- **Mobile 375px.** `scrollWidth == clientWidth` (sin desborde horizontal),
+  reconfirmado tras el 16.4. Targets táctiles: el CTA mide 261×54 (cómodo);
+  los "Ingresar" / mail medían ~26px de alto -- pasan el mínimo de
+  WCAG 2.2 (24px) pero es chico para tap. Se agregó `py-2` a `IngresarLink`
+  y al mail del footer -> ~42px, sin mover el layout. (Fix de comodidad,
+  no de violación.)
+- **Rubber-band (pendiente del 16.3) -- FIX.** `body:has(.landing-theme)
+{ background-color: #ffffff }` en `globals.css` (regla sin `@layer`, gana
+  sobre `body { @apply bg-background }`). `:has()` acota el override a las
+  rutas que montan la landing -- ninguna otra lleva `.landing-theme`, así
+  que `/panel` y `/r/[token]` no se tocan. `#ffffff` literal porque las
+  custom props se declaran EN `.landing-theme`, no en `:root`, y no
+  cascadean hacia el `<body>` ancestro. Confirmado: `body` en `/` pasa de
+  `rgb(243,245,244)` (--canvas) a `rgb(255,255,255)`.
+
+**Para más adelante (fuera de este alcance):** `viewport.themeColor` del
+layout raíz es `#f3f5f4` (canvas del panel) -- en mobile el chrome del
+navegador sobre la landing no matchea (header blanco / hero celeste). Un
+`export const viewport` propio en `page.tsx` lo arreglaría, pero es un
+cambio de color en un archivo compartido -- se deja anotado.
 
 ## Reglas de seguridad (no negociables)
 

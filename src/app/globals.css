@@ -253,6 +253,19 @@
   line-height: var(--landing-leading-normal);
 }
 
+/* Rubber-band en mobile (paso 16.5, pendiente anotado en el 16.3). El
+   `<body>` raíz sigue con `bg-canvas` (panel); la landing lo tapaba con un
+   contenedor `min-h-dvh`, pero un overscroll dejaba ver ese gris por
+   detrás. `:has()` acota el override a las páginas que montan la landing
+   -- ninguna otra ruta lleva `.landing-theme`, así que `/panel` y
+   `/r/[token]` no se tocan. Regla SIN `@layer` -> gana sobre el
+   `body { @apply bg-background }` de `@layer base`. `#ffffff` literal = el
+   valor de `--landing-bg`: las custom props se declaran EN `.landing-theme`,
+   no en `:root`, y no cascadean hacia el ancestro `<body>`. */
+body:has(.landing-theme) {
+  background-color: #ffffff;
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
