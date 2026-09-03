@@ -8589,6 +8589,49 @@ completa. A 1280px y a 375px: sin desbordes, la escala fluida baja de 56 a
 36 en el headline. Fuera del hero todo es blanco/gris con el azul solo
 como acento.
 
+### Construcción (paso 16.3)
+
+`src/app/page.tsx` (thin: `metadata` + `<LandingPage />`) ->
+`src/features/landing/components/landing-page.tsx` (la página, Server
+Component puro -- solo links, sin estado). El placeholder anterior se
+borró.
+
+- **Estilos.** Layout con utilidades de Tailwind (grid/flex/spacing) y los
+  tokens `--landing-*` por `style` inline (mismo patrón que la prueba del
+  16.2). **No se agregó CSS a `globals.css`**: el acotamiento sigue siendo
+  el `.landing-theme` del 16.2, intacto -- la página entera va envuelta en
+  `<div className="landing-theme">`.
+- **Semántica.** Un solo `<h1>` (headline del hero); `<h2>` para las 5
+  secciones (problema, cómo funciona, para quién, más que reclamos, cómo
+  empezar); `<h3>` para los 4 pasos y las 4 features. Landmarks
+  `<header>` / `<main>` / `<footer>`. Cada `<section>` con
+  `aria-labelledby` a su `<h2>`. Foco visible con `outline` del token
+  `--landing-ring` (base -- el 16.5 lo audita a fondo).
+- **Íconos.** `lucide-react` (la librería que ya usa el resto del
+  proyecto, confirmado por inventario -- no se sumó ninguna). Decorativos
+  (`aria-hidden`), el texto lleva el significado. Para "Más que reclamos"
+  se reusan los mismos íconos del nav del panel (Megaphone / CalendarClock
+  / FileText / Bell).
+- **CTA.** `mailto:matiasdemetriorufeil@gmail.com?subject=Quiero%20probar%20Consofy`
+  x3 (hero, cierre, footer); "Ingresar" -> `/login` x3 (header, hero,
+  footer). El "Ingresar" del header no estaba listado en el 16.1 pero es
+  el lugar convencional y el mismo link, no contenido nuevo.
+- **Metadata.** `title.absolute` (para no pasar por el template
+  `%s · Consofy` del layout raíz) + `description` propias de la landing --
+  antes `/` heredaba el texto del panel. Open Graph / sitemap: 16.4.
+- **Verificado** (Playwright, dev server): fuga -- `/panel`, `/login`,
+  `/r/[token]` con `body` en `rgb(243,245,244)` / `rgb(22,24,29)`, 0
+  `.landing-theme`, `--landing-accent` sin resolver; `/` con la landing
+  aplicando `#ffffff` / `#132a53` / `--landing-accent = #2563eb`. 1 `h1`,
+  5 `h2`, 8 `h3`, 1 header/main/footer. Los 3 `mailto` idénticos al del
+  16.1; los 3 "Ingresar" a `/login`. A 375px `scrollWidth == clientWidth`
+  (sin desborde horizontal). Formulario público idéntico (botón teal).
+- **Pendiente menor para el 16.5:** el `<body>` raíz sigue con
+  `bg-canvas`; la landing lo tapa con un contenedor `min-h-dvh` blanco,
+  pero un overscroll (rubber-band) en mobile deja ver el gris del panel un
+  instante. Cae en "Accesibilidad y mobile" (16.5); acotarlo bien pide un
+  `body:has(.landing-theme)` o un route group con layout propio.
+
 ## Reglas de seguridad (no negociables)
 
 - RLS activo en todas las tablas. Ninguna tabla sin políticas.
