@@ -72,6 +72,17 @@ import {
   type PublicFormUnit,
 } from "./unit-combobox";
 
+// Esta pantalla es, por diseño, la única que vive en el celular de un
+// vecino (CLAUDE.md > Qué es este proyecto). Los primitivos de UI del
+// proyecto (Input/Button/SelectTrigger) están calibrados para la densidad
+// del panel -- ~32px de alto (`h-8`), cómodo con mouse, chico para un
+// pulgar. Acá se suben a ~44px con un selector de descendiente sobre el
+// contenedor del formulario, sin tocar los primitivos compartidos ni
+// repetir una clase en cada control. `min-h-*` (no `h-*`) para no pelear
+// con la especificidad de `data-[size=default]:h-8` del SelectTrigger.
+const TOUCH_TARGETS =
+  "[&_[data-slot=input]]:min-h-11 [&_[data-slot=button]]:min-h-11 [&_[data-slot=select-trigger]]:min-h-11";
+
 const DEFAULT_VALUES: PublicTicketFormInput = {
   firstName: "",
   lastName: "",
@@ -806,7 +817,7 @@ export function TicketForm({
   if (sentTicket) {
     return (
       <Card className="w-full">
-        <CardContent className="flex flex-col gap-5">
+        <CardContent className={cn("flex flex-col gap-5", TOUCH_TARGETS)}>
           <div className="flex flex-col items-center gap-2 py-2 text-center">
             <CircleCheck className="text-primary size-10" />
             <h2
@@ -881,7 +892,7 @@ export function TicketForm({
 
   return (
     <Card className="w-full">
-      <CardContent className="flex flex-col gap-5">
+      <CardContent className={cn("flex flex-col gap-5", TOUCH_TARGETS)}>
         <StepProgress step={step} />
         <h2
           ref={stepHeadingRef}
@@ -1130,36 +1141,40 @@ export function TicketForm({
 
             {step === 4 && (
               <>
-                <dl className="text-sm">
-                  <div className="border-border flex justify-between gap-4 border-b py-2">
-                    <dt className="text-ink-muted">Nombre</dt>
-                    <dd className="text-ink text-right">
+                {/* Resumen APILADO (etiqueta chica arriba, valor abajo,
+                    alineado a la izquierda), no dos columnas con el valor a
+                    la derecha: en un celular angosto la versión de dos
+                    columnas comprime valores largos (un depto con torre, una
+                    descripción) contra el borde y se lee mal. Apilado se lee
+                    igual de bien en cualquier ancho. */}
+                <dl className="flex flex-col text-sm">
+                  <div className="border-border flex flex-col gap-0.5 border-b py-2">
+                    <dt className="text-ink-muted text-xs">Nombre</dt>
+                    <dd className="text-ink">
                       {values.firstName} {values.lastName}
                     </dd>
                   </div>
-                  <div className="border-border flex justify-between gap-4 border-b py-2">
-                    <dt className="text-ink-muted">Teléfono</dt>
-                    <dd className="text-ink text-right">{values.phoneE164}</dd>
+                  <div className="border-border flex flex-col gap-0.5 border-b py-2">
+                    <dt className="text-ink-muted text-xs">Teléfono</dt>
+                    <dd className="text-ink">{values.phoneE164}</dd>
                   </div>
-                  <div className="border-border flex justify-between gap-4 border-b py-2">
-                    <dt className="text-ink-muted">Unidad</dt>
-                    <dd className="text-ink text-right">{selectedUnitLabel}</dd>
+                  <div className="border-border flex flex-col gap-0.5 border-b py-2">
+                    <dt className="text-ink-muted text-xs">Unidad</dt>
+                    <dd className="text-ink">{selectedUnitLabel}</dd>
                   </div>
-                  <div className="border-border flex justify-between gap-4 border-b py-2">
-                    <dt className="text-ink-muted">Categoría</dt>
-                    <dd className="text-ink text-right">
-                      {selectedCategory?.name}
-                    </dd>
+                  <div className="border-border flex flex-col gap-0.5 border-b py-2">
+                    <dt className="text-ink-muted text-xs">Categoría</dt>
+                    <dd className="text-ink">{selectedCategory?.name}</dd>
                   </div>
-                  <div className="border-border flex justify-between gap-4 border-b py-2">
-                    <dt className="text-ink-muted">Descripción</dt>
-                    <dd className="text-ink max-w-[65%] text-right whitespace-pre-wrap">
+                  <div className="border-border flex flex-col gap-0.5 border-b py-2">
+                    <dt className="text-ink-muted text-xs">Descripción</dt>
+                    <dd className="text-ink whitespace-pre-wrap">
                       {values.description}
                     </dd>
                   </div>
-                  <div className="flex justify-between gap-4 py-2">
-                    <dt className="text-ink-muted">Adjuntos</dt>
-                    <dd className="text-ink text-right">
+                  <div className="flex flex-col gap-0.5 py-2">
+                    <dt className="text-ink-muted text-xs">Adjuntos</dt>
+                    <dd className="text-ink">
                       {uploadedAttachments.length === 0
                         ? "Ninguno"
                         : uploadedAttachments.length}

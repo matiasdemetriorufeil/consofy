@@ -177,7 +177,11 @@ export function UnitCombobox({
             role="combobox"
             aria-expanded={open}
             aria-invalid={!!error}
-            className="w-full justify-between font-normal"
+            // min-h-11 (~44px) explícito: como <Button> va dentro de
+            // <PopoverTrigger asChild>, el data-slot que queda en el DOM es
+            // "popover-trigger", así que el selector de touch-targets del
+            // formulario (que apunta a [data-slot=button]) no lo alcanza.
+            className="min-h-11 w-full justify-between font-normal"
           >
             <span
               className={cn(
@@ -194,7 +198,7 @@ export function UnitCombobox({
           align="start"
           className="w-(--radix-popover-trigger-width) gap-0 p-0"
         >
-          <div className="flex items-center gap-2 border-b px-2.5 py-2">
+          <div className="flex items-center gap-2 border-b px-2.5 py-2.5">
             <Search className="text-muted-foreground size-4 shrink-0" />
             {/* autoFocus: el popover recién se abre por una acción del
                 vecino (tocar el combo); enfocar la búsqueda ahí mismo
@@ -255,7 +259,7 @@ export function UnitCombobox({
             <button
               type="button"
               onClick={() => applyFreeText(query)}
-              className="hover:bg-accent w-full rounded-md px-2.5 py-2 text-left text-sm"
+              className="hover:bg-accent w-full rounded-md px-2.5 py-2.5 text-left text-sm"
             >
               No encuentro mi unidad
               {query ? ` -- usar "${query}"` : ""}
@@ -298,7 +302,7 @@ function UnitOption({
       aria-selected={selected}
       onClick={() => onSelect(unit)}
       className={cn(
-        "hover:bg-accent flex w-full items-center justify-between gap-2 rounded-md px-2.5 py-2 text-left text-sm",
+        "hover:bg-accent flex w-full items-center justify-between gap-2 rounded-md px-2.5 py-2.5 text-left text-sm",
         selected && "bg-accent",
       )}
     >

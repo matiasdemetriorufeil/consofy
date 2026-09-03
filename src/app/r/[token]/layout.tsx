@@ -16,8 +16,14 @@
 export default function PublicFormLayout({
   children,
 }: LayoutProps<"/r/[token]">) {
+  // En un celular (la superficie por defecto de esta pantalla -- ver
+  // CLAUDE.md > Qué es este proyecto), alinea el contenido ARRIBA con
+  // padding chico: centrarlo verticalmente deja un hueco muerto grande
+  // sobre los pasos cortos (Fotos, confirmación) y hace que los pasos
+  // largos floten raro. Desde `sm` (tablet/desktop) vuelve a centrarse con
+  // más aire, como estaba.
   return (
-    <main className="flex flex-1 items-center justify-center px-4 py-12">
+    <main className="flex flex-1 flex-col items-center justify-start px-4 py-6 sm:justify-center sm:py-12">
       {children}
     </main>
   );

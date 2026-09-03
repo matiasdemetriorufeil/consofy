@@ -38,6 +38,16 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
+  // Zoom deshabilitado en todo el sitio (pedido explícito): el layout ya
+  // está pensado mobile-first y responsive, así que el pinch-to-zoom no
+  // hace falta para usarlo. Nota: iOS Safari IGNORA `userScalable: false`
+  // desde iOS 10 (Apple lo fuerza por accesibilidad), así que en iPhone el
+  // gesto de zoom sigue disponible; `maximumScale`/`minimumScale` sí lo
+  // acota en Android. Es una restricción de accesibilidad (WCAG 1.4.4) --
+  // se aplica porque así se pidió, no porque sea lo recomendado.
+  minimumScale: 1,
+  maximumScale: 1,
+  userScalable: false,
   themeColor: "#f3f5f4",
 };
 

@@ -97,7 +97,7 @@ export default async function PublicBuildingPage({
           ¿Ya cargaste uno?{" "}
           <Link
             href={`/r/${parsedToken.data}/estado`}
-            className="text-primary underline underline-offset-4"
+            className="text-primary inline-block py-1 underline underline-offset-4"
           >
             Consultá su estado
           </Link>
@@ -105,7 +105,7 @@ export default async function PublicBuildingPage({
         <p>
           <Link
             href={`/r/${parsedToken.data}/documentos`}
-            className="text-primary underline underline-offset-4"
+            className="text-primary inline-block py-1 underline underline-offset-4"
           >
             Ver documentos del edificio
           </Link>
