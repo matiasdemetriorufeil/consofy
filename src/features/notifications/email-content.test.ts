@@ -11,7 +11,7 @@ describe("buildUrgentTicketAlertEmail", () => {
       buildingName: "Torre Central",
       ticketTitle: "Pérdida de agua en el subsuelo",
       ticketPublicCode: "TC-2026-0042",
-      ticketUrl: "https://consofy.com.ar/panel/tickets/abc-123",
+      ticketUrl: "https://consorfy.com.ar/panel/tickets/abc-123",
     });
 
     expect(result.subject).toBe("Reclamo urgente en Torre Central");
@@ -19,7 +19,7 @@ describe("buildUrgentTicketAlertEmail", () => {
     expect(result.html).toContain("TC-2026-0042");
     expect(result.html).toContain("Pérdida de agua en el subsuelo");
     expect(result.html).toContain(
-      "https://consofy.com.ar/panel/tickets/abc-123",
+      "https://consorfy.com.ar/panel/tickets/abc-123",
     );
   });
 });
@@ -29,7 +29,7 @@ describe("buildDailySummaryEmail", () => {
     const result = buildDailySummaryEmail({
       organizationName: "Rivadavia Administraciones",
       dateLabel: "27 de agosto de 2026",
-      appUrl: "https://consofy.com.ar",
+      appUrl: "https://consorfy.com.ar",
       newTickets: [],
       urgentUnresolvedTickets: [],
       overdueTickets: [],
@@ -45,7 +45,7 @@ describe("buildDailySummaryEmail", () => {
     const result = buildDailySummaryEmail({
       organizationName: "Rivadavia Administraciones",
       dateLabel: "27 de agosto de 2026",
-      appUrl: "https://consofy.com.ar",
+      appUrl: "https://consorfy.com.ar",
       newTickets: [],
       urgentUnresolvedTickets: [],
       overdueTickets: [],
@@ -65,7 +65,7 @@ describe("buildDailySummaryEmail", () => {
     const result = buildDailySummaryEmail({
       organizationName: "Rivadavia Administraciones",
       dateLabel: "27 de agosto de 2026",
-      appUrl: "https://consofy.com.ar",
+      appUrl: "https://consorfy.com.ar",
       newTickets: [
         {
           id: "11111111-1111-1111-1111-111111111111",
@@ -86,7 +86,7 @@ describe("buildDailySummaryEmail", () => {
     const result = buildDailySummaryEmail({
       organizationName: "Rivadavia Administraciones",
       dateLabel: "27 de agosto de 2026",
-      appUrl: "https://consofy.com.ar",
+      appUrl: "https://consorfy.com.ar",
       newTickets: [
         {
           id: "11111111-1111-1111-1111-111111111111",
@@ -104,7 +104,7 @@ describe("buildDailySummaryEmail", () => {
     expect(result.html).toContain("Pérdida de agua");
     expect(result.html).toContain("Torre Central");
     expect(result.html).toContain(
-      "https://consofy.com.ar/panel/tickets/11111111-1111-1111-1111-111111111111",
+      "https://consorfy.com.ar/panel/tickets/11111111-1111-1111-1111-111111111111",
     );
     expect(result.html).toContain("Reclamos nuevos hoy (1)");
   });
@@ -113,7 +113,7 @@ describe("buildDailySummaryEmail", () => {
     const result = buildDailySummaryEmail({
       organizationName: "Rivadavia Administraciones",
       dateLabel: "27 de agosto de 2026",
-      appUrl: "https://consofy.com.ar",
+      appUrl: "https://consorfy.com.ar",
       newTickets: [],
       urgentUnresolvedTickets: [
         {
@@ -140,7 +140,7 @@ describe("buildDailySummaryEmail", () => {
     const result = buildDailySummaryEmail({
       organizationName: "Rivadavia Administraciones",
       dateLabel: "27 de agosto de 2026",
-      appUrl: "https://consofy.com.ar",
+      appUrl: "https://consorfy.com.ar",
       newTickets: [],
       urgentUnresolvedTickets: [],
       overdueTickets: [
@@ -160,7 +160,7 @@ describe("buildDailySummaryEmail", () => {
     expect(result.html).toContain("EC-2026-0099");
     expect(result.html).toContain("Falta pintura en el hall");
     expect(result.html).toContain(
-      "https://consofy.com.ar/panel/tickets/55555555-5555-5555-5555-555555555555",
+      "https://consorfy.com.ar/panel/tickets/55555555-5555-5555-5555-555555555555",
     );
     // La sección de urgentes sigue en 0 -- las dos listas son
     // independientes, esta función no las mezcla.
@@ -171,7 +171,7 @@ describe("buildDailySummaryEmail", () => {
     const result = buildDailySummaryEmail({
       organizationName: "Rivadavia Administraciones",
       dateLabel: "27 de agosto de 2026",
-      appUrl: "https://consofy.com.ar",
+      appUrl: "https://consorfy.com.ar",
       newTickets: [],
       urgentUnresolvedTickets: [],
       overdueTickets: [],

@@ -52,7 +52,7 @@ describe("formatTicketMessage", () => {
     // TC-2026-0002... y ver fotos ajenas. Este test se rompe si eso pasa.
     const message = formatTicketMessage(baseInput());
     expect(message).toContain(
-      "📷 Adjuntos: https://consofy.app/s/a1111111-1111-1111-1111-111111111111",
+      "📷 Adjuntos: https://consorfy.app/s/a1111111-1111-1111-1111-111111111111",
     );
     expect(message).not.toContain("/s/TC-2026-0025");
   });
@@ -72,10 +72,10 @@ describe("formatTicketMessage", () => {
 
   it("respeta un baseUrl configurado para el link de adjuntos", () => {
     const message = formatTicketMessage(baseInput(), {
-      baseUrl: "https://staging.consofy.app",
+      baseUrl: "https://staging.consorfy.app",
     });
     expect(message).toContain(
-      "📷 Adjuntos: https://staging.consofy.app/s/a1111111-1111-1111-1111-111111111111",
+      "📷 Adjuntos: https://staging.consorfy.app/s/a1111111-1111-1111-1111-111111111111",
     );
   });
 
@@ -225,7 +225,7 @@ describe("formatTicketMessage", () => {
       { maxEncodedLength: 420 },
     );
     expect(message).toContain(
-      "📷 Adjuntos: https://consofy.app/s/a1111111-1111-1111-1111-111111111111",
+      "📷 Adjuntos: https://consorfy.app/s/a1111111-1111-1111-1111-111111111111",
     );
     expect(message).toContain("…");
   });

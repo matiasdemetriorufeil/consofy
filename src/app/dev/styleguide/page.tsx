@@ -191,7 +191,7 @@ export default function StyleguidePage() {
           /dev/styleguide — solo desarrollo
         </Badge>
         <h1 className="text-ink text-3xl font-bold sm:text-4xl">
-          Sistema de diseño de Consofy
+          Sistema de diseño de Consorfy
         </h1>
         <p className="text-ink-muted max-w-2xl text-base">
           Paleta, tipografía y componentes base. Esta ruta no es una pantalla de

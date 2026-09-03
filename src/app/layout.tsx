@@ -28,8 +28,8 @@ const fontMono = IBM_Plex_Mono({
 
 export const metadata: Metadata = {
   title: {
-    default: "Consofy",
-    template: "%s · Consofy",
+    default: "Consorfy",
+    template: "%s · Consorfy",
   },
   description:
     "Gestión de consorcios: reclamos, edificios, comunicados y recordatorios en un solo panel para administradores.",

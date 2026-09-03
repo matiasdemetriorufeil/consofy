@@ -9,7 +9,7 @@ import { getActiveBuildings, type ActiveBuildingOption } from "./queries";
 // esto (src/features/buildings/actions.ts) necesita este nombre, y un
 // archivo "use server" solo puede exportar funciones async -- mismo motivo
 // que separa LoginState de actions.ts en el feature de auth.
-export const SELECTED_BUILDING_COOKIE = "consofy_selected_building";
+export const SELECTED_BUILDING_COOKIE = "consorfy_selected_building";
 
 // Ver CLAUDE.md > Selector de edificio activo sobre por qué cookie y no
 // localStorage/URL/segmento de ruta. Devuelve el valor crudo de la cookie

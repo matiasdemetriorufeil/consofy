@@ -967,7 +967,7 @@ autoguarda nada, borra lo que haya quedado en vez de reescribirlo.
 
 **Reload o "atrás" después de enviar -- no se puede mandar el mismo
 reclamo dos veces:** clave nueva de localStorage, `sentKey(token)`
-(`consofy:reclamo-enviado:<token>`), DISTINTA de la del borrador y
+(`consorfy:reclamo-enviado:<token>`), DISTINTA de la del borrador y
 prioritaria sobre ella en el efecto de hidratación -- si existe, la
 pantalla de confirmación se reconstruye directo desde ahí (mismos datos
 que ya tenía el navegador, sin volver a llamar a `createTicketAction`) y
@@ -1379,7 +1379,7 @@ administración).
 por el formulario público de verdad, con una foto subida de verdad. El
 mensaje de WhatsApp generado contuvo `http://localhost:3000/s/
 83315112-a872-4bee-9c0d-0daa68eccfed` (confirmando que `appBaseUrl` viaja
-correcto de servidor a cliente, no el placeholder `https://consofy.app`).
+correcto de servidor a cliente, no el placeholder `https://consorfy.app`).
 La página resolvió 200, con el edificio/unidad/categoría/vecino/código/
 fecha/descripción correctos y la foto real cargando a sus dimensiones
 reales (`360x640`, verificado esperando `img.complete && img.naturalWidth
@@ -5995,7 +5995,7 @@ resuelto con una pantalla nueva, eso no es parte de este paso).
   mandar nada" como sí lo tenía WhatsApp (`ConsoleProvider`): el dominio
   de prueba de Resend ya cumple ese rol en la práctica (ver más abajo).
 - `resend-provider.ts` -- la única implementación real. Remitente
-  hardcodeado (`Consofy <onboarding@resend.dev>`, dominio de prueba de
+  hardcodeado (`Consorfy <onboarding@resend.dev>`, dominio de prueba de
   Resend, sin dominio propio verificado -- no pedido en este paso); único
   lugar que cambia el día que se verifique un dominio propio.
 - `get-email-provider.ts` -- factory de un solo `case`, mismo motivo que
@@ -8368,7 +8368,7 @@ y `CRON_SECRET`.
 ## Landing page pública (Etapa 16)
 
 Etapa nueva, no estaba en el plan original. Hoy la ruta `/`
-(`src/app/page.tsx`) es un placeholder honesto -- solo el nombre "Consofy"
+(`src/app/page.tsx`) es un placeholder honesto -- solo el nombre "Consorfy"
 y una línea de descripción, con un comentario que dice "se reemplaza por la
 landing real más adelante". La Etapa 16 construye esa landing: una página
 pública que explica qué es el producto, el problema que resuelve, cómo
@@ -8402,7 +8402,7 @@ paso aparte: al ser un `mailto:` simple, se resuelve dentro del 16.3):
 
 Decisiones tomadas (arquitecto + persona): CTA principal y de cierre
 **"Solicitá una prueba gratuita"** ->
-`mailto:matiasdemetriorufeil@gmail.com?subject=Quiero%20probar%20Consofy`;
+`mailto:matiasdemetriorufeil@gmail.com?subject=Quiero%20probar%20Consorfy`;
 CTA secundario **"Ingresar"** -> `/login` (ya existía); sin mención de
 precio más allá de la palabra "prueba" (implica que después hay algo pago,
 sin comprometer un número); sin restricción geográfica en el copy; footer
@@ -8416,11 +8416,11 @@ de funcionalidad real documentada en este archivo.
 **1. Hero**
 
 - Headline: "Los reclamos de tu edificio, en orden y en un solo lugar."
-- Subheadline: "Consofy le da a cada edificio un link para que los vecinos
+- Subheadline: "Consorfy le da a cada edificio un link para que los vecinos
   carguen sus reclamos, y a vos un panel donde ves todo, cambiás estados y
   no se te pierde nada."
 - CTA principal: **Solicitá una prueba gratuita** ->
-  `mailto:matiasdemetriorufeil@gmail.com?subject=Quiero%20probar%20Consofy`
+  `mailto:matiasdemetriorufeil@gmail.com?subject=Quiero%20probar%20Consorfy`
 - CTA secundario: **Ingresar** -> `/login`
 
 **2. El problema**
@@ -8446,20 +8446,20 @@ de funcionalidad real documentada en este archivo.
    aparece en tu panel; y te llega un mail al instante si es urgente, más
    un resumen todos los días."
 4. **Lo gestionás desde el panel.** "Bandeja con filtros y estados,
-   asignación, notas internas y exportación. Consofy marca posibles
+   asignación, notas internas y exportación. Consorfy marca posibles
    reclamos repetidos y te deja agruparlos como un solo problema."
 
 **4. Para quién es**
 
 - Título: "Para administraciones de consorcios."
-- Cuerpo: "Da igual si administrás un edificio o veinte. Consofy
+- Cuerpo: "Da igual si administrás un edificio o veinte. Consorfy
   centraliza los reclamos de todos, con la información de cada edificio,
   sus departamentos y sus vecinos en un mismo lugar. Los vecinos no
   necesitan cuenta: solo el link."
 
 **5. Más que reclamos**
 
-- **Avisos a los vecinos** -- "armás el mensaje una vez y Consofy te arma
+- **Avisos a los vecinos** -- "armás el mensaje una vez y Consorfy te arma
   la lista de destinatarios por edificio o por criterio, con un enlace de
   WhatsApp listo para cada uno."
 - **Recordatorios** -- "vencimientos por edificio (expensas, seguros,
@@ -8471,21 +8471,21 @@ de funcionalidad real documentada en este archivo.
 
 **6. Cómo empezar** (CTA de cierre)
 
-- Título: "Probá Consofy en tu administración."
+- Título: "Probá Consorfy en tu administración."
 - Cuerpo: "Escribinos y coordinamos una prueba: configuramos tu
   administración con tus edificios y te dejamos el sistema andando para
   que lo uses con reclamos reales."
 - CTA: **Solicitá una prueba gratuita** ->
-  `mailto:matiasdemetriorufeil@gmail.com?subject=Quiero%20probar%20Consofy`
+  `mailto:matiasdemetriorufeil@gmail.com?subject=Quiero%20probar%20Consorfy`
 
 **7. Footer**
 
-- Wordmark "Consofy" + tagline "Gestión de consorcios para
+- Wordmark "Consorfy" + tagline "Gestión de consorcios para
   administradores."
 - **Ingresar** -> `/login`.
 - Contacto: `matiasdemetriorufeil@gmail.com` (mismo `mailto:` con asunto
-  "Quiero probar Consofy").
-- "© 2026 Consofy". Sin links a Términos ni Privacidad -- no existen
+  "Quiero probar Consorfy").
+- "© 2026 Consorfy". Sin links a Términos ni Privacidad -- no existen
   todavía, no se inventan.
 
 **No afirmar** (para que el 16.3 no sobre-prometa): sin prueba social ni
@@ -8612,12 +8612,12 @@ borró.
   (`aria-hidden`), el texto lleva el significado. Para "Más que reclamos"
   se reusan los mismos íconos del nav del panel (Megaphone / CalendarClock
   / FileText / Bell).
-- **CTA.** `mailto:matiasdemetriorufeil@gmail.com?subject=Quiero%20probar%20Consofy`
+- **CTA.** `mailto:matiasdemetriorufeil@gmail.com?subject=Quiero%20probar%20Consorfy`
   x3 (hero, cierre, footer); "Ingresar" -> `/login` x3 (header, hero,
   footer). El "Ingresar" del header no estaba listado en el 16.1 pero es
   el lugar convencional y el mismo link, no contenido nuevo.
 - **Metadata.** `title.absolute` (para no pasar por el template
-  `%s · Consofy` del layout raíz) + `description` propias de la landing --
+  `%s · Consorfy` del layout raíz) + `description` propias de la landing --
   antes `/` heredaba el texto del panel. Open Graph / sitemap: 16.4.
 - **Verificado** (Playwright, dev server): fuga -- `/panel`, `/login`,
   `/r/[token]` con `body` en `rgb(243,245,244)` / `rgb(22,24,29)`, 0
@@ -8645,7 +8645,7 @@ existía `sitemap.ts`.
   (misma var que `public-link.ts`, paso 4.6 -- el dominio NUNCA se
   hardcodea; en dev es `http://localhost:3000`, en prod lo que tenga
   Vercel), `alternates.canonical: "/"`, `openGraph` completo
-  (`title` / `description` / `url: "/"` / `siteName: "Consofy"` /
+  (`title` / `description` / `url: "/"` / `siteName: "Consorfy"` /
   `type: "website"` / `locale: "es_AR"`), y `twitter`
   (`card: "summary_large_image"` + `title` + `description`).
   `title`/`description` reales de la landing, compartidos entre
@@ -8665,7 +8665,7 @@ existía `sitemap.ts`.
 - **`src/app/opengraph-image.tsx`** (nuevo) -- decisión del arquitecto:
   Opción 1, card generado con `next/og`, sin subir ningún asset. 1200×630,
   fondo `--landing-hero-bg` (#eaf1ff), barra de acento `--landing-accent`
-  (#2563eb), wordmark "Consofy" + headline completo + tagline en
+  (#2563eb), wordmark "Consorfy" + headline completo + tagline en
   `--landing-text` / `--landing-text-muted` -- **los mismos hex del 16.2**
   (Satori no resuelve `var(--...)`). Tipografía: la sans por defecto de
   Satori (no se empaqueta ningún `.ttf`; renderizarlo en Archivo sería un

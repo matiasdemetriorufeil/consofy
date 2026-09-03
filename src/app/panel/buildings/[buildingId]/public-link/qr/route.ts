@@ -38,7 +38,7 @@ export async function GET(
   return new NextResponse(new Uint8Array(png), {
     headers: {
       "Content-Type": "image/png",
-      "Content-Disposition": `attachment; filename="consofy-qr-${building.slug}.png"`,
+      "Content-Disposition": `attachment; filename="consorfy-qr-${building.slug}.png"`,
       "Cache-Control": "no-store",
     },
   });

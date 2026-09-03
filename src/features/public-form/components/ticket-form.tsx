@@ -88,7 +88,7 @@ const DEFAULT_VALUES: PublicTicketFormInput = {
 // el borrador. Ver el comentario largo más abajo sobre qué se guarda y qué
 // no.
 function draftKey(token: string): string {
-  return `consofy:reclamo-borrador:${token}`;
+  return `consorfy:reclamo-borrador:${token}`;
 }
 
 // Paso 5.8: registro del ÚLTIMO reclamo que este dispositivo mandó para
@@ -105,7 +105,7 @@ function draftKey(token: string): string {
 // "Cargar otro reclamo" (ver startNewTicket), una acción explícita que
 // borra esta clave a propósito.
 function sentKey(token: string): string {
-  return `consofy:reclamo-enviado:${token}`;
+  return `consorfy:reclamo-enviado:${token}`;
 }
 
 // Todo lo que formatTicketMessage necesita para reconstruir el mensaje

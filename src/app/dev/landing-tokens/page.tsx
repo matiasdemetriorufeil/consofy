@@ -121,7 +121,7 @@ const TYPE_SPECIMENS: {
     weightVar: "--landing-weight-regular",
     leadingVar: "--landing-leading-normal",
     sample:
-      "Consofy le da a cada edificio un link para que los vecinos carguen sus reclamos, y a vos un panel donde ves todo.",
+      "Consorfy le da a cada edificio un link para que los vecinos carguen sus reclamos, y a vos un panel donde ves todo.",
   },
   {
     token: "--landing-text-body",
@@ -130,7 +130,7 @@ const TYPE_SPECIMENS: {
     weightVar: "--landing-weight-regular",
     leadingVar: "--landing-leading-normal",
     sample:
-      "Bandeja con filtros y estados, asignación, notas internas y exportación. Consofy marca posibles reclamos repetidos y te deja agruparlos.",
+      "Bandeja con filtros y estados, asignación, notas internas y exportación. Consorfy marca posibles reclamos repetidos y te deja agruparlos.",
   },
   {
     token: "--landing-text-small",
@@ -138,7 +138,7 @@ const TYPE_SPECIMENS: {
     fontVar: "--landing-font-body",
     weightVar: "--landing-weight-regular",
     leadingVar: "--landing-leading-normal",
-    sample: "© 2026 Consofy. Gestión de consorcios para administradores.",
+    sample: "© 2026 Consorfy. Gestión de consorcios para administradores.",
   },
 ];
 
@@ -164,7 +164,7 @@ export default function LandingTokensPreviewPage() {
               marginBottom: "0.75rem",
             }}
           >
-            Consofy
+            Consorfy
           </p>
           <h1
             style={{
@@ -190,7 +190,7 @@ export default function LandingTokensPreviewPage() {
               maxWidth: "40rem",
             }}
           >
-            Consofy le da a cada edificio un link para que los vecinos carguen
+            Consorfy le da a cada edificio un link para que los vecinos carguen
             sus reclamos, y a vos un panel donde ves todo, cambiás estados y no
             se te pierde nada.
           </p>
@@ -465,7 +465,7 @@ export default function LandingTokensPreviewPage() {
             color: "var(--landing-text-muted)",
           }}
         >
-          © 2026 Consofy. Gestión de consorcios para administradores.
+          © 2026 Consorfy. Gestión de consorcios para administradores.
         </div>
       </footer>
     </div>

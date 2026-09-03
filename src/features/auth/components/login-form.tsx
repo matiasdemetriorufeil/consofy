@@ -65,7 +65,7 @@ export function LoginForm({ next }: { next?: string }) {
   return (
     <Card className="w-full max-w-sm">
       <CardHeader>
-        <CardTitle className="text-center text-xl">Consofy</CardTitle>
+        <CardTitle className="text-center text-xl">Consorfy</CardTitle>
       </CardHeader>
       <CardContent>
         <form

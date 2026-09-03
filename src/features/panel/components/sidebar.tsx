@@ -9,7 +9,7 @@ export function Sidebar() {
   return (
     <div className="border-border bg-surface fixed inset-y-0 left-0 z-30 hidden w-60 flex-col border-r px-3 py-4 md:flex">
       <div className="text-ink font-display px-3 pb-4 text-lg font-bold">
-        Consofy
+        Consorfy
       </div>
       <PanelNav />
     </div>

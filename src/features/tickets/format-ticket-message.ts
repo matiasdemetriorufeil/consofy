@@ -66,7 +66,7 @@ export const ATTACHMENTS_ROUTE_PREFIX = "/s";
 // esta app, ya usada para el mismo propósito en
 // `getBuildingPublicUrl`/`/r/[token]`, paso 4.6), así que este valor nunca
 // termina en un link real -- ver el paso 5.10 para el cableado completo.
-export const DEFAULT_ATTACHMENTS_BASE_URL = "https://consofy.app";
+export const DEFAULT_ATTACHMENTS_BASE_URL = "https://consorfy.app";
 
 // --- Límite seguro, medido, no estimado (ver el reporte del paso 5.6) ---
 //

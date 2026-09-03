@@ -48,7 +48,7 @@ function renderEmailLayout(bodyHtml: string): string {
     <div style="padding:24px 16px;">
       <div style="max-width:480px;margin:0 auto;background-color:${COLOR_SURFACE};border:1px solid ${COLOR_BORDER};border-radius:8px;overflow:hidden;">
         <div style="background-color:${COLOR_PRIMARY};padding:16px 24px;">
-          <span style="font-family:${FONT_DISPLAY};font-size:18px;font-weight:700;color:#ffffff;">Consofy</span>
+          <span style="font-family:${FONT_DISPLAY};font-size:18px;font-weight:700;color:#ffffff;">Consorfy</span>
         </div>
         <div style="padding:24px;">
           ${bodyHtml}

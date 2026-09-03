@@ -1,4 +1,4 @@
-# Consofy
+# Consorfy
 
 Plataforma web de gestión de consorcios para administradores de edificios. Tiene dos
 superficies: un formulario público donde los vecinos cargan reclamos sin necesidad de
@@ -40,8 +40,8 @@ comunicados, recordatorios y documentos.
 ### 1. Clonar e instalar
 
 ```bash
-git clone https://github.com/matiasdemetriorufeil/consofy.git
-cd consofy
+git clone https://github.com/matiasdemetriorufeil/consorfy.git
+cd consorfy
 npm install
 ```
 

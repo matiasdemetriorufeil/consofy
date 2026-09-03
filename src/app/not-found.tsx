@@ -10,7 +10,7 @@ export default function NotFound() {
         Esta página no existe
       </h1>
       <p className="text-ink-muted max-w-sm text-base">
-        La dirección no corresponde a ninguna sección de Consofy.
+        La dirección no corresponde a ninguna sección de Consorfy.
       </p>
       <Button asChild className="mt-2">
         <Link href="/">Volver al inicio</Link>

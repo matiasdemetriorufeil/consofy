@@ -28,7 +28,7 @@ import type { CSSProperties, ReactNode } from "react";
 // (la librería que ya usa el resto del proyecto).
 
 const CONTACT_MAILTO =
-  "mailto:matiasdemetriorufeil@gmail.com?subject=Quiero%20probar%20Consofy";
+  "mailto:matiasdemetriorufeil@gmail.com?subject=Quiero%20probar%20Consorfy";
 const CONTACT_EMAIL = "matiasdemetriorufeil@gmail.com";
 
 const s = {
@@ -160,7 +160,7 @@ const STEPS: Item[] = [
   {
     icon: LayoutDashboard,
     title: "Lo gestionás desde el panel",
-    body: "Bandeja con filtros y estados, asignación, notas internas y exportación. Consofy marca posibles reclamos repetidos y te deja agruparlos como un solo problema.",
+    body: "Bandeja con filtros y estados, asignación, notas internas y exportación. Consorfy marca posibles reclamos repetidos y te deja agruparlos como un solo problema.",
   },
 ];
 
@@ -168,7 +168,7 @@ const FEATURES: Item[] = [
   {
     icon: Megaphone,
     title: "Avisos a los vecinos",
-    body: "Armás el mensaje una vez y Consofy te arma la lista de destinatarios por edificio o por criterio, con un enlace de WhatsApp listo para cada uno.",
+    body: "Armás el mensaje una vez y Consorfy te arma la lista de destinatarios por edificio o por criterio, con un enlace de WhatsApp listo para cada uno.",
   },
   {
     icon: CalendarClock,
@@ -209,7 +209,7 @@ export function LandingPage() {
     <div className="landing-theme flex min-h-dvh flex-col">
       <header className="border-b" style={s.border}>
         <div className="mx-auto flex w-full max-w-5xl items-center justify-between gap-4 px-6 py-4">
-          <span style={s.wordmark}>Consofy</span>
+          <span style={s.wordmark}>Consorfy</span>
           <IngresarLink />
         </div>
       </header>
@@ -223,7 +223,7 @@ export function LandingPage() {
                 Los reclamos de tu edificio, en orden y en un solo lugar.
               </h1>
               <p style={s.lead} className="mt-4 max-w-2xl">
-                Consofy le da a cada edificio un link para que los vecinos
+                Consorfy le da a cada edificio un link para que los vecinos
                 carguen sus reclamos, y a vos un panel donde ves todo, cambiás
                 estados y no se te pierde nada.
               </p>
@@ -288,8 +288,8 @@ export function LandingPage() {
             Para administraciones de consorcios.
           </h2>
           <p style={s.lead} className="mt-4 max-w-2xl">
-            Da igual si administrás un edificio o veinte. Consofy centraliza los
-            reclamos de todos, con la información de cada edificio, sus
+            Da igual si administrás un edificio o veinte. Consorfy centraliza
+            los reclamos de todos, con la información de cada edificio, sus
             departamentos y sus vecinos en un mismo lugar. Los vecinos no
             necesitan cuenta: solo el link.
           </p>
@@ -323,7 +323,7 @@ export function LandingPage() {
           className="mx-auto w-full max-w-5xl px-6 py-16"
         >
           <h2 id="landing-empezar" style={s.h2}>
-            Probá Consofy en tu administración.
+            Probá Consorfy en tu administración.
           </h2>
           <p style={s.body} className="mt-4 max-w-2xl">
             Escribinos y coordinamos una prueba: configuramos tu administración
@@ -340,7 +340,7 @@ export function LandingPage() {
       <footer className="border-t" style={s.border}>
         <div className="mx-auto flex w-full max-w-5xl flex-col gap-6 px-6 py-10 sm:flex-row sm:items-start sm:justify-between">
           <div>
-            <span style={s.wordmark}>Consofy</span>
+            <span style={s.wordmark}>Consorfy</span>
             <p style={s.small} className="mt-1">
               Gestión de consorcios para administradores.
             </p>
@@ -355,7 +355,7 @@ export function LandingPage() {
               {CONTACT_EMAIL}
             </a>
             <span style={s.small} className="mt-1">
-              © 2026 Consofy
+              © 2026 Consorfy
             </span>
           </div>
         </div>

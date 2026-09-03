@@ -18,7 +18,7 @@ export function getBuildingPublicUrl(publicToken: string): string {
 // por MessagingProvider (ver CLAUDE.md > Reglas de WhatsApp): esa interfaz
 // existe para los mensajes que la propia app arma y abre (el reclamo del
 // vecino hacia el administrador), no para un texto que el administrador
-// copia y pega a mano en una pantalla de configuración ajena a Consofy --
+// copia y pega a mano en una pantalla de configuración ajena a Consorfy --
 // acá no hay ningún wa.me ni ningún envío real de por medio.
 export function buildWhatsappAutoReplyMessage(
   buildingName: string,

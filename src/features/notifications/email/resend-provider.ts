@@ -19,7 +19,7 @@ import type {
 // mirando el dashboard/logs de Resend, no una casilla real (ver el
 // reporte). El día que se verifique un dominio propio, este es el único
 // lugar que cambia -- ningún caller de sendAdminEmail() se entera.
-const FROM_ADDRESS = "Consofy <onboarding@resend.dev>";
+const FROM_ADDRESS = "Consorfy <onboarding@resend.dev>";
 
 let client: Resend | null = null;
 function getClient(): Resend {

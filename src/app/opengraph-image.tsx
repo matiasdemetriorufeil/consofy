@@ -20,7 +20,7 @@ import { ImageResponse } from "next/og";
 // follow-up chico si se quiere, no cambia la estructura de este card.
 
 export const alt =
-  "Consofy -- gestión de reclamos para administraciones de consorcios";
+  "Consorfy -- gestión de reclamos para administraciones de consorcios";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
@@ -60,7 +60,7 @@ export default function OpengraphImage() {
             letterSpacing: -0.5,
           }}
         >
-          Consofy
+          Consorfy
         </div>
 
         <div

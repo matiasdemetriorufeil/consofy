@@ -49,7 +49,7 @@ export function MobileNavDrawer() {
       </SheetTrigger>
       <SheetContent side="left" className="w-72">
         <SheetHeader>
-          <SheetTitle>Consofy</SheetTitle>
+          <SheetTitle>Consorfy</SheetTitle>
         </SheetHeader>
         <div className="px-4 pb-4">
           <PanelNav onNavigate={() => setOpen(false)} />

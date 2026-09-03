@@ -8,8 +8,8 @@ import { env } from "@/lib/env";
 // indexabilidad (robots) y el sitemap viven en src/app/robots.ts y
 // src/app/sitemap.ts.
 //
-// - `title.absolute`: no pasa por el template `%s · Consofy` del layout
-//   raíz (quedaría "... · Consofy · Consofy").
+// - `title.absolute`: no pasa por el template `%s · Consorfy` del layout
+//   raíz (quedaría "... · Consorfy · Consorfy").
 // - `metadataBase` desde NEXT_PUBLIC_APP_URL (misma var que public-link.ts,
 //   paso 4.6) -- NO se hardcodea el dominio. En dev http://localhost:3000;
 //   en prod, lo que tenga Vercel. Resuelve `canonical` y `og:url` de abajo,
@@ -20,9 +20,9 @@ import { env } from "@/lib/env";
 //   (convención de Next, decisión del arquitecto: next/og). No hace falta
 //   declararlo acá -- Next lo detecta y arma las dos etiquetas. Solo se
 //   agrega `twitter` (card + title + description) reusando las constantes.
-const TITLE = "Consofy -- los reclamos de tu edificio en un solo lugar";
+const TITLE = "Consorfy -- los reclamos de tu edificio en un solo lugar";
 const DESCRIPTION =
-  "Consofy le da a cada edificio un link para que los vecinos carguen sus reclamos, y a la administración un panel donde ve todo, cambia estados y no se pierde nada.";
+  "Consorfy le da a cada edificio un link para que los vecinos carguen sus reclamos, y a la administración un panel donde ve todo, cambia estados y no se pierde nada.";
 
 export const metadata: Metadata = {
   metadataBase: new URL(env.NEXT_PUBLIC_APP_URL),
@@ -33,7 +33,7 @@ export const metadata: Metadata = {
     title: TITLE,
     description: DESCRIPTION,
     url: "/",
-    siteName: "Consofy",
+    siteName: "Consorfy",
     type: "website",
     locale: "es_AR",
   },
