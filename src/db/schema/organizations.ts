@@ -1,4 +1,4 @@
-import { date, pgTable, text } from "drizzle-orm/pg-core";
+import { date, pgTable, text, uuid } from "drizzle-orm/pg-core";
 
 import { denyAnonAuthenticated, idColumn, timestamps } from "./_shared";
 
@@ -8,6 +8,21 @@ export const organizations = pgTable(
     id: idColumn(),
     name: text("name").notNull(),
     timezone: text("timezone").notNull().default("America/Argentina/Cordoba"),
+    // Identificador que viaja en la URL pública `/o/[token]` (paso 17.1):
+    // la página intermedia que le muestra a un vecino los edificios de esta
+    // organización para que elija el suyo, cuando le escribió al
+    // administrador por WhatsApp (un solo número para varios edificios) y
+    // todavía no tiene el link de su edificio. MISMO mecanismo que
+    // `buildings.public_token` (paso 4.6, ver ese comentario en
+    // src/db/schema/buildings.ts): uuid aleatorio, no adivinable ni
+    // secuencial, rotable sin tocar la identidad interna de la fila ni las
+    // FKs que la referencian. `.unique()` TOTAL, no parcial: un token de
+    // URL pública no se reutiliza aunque algún día la organización se
+    // archive -- mismo criterio que el de buildings (ver CLAUDE.md >
+    // Acceso a datos). Se resuelve server-only en
+    // getOrganizationByPublicToken (src/features/public-form/queries.ts),
+    // igual que getBuildingByPublicToken.
+    publicToken: uuid("public_token").notNull().defaultRandom().unique(),
     // Paso 9.6 -- idempotencia del resumen diario por email: fecha CIVIL
     // (columna `date`, no `timestamptz` -- mismo criterio que
     // `reminders.due_date`, es "qué día fue", no un instante) en la zona

@@ -1,0 +1,2 @@
+ALTER TABLE "organizations" ADD COLUMN "public_token" uuid DEFAULT gen_random_uuid() NOT NULL;--> statement-breakpoint
+ALTER TABLE "organizations" ADD CONSTRAINT "organizations_public_token_unique" UNIQUE("public_token");

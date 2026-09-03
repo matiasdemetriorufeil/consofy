@@ -81,6 +81,91 @@ export const getBuildingByPublicToken = cache(
   },
 );
 
+export type PublicOrganization = {
+  id: string;
+  name: string;
+};
+
+// Resuelve la organización detrás del token público de `/o/[token]` (paso
+// 17.1) -- MISMO patrón que getBuildingByPublicToken de arriba: el token es
+// la ÚNICA credencial, no hay ningún `organizationId` que un caller pueda
+// pasar, porque el único dato que trae un vecino sin sesión es el token de
+// la URL. `organizations.public_token` es único de forma GLOBAL (ver
+// src/db/schema/organizations.ts, mismo criterio que
+// `buildings.public_token`), así que basta para resolver la fila sin
+// ambigüedad. Un token de EDIFICIO pasado por error a esta ruta no matchea
+// ninguna fila acá -> `null`, y la page cae en el mismo `notFound()`
+// ambiguo que `/r/[token]` y `/s/[token]`.
+//
+// Filtra `deleted_at IS NULL` en la query misma, no en el caller -- mismo
+// motivo que getBuildingByPublicToken: que el propio `null` que devuelve
+// esta función no distinga "no existe" de "se archivó" hace
+// estructuralmente imposible filtrar ese detalle por error más arriba. Hoy
+// no hay flujo que archive una organización (single-tenant), pero el
+// filtro va igual, por consistencia con el resto de la superficie pública.
+//
+// cache() de React: mismo criterio que getBuildingByPublicToken -- la page
+// de `/o/[token]` la llama una vez, pero cachear ahora evita un
+// round-trip de más si un layout o un paso futuro reusa esta función en la
+// misma request.
+export const getOrganizationByPublicToken = cache(
+  async function getOrganizationByPublicToken(
+    token: string,
+  ): Promise<PublicOrganization | null> {
+    const [row] = await db
+      .select({ id: organizations.id, name: organizations.name })
+      .from(organizations)
+      .where(
+        and(
+          eq(organizations.publicToken, token),
+          isNull(organizations.deletedAt),
+        ),
+      );
+
+    return row ?? null;
+  },
+);
+
+export type PublicOrganizationBuilding = {
+  name: string;
+  publicToken: string;
+};
+
+// Edificios que la página `/o/[token]` (paso 17.1) le ofrece al vecino para
+// elegir el suyo. MISMO filtro que getActiveBuildings() (CLAUDE.md >
+// Acceso a datos, "selectores que alimentan una carga NUEVA"):
+// `active = true AND deleted_at IS NULL` -- un edificio pausado o dado de
+// baja no es un destino válido para un reclamo NUEVO, que es lo único que
+// esta página inicia.
+//
+// Función aparte de getActiveBuildings() (src/features/buildings/
+// queries.ts) en vez de sumarle una columna: aquella alimenta el selector
+// de edificio del header del panel, que no necesita `public_token` --
+// mismo criterio que ya separa BuildingEditableFields de
+// BuildingDetailFields en ese archivo. Acá se devuelve `public_token`
+// porque es lo que arma el link a `/r/[token]` de cada edificio; NO se
+// devuelve `id` (la página no lo usa).
+//
+// `organizationId` primero, obligatorio, sin default -- igual que el resto
+// de las queries por organización. El caller (la page) lo pasa ya resuelto
+// por getOrganizationByPublicToken en la misma request; esta función nunca
+// resuelve su propia autorización.
+export async function getActiveBuildingsForOrganization(
+  organizationId: string,
+): Promise<PublicOrganizationBuilding[]> {
+  return db
+    .select({ name: buildings.name, publicToken: buildings.publicToken })
+    .from(buildings)
+    .where(
+      and(
+        eq(buildings.organizationId, organizationId),
+        eq(buildings.active, true),
+        isNull(buildings.deletedAt),
+      ),
+    )
+    .orderBy(asc(buildings.name));
+}
+
 export type PublicFormCategory = {
   id: string;
   name: string;
